@@ -396,8 +396,15 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 	// Ensure identity is FQDN
 	mp.Identity = dns.Fqdn(mp.Identity)
 
-	// Determine if agent identity zone is an auto zone or a config-defined zone
-	isAutoZone := !slices.Contains(all_zones, mp.Identity)
+	// Determine if agent identity zone is an auto zone or a config-defined zone.
+	// The identity is folded at config load (#287); a config-defined zone is
+	// named as the config writes it, and Zones has it under that name.
+	identityZone := mp.Identity
+	i := slices.IndexFunc(all_zones, func(z string) bool { return sameName(z, mp.Identity) })
+	isAutoZone := i < 0
+	if !isAutoZone {
+		identityZone = all_zones[i]
+	}
 	var autoZd *tdns.ZoneData
 	var autoTx tdns.TxID
 
@@ -451,9 +458,8 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 			return fmt.Errorf("SetupAgent: failed to parse certificate: %v", err)
 		}
 
-		certCN := strings.TrimSuffix(cert.Subject.CommonName, ".")
-		agentID := strings.TrimSuffix(mp.Identity, ".")
-		if certCN != agentID {
+		// The identity is folded at config load; the CN is as issued.
+		if !sameName(cert.Subject.CommonName, mp.Identity) {
 			return fmt.Errorf("SetupAgent: certificate CN %q does not match agent identity %q",
 				cert.Subject.CommonName, mp.Identity)
 		}
@@ -486,10 +492,14 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 		// hello gate opens from the last of its first-load callbacks, below:
 		// after the zone is served and its records are queued, which is the
 		// best this path knows; whether they are published yet it cannot tell.
-		zdp, ok := Zones.Get(mp.Identity)
+		zdp, ok := Zones.Get(identityZone)
 		if !ok {
-			return fmt.Errorf("SetupAgent: config zone %q not found in Zones", mp.Identity)
+			return fmt.Errorf("SetupAgent: config zone %q not found in Zones", identityZone)
 		}
+		// Only the zone this daemon builds becomes a parentsync child
+		// (SetupAgentAutoZone). One from the config does not, and an operator
+		// who configured parentsync: is told so here, once, at the start.
+		conf.warnConfigIdentityZoneNotSynced(zdp.ZoneData)
 		if wantApi {
 			zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *tdns.ZoneData) {
 				if err := conf.publishApiTransport(zd); err != nil {
@@ -536,7 +546,7 @@ func AgentSig0KeyPrep(zd *tdns.ZoneData, ps tdns.ParentSyncConf, hdb *HsyncDB) e
 // may reach its parent through the UPDATE scheme, and so needs its SIG(0) key.
 func identityZoneUsesUpdate(zd *tdns.ZoneData, schemes []string) bool {
 	return zd.Options[tdns.OptParentSync] && slices.ContainsFunc(schemes, func(s string) bool {
-		return strings.EqualFold(s, "update")
+		return strings.EqualFold(s, "update") // not-a-name: a mode keyword
 	})
 }
 
@@ -698,6 +708,33 @@ func hostPrefix(addr string) string {
 func (conf *Config) identityZoneParentSync() bool {
 	imrActive := conf.Config.Imr.Active == nil || *conf.Config.Imr.Active
 	return len(conf.Config.ParentSync.Schemes) > 0 && imrActive
+}
+
+// configIdentityZoneNotSynced is what the operator is told about an identity
+// zone that is listed in the config while a parentsync: block is configured:
+// what is not done for it, what that costs, and the two ways out.
+const configIdentityZoneNotSynced = "identity zone is listed in the config, so parentsync does not apply to it: " +
+	"no CDS is published, no DS is sent to the parent and the delegation is not synced. " +
+	"Without a DS at the parent a validating peer does not trust the zone's TLSA. " +
+	"Leave the zone out of the config so that the daemon builds it, or install its DS at the parent by hand"
+
+// warnConfigIdentityZoneNotSynced warns that a config-listed identity zone is
+// not a parentsync child, when one the daemon builds would have been
+// (identityZoneParentSync). The daemon-built zone is the only supported path
+// for the identity zone's parent sync (tdns-mp #73): the config-listed zone
+// gets none of it, and until now nothing said so. The daemon keeps running;
+// the zone still serves its transport records.
+//
+// The warning goes to the log only, once, at the start. It is not put on the
+// zone as a ConfigWarning: tdns refuses a manual serial bump for a zone with
+// any entry in its error list, and clears a config-listed zone's list at the
+// next parse of the configuration, so the entry would change what the
+// operator can do with the zone and then vanish at a reload.
+func (conf *Config) warnConfigIdentityZoneNotSynced(zd *tdns.ZoneData) {
+	if !conf.identityZoneParentSync() {
+		return
+	}
+	lgAgent.Warn(configIdentityZoneNotSynced, "zone", zd.ZoneName)
 }
 
 // identitySyncPace is how syncIdentityDelegation paces its asks, and how

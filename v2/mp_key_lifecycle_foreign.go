@@ -60,6 +60,10 @@ func (e *KeyLifecycleEngine) ForeignWord(zone string, keys []core.ForeignKeyStat
 		return false
 	}
 	if l == nil {
+		if e.isIdle(zone) {
+			lgSigner.Info("key lifecycle: the other providers' key states for a zone this provider does not sign; taken, nothing to apply them to", "zone", zone)
+			return true
+		}
 		lgSigner.Warn("key lifecycle: the other providers' key states dropped, the zone's driver is not running; the agent sends them again with the next inventory", "zone", zone)
 		return true
 	}
@@ -157,14 +161,15 @@ func (l *ZoneKeyLifecycle) SetForeignWord(keys []core.ForeignKeyState, spoken []
 // providers' word arrives, on every tick (a row appears when the zone
 // with the provider's DNSKEY has been transferred, which may be after
 // the word), on Reload, and when the signers change (a provider that
-// stops signing: ds=0, E10).
+// stops signing: ds=0, E10): the providers whose KSKs have a DS
+// (Wire.DSSigners), which a hand-over to the signer changes (plan S11).
 func (l *ZoneKeyLifecycle) applyForeignLocked() error {
 	inv, err := tdns.GetKeyInventory(l.KDB, l.Zone)
 	if err != nil {
 		return fmt.Errorf("inventory of %s: %w", l.Zone, err)
 	}
 	signers := map[string]bool{}
-	for _, p := range l.Wire.OtherSigners(l.Zone) {
+	for _, p := range l.Wire.DSSigners(l.Zone) {
 		signers[p] = true
 	}
 	changed := false

@@ -316,7 +316,7 @@ func TestPreRefreshReadersSeeTheIncomingZone(t *testing.T) {
 	}}})
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{
 		Hdr:  dns.RR_Header{Name: zone, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
-		Data: &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: []string{"alice"}}}},
+		Data: numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: []string{"alice"}}}}),
 	}}})
 	incoming.Data.Set(zone, apex)
 	if incoming.HasPublishedData() {

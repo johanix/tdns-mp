@@ -37,7 +37,7 @@ func ValidateMPConfig(mp *MultiProviderConf) error {
 	if err := ValidateAgentSupportedMechanisms(mp); err != nil {
 		return err
 	}
-	if err := ValidateCombinerAgents(mp); err != nil {
+	if err := ValidatePartAgents(mp); err != nil {
 		return err
 	}
 	if err := ValidateCryptoFiles(mp); err != nil {
@@ -52,19 +52,19 @@ func ValidateMPConfig(mp *MultiProviderConf) error {
 	return nil
 }
 
-// ValidateCombinerAgents refuses an empty entry in multi-provider.agents,
-// which the checks after it and the role's start would read, and a
-// multi-provider combiner with more than one agent: the combiner acts by
-// what its agent hands it (plan S10, 7.3 item 5), so it must be clear whose
+// ValidatePartAgents refuses an empty entry in multi-provider.agents, which
+// the checks after it and the role's start would read, and a multi-provider
+// combiner or signer with more than one agent: each acts by what its agent
+// hands it (plan S10 and S11, 7.3 item 5), so it must be clear whose
 // hand-over counts. It runs before the checks that read the entries.
-func ValidateCombinerAgents(mp *MultiProviderConf) error {
+func ValidatePartAgents(mp *MultiProviderConf) error {
 	for i, a := range mp.Agents {
 		if a == nil {
 			return fmt.Errorf("multi-provider.agents[%d] is empty", i)
 		}
 	}
-	if mp.Role == "combiner" && len(mp.Agents) > 1 {
-		return fmt.Errorf("a multi-provider combiner has more than one agent (multi-provider.agents lists %d)", len(mp.Agents))
+	if (mp.Role == "combiner" || mp.Role == "signer") && len(mp.Agents) > 1 {
+		return fmt.Errorf("a multi-provider %s has more than one agent (multi-provider.agents lists %d)", mp.Role, len(mp.Agents))
 	}
 	return nil
 }
@@ -151,7 +151,7 @@ func ValidateAgentSupportedMechanisms(mp *MultiProviderConf) error {
 	seen := make(map[string]bool)
 
 	for i, m := range mechanisms {
-		m = strings.ToLower(strings.TrimSpace(m))
+		m = strings.ToLower(strings.TrimSpace(m)) // not-a-name: a transport mechanism
 		if m == "" {
 			return fmt.Errorf("agent.supported_mechanisms: empty entry at index %d", i)
 		}

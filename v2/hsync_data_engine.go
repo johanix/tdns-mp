@@ -136,7 +136,7 @@ func (e *HsyncDataEngine) handleStatusUpdate(ctx context.Context, statusMsg *Sta
 			return
 		}
 		lgEngine.Info("the combiner waits for the zone's hand-over: handing it again", "combiner", statusMsg.SenderID, "zone", statusMsg.Zone)
-		e.conf.InternalMp.Handover.combinerWaits(statusMsg.Zone)
+		e.conf.InternalMp.Handover.again(statusMsg.Zone)
 	}
 }
 

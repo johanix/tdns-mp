@@ -6,7 +6,6 @@
 package tdnsmp
 
 import (
-	"bytes"
 	"io"
 	"log"
 	"log/slog"
@@ -38,7 +37,7 @@ func acRecords(gamma, param string) []string {
 		out = append(out, `3600 IN HSYNC3 `+gamma+` gamma `+acGamma+` .`)
 	}
 	if param != "" {
-		out = append(out, `3600 IN HSYNCPARAM `+param)
+		out = append(out, `3600 IN HSYNCPARAM `+numberedText(param))
 	}
 	return out
 }
@@ -86,14 +85,13 @@ func zoneCopy(t *testing.T, name string, records ...string) *tdns.ZoneData {
 	return zd
 }
 
-// captureZonesLog collects what the zones logger says during the test.
-func captureZonesLog(t *testing.T) *bytes.Buffer {
+// captureZonesLog collects what the zones logger says during the test. The
+// buffer is locked: a goroutine an earlier test left may write to it (#276).
+func captureZonesLog(t *testing.T) *lockedBuffer {
 	t.Helper()
-	var buf bytes.Buffer
-	saved := lg
-	lg = slog.New(slog.NewJSONHandler(&buf, nil))
-	t.Cleanup(func() { lg = saved })
-	return &buf
+	buf := &lockedBuffer{}
+	logTo(t, lg, slog.NewJSONHandler(buf, nil))
+	return buf
 }
 
 func changedBetween(t *testing.T, name string, before, after []string) bool {
@@ -193,7 +191,7 @@ func TestTheHookRunsAtEveryFirstLoad(t *testing.T) {
 func TestUntilEnforcedEveryCopyIsActedOn(t *testing.T) {
 	asMPAgent(t)
 	for _, c := range []struct{ name, before, after, ownerError string }{
-		{"serial0", `servers="alpha,beta"`, `servers="alpha,beta" parentsync="agent"`, "serial 0 with two digests"},
+		{"serial0", `serial="0" servers="alpha,beta"`, `serial="0" servers="alpha,beta" parentsync="agent"`, "serial 0 with two digests"},
 		{"conflict", `serial="7" servers="alpha,beta"`, `serial="7" servers="alpha,beta" parentsync="agent"`, "serial 7 with two digests"},
 		{"lower", `serial="7" servers="alpha,beta"`, `serial="6" servers="alpha,beta" parentsync="agent"`, ""},
 	} {
@@ -326,32 +324,6 @@ func TestABrokenCopyAfterTheEndOfServiceKeepsNoInstructions(t *testing.T) {
 	}
 }
 
-// One identity under a signer's label and an auditor's that sorts first (an
-// owner error): its DNSKEYs are taken, and its label is the signer's.
-func TestAnIdentityUnderTwoLabelsIsTakenByItsRole(t *testing.T) {
-	records := append(acRecords("", `serial="7" servers="alpha,beta" signers="alpha" auditors="aaa"`), `3600 IN HSYNC3 ON aaa `+acAlpha+` .`)
-	mpzd := instrTestZone(t, "twolabels.access.example.", records...)
-	if refused, why := mpzd.checkDNSKEYPolicy(acAlpha); refused {
-		t.Errorf("checkDNSKEYPolicy refused alpha, a signer also under aaa: %s", why)
-	}
-	if label, ok := mpzd.labelOf(acAlpha); !ok || label != "alpha" {
-		t.Errorf("labelOf(%s) = %q, %v; want the signer's alpha", acAlpha, label, ok)
-	}
-	if refused, _ := mpzd.checkDNSKEYPolicy(acBeta); !refused {
-		t.Error("checkDNSKEYPolicy took beta's DNSKEY, a server only")
-	}
-}
-
-// An identity under an auditor's label and a server's label alike (an owner
-// error) is a provider, whichever label sorts first.
-func TestAnIdentityThatAlsoServesIsNoAuditor(t *testing.T) {
-	records := append(acRecords("", `serial="7" servers="alpha,beta" auditors="aaa"`), `3600 IN HSYNC3 ON aaa `+acBeta+` .`)
-	mpzd := instrTestZone(t, "auditorserves.access.example.", records...)
-	if mpzd.IsAuditorIdentity(acBeta) {
-		t.Errorf("%s serves as beta and is found as the auditor aaa", acBeta)
-	}
-}
-
 func TestARestartWithAStoredSerialHasGroupsAndPeersAfterTheFirstLoad(t *testing.T) {
 	saved := tdns.Globals.App.Type
 	tdns.Globals.App.Type = AppTypeMPAuditor
@@ -480,18 +452,6 @@ func TestPeerRoleFiresForAProviderThatEntersAList(t *testing.T) {
 	}
 }
 
-// Without HSYNCPARAM every ON record votes: a provider whose record enters
-// is a new voter, and is asked as peer-role, as before S3.
-func TestPeerRoleFiresForANewRecordWithoutHSYNCPARAM(t *testing.T) {
-	from := readOf(t, acRecords("", "")...)
-	to := readOf(t, acRecords("ON", "")...)
-	a := &ZoneRefreshAnalysis{}
-	catchUpReasons(a, from, to, acAlpha, true)
-	if !slices.Equal(a.NewVoters, []AgentId{acGamma}) {
-		t.Errorf("new voters %v, want gamma, whose ON record entered a zone without HSYNCPARAM", a.NewVoters)
-	}
-}
-
 func TestZoneChangedRunsAtAnActiveChange(t *testing.T) {
 	asMPAgent(t)
 	logs := captureZonesLog(t)
@@ -579,7 +539,6 @@ func TestRolesFromTheReadingAgreeWithTodaysFlags(t *testing.T) {
 		{"auditor", `servers="beta" auditors="alpha"`, false, false, false},
 		{"no role", `servers="beta" signers="beta"`, false, false, false},
 		{"unsigned", `servers="alpha,beta"`, true, false, true},
-		{"no HSYNCPARAM", ``, true, false, true}, // legacy: every ON record votes
 	} {
 		in := readOf(t, acRecords("", c.param)...)
 		r := rolesFor(in, in, 0)
@@ -714,8 +673,32 @@ func TestACopyWithoutAReadingKeepsTheLastOne(t *testing.T) {
 	noReading.Delete(instrZone)
 }
 
+// At a first load, a copy with no reading gives the zone no instructions:
+// no roles, no members, and the zone is not multi-provider here, until a
+// copy that reads (#308).
+func TestAFirstCopyWithoutASerialGivesTheZoneNoInstructions(t *testing.T) {
+	mpzd := instrTestZone(t, "noserial.access.example.",
+		`3600 IN HSYNC3 ON alpha `+acAlpha+` .`, `3600 IN HSYNCPARAM servers="alpha"`)
+	t.Cleanup(func() { lastGood.Delete(mpzd.ZoneName); noReading.Delete(mpzd.ZoneName) })
+	zone := ZoneName(mpzd.ZoneName)
+	if in := instructionsFor(zone); in != nil {
+		t.Fatalf("a first copy without serial= reads as %+v", in)
+	}
+	if r := rolesForZone(zone); len(r.Servers) != 0 || len(r.Signing) != 0 {
+		t.Errorf("roles %+v, want none", r)
+	}
+	mpzd.populateMPdata(&MultiProviderConf{Role: "agent", Identity: acAlpha}, nil)
+	if mpzd.MP.MPdata != nil {
+		t.Errorf("the zone is multi-provider here without a reading: %+v", mpzd.MP.MPdata)
+	}
+	setApex(t, mpzd, core.TypeHSYNCPARAM, `3600 IN HSYNCPARAM servers="alpha" serial="1"`)
+	if in := instructionsFor(zone); in == nil || in.Serial != 1 || !slices.Equal(in.Servers, []string{"alpha"}) {
+		t.Errorf("the first copy with serial= reads as %+v", in)
+	}
+}
+
 func TestLabelsAreResolvedThroughTheReading(t *testing.T) {
-	in := readOf(t, `3600 IN HSYNC3 ON alpha AGENT.Alpha.Example. .`, `3600 IN HSYNC3 OFF gamma `+acGamma+` .`, `3600 IN HSYNCPARAM servers="alpha"`)
+	in := readOf(t, `3600 IN HSYNC3 ON alpha AGENT.Alpha.Example. .`, `3600 IN HSYNC3 OFF gamma `+acGamma+` .`, `3600 IN HSYNCPARAM servers="alpha" serial="1"`)
 	if label, ok := in.labelOf("agent.alpha.example"); !ok || label != "alpha" {
 		t.Errorf("alpha's identity in another case and without the dot: %q %v", label, ok)
 	}

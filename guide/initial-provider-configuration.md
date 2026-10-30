@@ -428,6 +428,12 @@ refuses a validity at or below 2 × (largest served TTL +
 production use days rather than hours, with a propagation
 delay that matches your secondaries.
 
+`agents:` lists exactly one agent, the provider's own, as for
+the combiner. The signer signs by the zone's instructions as
+that agent hands them to it, not by its own copy of the zone,
+and it refuses to start with more than one agent ("a
+multi-provider signer has more than one agent").
+
 ### 4.4 Agent Configuration
 
 `/etc/tdns/tdns-mpagent.yaml`:
@@ -532,6 +538,17 @@ binds. The `api` block's listener always starts; with
 `publish` empty and no `api` in `supported_mechanisms` it
 is not advertised. The `dnssec:` policy signs the agent's
 identity zone.
+
+With the `parentsync:` block (and `imrengine` active) the
+agent also publishes the CDS of the identity zone it
+builds and sends its DS to the parent; the auditor does
+the same. An identity zone listed under `zones:` gets
+none of that (no CDS, no DS sent, no delegation sync),
+which the daemon says in a warning in its log at start:
+a validating peer does not trust that
+zone's TLSA without a DS, so leave the zone out of
+`zones:` and let the daemon build it, or install its DS
+at the parent by hand.
 
 `kasp.propagation-delay` has a second use on the agent. It
 is this provider's word on how long a change needs to

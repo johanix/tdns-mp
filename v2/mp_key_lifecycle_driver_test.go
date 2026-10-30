@@ -56,6 +56,7 @@ func (w *fakeWire) OtherSigners(zone string) []string {
 	defer w.mu.Unlock()
 	return append([]string(nil), w.signers...)
 }
+func (w *fakeWire) DSSigners(zone string) []string { return w.OtherSigners(zone) }
 func (w *fakeWire) Distribute(zone string, keyid uint16) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -736,4 +737,27 @@ func countOf(s []uint16, v uint16) int {
 		}
 	}
 	return n
+}
+
+// Expects says the distributions follow the set only once SignersChanged
+// succeeded: one that could not read the keys leaves it false, so the
+// resume after a pause tries again (cubic on tdns-mp #299).
+func TestDriverExpectsTheSignersOnlyOnceTheyAreFollowed(t *testing.T) {
+	r := newDriverRig(t, "expects.owned.example.", driverPolicy, "p2")
+	r.tick("mint")
+	r.wire.mu.Lock()
+	r.wire.signers = []string{"p2", "p3"}
+	r.wire.mu.Unlock()
+	if r.l.Expects([]string{"p2", "p3"}) {
+		t.Fatal("the driver expects a joiner before SignersChanged")
+	}
+	if err := r.kdb.DB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.l.SignersChanged(); err == nil {
+		t.Fatal("SignersChanged read the keys of a closed database")
+	}
+	if r.l.Expects([]string{"p2", "p3"}) {
+		t.Error("a SignersChanged that failed says the distributions follow the set")
+	}
 }

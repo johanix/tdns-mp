@@ -1264,9 +1264,7 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 				continue
 			}
 			if isProvider {
-				lowerOwner := strings.ToLower(rr.Header().Name)
-				lowerZone := strings.ToLower(zonename)
-				if lowerOwner != lowerZone && !strings.HasSuffix(lowerOwner, "."+lowerZone) {
+				if !dns.IsSubDomain(zonename, rr.Header().Name) {
 					rejectedItems = append(rejectedItems, RejectedItem{
 						Record: rrStr,
 						Reason: fmt.Sprintf("owner %q is not within zone %q", rr.Header().Name, zonename),
@@ -1274,7 +1272,7 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 					parseOk = false
 					continue
 				}
-			} else if !strings.EqualFold(rr.Header().Name, zonename) {
+			} else if !sameName(rr.Header().Name, zonename) {
 				rejectedItems = append(rejectedItems, RejectedItem{
 					Record: rrStr,
 					Reason: fmt.Sprintf("owner %q is not at zone apex %q", rr.Header().Name, zonename),
@@ -1753,8 +1751,7 @@ func (mpzd *MPZoneData) checkDNSKEYPolicy(senderID string) (bool, string) {
 		return true, "DNSKEY not allowed in unsigned zone (no signers in HSYNCPARAM)"
 	}
 	// A signer by the set, which names each provider by label and identity:
-	// the sender is one when its identity is a signer's, whatever other
-	// label the same identity is under.
+	// the sender is one when its identity is a signer's.
 	if slices.ContainsFunc(signers, func(p Provider) bool { return core.EqualNames(p.Identity, dns.Fqdn(senderID)) }) {
 		return false, ""
 	}
@@ -1841,10 +1838,8 @@ func checkNSNamespacePolicy(rr dns.RR, protectedNamespaces []string) string {
 		return ""
 	}
 
-	target := strings.ToLower(nsRR.Ns)
 	for _, ns := range protectedNamespaces {
-		ns = strings.ToLower(ns)
-		if strings.HasSuffix(target, "."+ns) || target == ns {
+		if dns.IsSubDomain(ns, nsRR.Ns) {
 			return fmt.Sprintf("NS target %s intrudes on protected namespace %s",
 				nsRR.Ns, ns)
 		}

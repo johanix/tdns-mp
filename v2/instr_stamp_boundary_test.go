@@ -9,6 +9,7 @@ package tdnsmp
 import (
 	"encoding/json"
 	"net"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -104,7 +105,7 @@ func TestTransportBoundary_StampsInBeatsOverBothMechanisms(t *testing.T) {
 				t.Fatalf("the answer's gossip: %v", err)
 			}
 			i := slices.IndexFunc(inAnswer, func(g GossipMessage) bool { return g.GroupHash == stampGroupHash })
-			if i < 0 || inAnswer[i].Members[bob] == nil || inAnswer[i].Members[bob].Instr[zone] != answer {
+			if i < 0 || inAnswer[i].Members[bob] == nil || !reflect.DeepEqual(inAnswer[i].Members[bob].Instr[zone], answer) {
 				t.Fatalf("the answer does not carry bob's stamp of the zone: %s", resp.Gossip)
 			}
 			if _, ok := recvWithin(env.Bob.MsgQs.Beat, integTestTimeout); !ok {
