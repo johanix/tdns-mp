@@ -1167,7 +1167,8 @@ The membership plan's step 10 (#158), under this design.
     - F2, fixed: populateMPdata's fourth guard gives a member with no role no edits, in an unsigned zone too.
     - N2, done: `zoneListsAgent` is gone, and so is `keyHandOverOnly`'s case for an RFI. Only an agent this agent asked is let in for the key alone, and an RFI from it is refused.
     - N1: an agent asked already that enters `servers=` or `signers=` at an activation is not asked again with peer-role. That is S18a's.
-    - The review's revision (09:21Z) dropped F1 and F2; they are kept here, as the code shows them. Its first nit is taken: a first load's start, noted for want of provider data, is kept over a later refresh's join. Its second (an observer waits for the lease it noted, also when a third agent leads meanwhile) asks nothing.
+    - The review was revised twice. The 09:21Z revision dropped F1 and F2. The 09:28Z one has them as must-fix, with `zoneListsAgent`, so F1, F2 and N2 stand as done above.
+    - From the 09:21Z revision, its first nit is taken: a first load's start, noted for want of provider data, is kept over a later refresh's join. Its second nit asks nothing: an observer waits for the lease it noted, also when a third agent leads meanwhile.
 
 ### S16. The leader's withdrawal
 
