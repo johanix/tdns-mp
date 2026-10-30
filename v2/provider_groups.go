@@ -311,13 +311,8 @@ func zoneTakesKey(zone ZoneName, key *dns.KEY) bool {
 	}
 }
 
-// zoneListsAgent: the zone's active instructions have an ON record for the
-// agent, with a role or without.
-func zoneListsAgent(zone ZoneName, id AgentId) bool {
-	return listsAgent(instructionsFor(zone), id)
-}
-
-// listsAgent is zoneListsAgent for a caller that holds the instructions.
+// listsAgent: the instructions have an ON record for the agent, with a role
+// or without.
 func listsAgent(in *Instructions, id AgentId) bool {
 	_, ok := in.labelOf(string(id))
 	return ok

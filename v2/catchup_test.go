@@ -1215,6 +1215,8 @@ func TestAskUnaskedAsksWithTheReasonTheRefreshCouldNotAskWith(t *testing.T) {
 	}{
 		{"the first load of a zone the agent started with", &ZoneRefreshAnalysis{FirstLoad: true}, catchUpStart},
 		{"a standing that rose later", &ZoneRefreshAnalysis{StandingBefore: standingNone, StandingAfter: standingNoRole}, catchUpJoin},
+		// a first load's start, and a refresh before the data comes
+		{"a first load then a rise", &ZoneRefreshAnalysis{FirstLoad: true}, catchUpStart},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			zone := "reason." + strings.ReplaceAll(tc.name, " ", "-") + ".example."
@@ -1228,6 +1230,9 @@ func TestAskUnaskedAsksWithTheReasonTheRefreshCouldNotAskWith(t *testing.T) {
 			mpzd.MP.MPdata = nil
 			mpzd.Unlock()
 			r.t.afterRefresh(ZoneName(zone), tc.a)
+			if strings.HasSuffix(tc.name, "then a rise") {
+				r.t.afterRefresh(ZoneName(zone), &ZoneRefreshAnalysis{StandingBefore: standingNone, StandingAfter: standingNoRole})
+			}
 			mpzd.Lock()
 			mpzd.MP.MPdata = data
 			mpzd.Unlock()
