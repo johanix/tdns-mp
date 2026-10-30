@@ -318,20 +318,22 @@ func recordsNotIn(a, b []InstrRecord) []InstrRecord {
 var instrStore atomic.Pointer[InstructionStore]
 
 // instructionsFor is the zone's instructions as this daemon acts on them:
-// on the agent and the auditor, the store's active reading once the store
-// enforces it (S7); on the combiner and the signer, until S10 and S11, the
-// reading of their own copy. A zone the store does not have, or does not
-// enforce yet, is read from its copy. Nil for a zone with no instructions,
-// or not loaded here.
+// on the agent and the auditor, the store's active reading, and while the
+// store knows no active serial for the zone its newest serial, for talking
+// (design 3.4, S9: the zone is frozen meanwhile); on the combiner and the
+// signer, what their agent handed them. A zone the store does not have is
+// read from its copy. Nil for a zone with no instructions, or not loaded
+// here.
 func instructionsFor(zone ZoneName) *Instructions {
 	return activeOr(string(zone), zoneApex(zone))
 }
 
 // activeOr is instructionsFor for a caller that holds the served apex of
-// the zone already: the store's active reading; on the combiner and the
-// signer, what its agent handed it (plan S10, S11); or the reading of apex.
+// the zone already: the store's active reading, or its newest with no
+// active serial known; on the combiner and the signer, what its agent
+// handed it (plan S10, S11); or the reading of apex.
 func activeOr(zone string, apex *tdns.OwnerData) *Instructions {
-	if in := instrStore.Load().activeReading(dns.Fqdn(zone)); in != nil {
+	if in := instrStore.Load().reading(dns.Fqdn(zone)); in != nil {
 		return in
 	}
 	if in := actingHeld.Load().reading(dns.Fqdn(zone)); in != nil {

@@ -44,17 +44,19 @@ const (
 )
 
 // receiptOf is rule 6 for a distribution made under made, at an agent
-// whose active serial is active (nil: not known). One whose sender tells
-// no active serial (made nil) is taken as before. One made under the
-// active serial with another digest is kept: the two tell an owner error
-// (rule 2), which holds the zone until a higher serial, and that refuses
-// it.
+// whose active serial is active (nil: not known). While this agent knows no
+// active serial every distribution is kept, catch-up answers included
+// (design 3.4, plan S9); one whose sender tells no active serial (made nil)
+// is taken at its release, by the serial known then, as it is taken when
+// one is known. One made under the active serial with another digest is
+// kept: the two tell an owner error (rule 2), which holds the zone until a
+// higher serial, and that refuses it.
 func receiptOf(active, made *SerialDigest) receipt {
 	switch {
-	case made == nil:
-		return receiptTake
 	case active == nil:
 		return receiptKeep
+	case made == nil:
+		return receiptTake
 	case *made == *active:
 		return receiptTake
 	case CompareSerial(made.Serial, active.Serial) < 0:
@@ -126,7 +128,10 @@ func (conf *Config) instrReceive(u *SynchedDataUpdate, msgQs *MsgQs) bool {
 
 // keptText is the PENDING of a kept distribution (P2 carries it).
 func keptText(active, made *SerialDigest) string {
-	if active == nil {
+	switch {
+	case active == nil && made == nil:
+		return fmt.Sprintf("%s this agent does not know its active serial yet, nor did the sender tell one", keptPrefix)
+	case active == nil:
 		return fmt.Sprintf("%s this agent does not know its active serial yet, the message was made under %d", keptPrefix, made.Serial)
 	}
 	return fmt.Sprintf("%s this agent acts by serial %d, the message was made under %d", keptPrefix, active.Serial, made.Serial)
@@ -153,9 +158,14 @@ func (conf *Config) keepRemote(u *SynchedDataUpdate, active, made *SerialDigest,
 		respond(u, &AgentMsgResponse{Zone: u.Zone, AgentId: u.AgentId, Error: true, ErrorMsg: "the distribution could not be kept: " + err.Error()})
 		return
 	}
+	if u.CatchUp != nil {
+		// a catch-up answer kept is not handled yet: its request's answer
+		// time stops until the active serial is known (plan S9)
+		conf.InternalMp.CatchUp.Arrived(u.Zone, u.AgentId, u.CatchUp)
+	}
 	if added {
 		lgEngine.Info("a distribution made under newer instructions is kept", "zone", u.Zone, "peer", u.AgentId, "distrib", u.OriginatingDistID,
-			"made_under", made.Serial, "active", activeName(active))
+			"made_under", activeName(made), "active", activeName(active))
 	} else {
 		lgEngine.Debug("a resend of a kept distribution is kept once", "zone", u.Zone, "peer", u.AgentId, "distrib", u.OriginatingDistID)
 	}

@@ -114,8 +114,7 @@ func newFreezeRig(t *testing.T, zone string) *freezeRig {
 	r.load()
 	r.n = freezeAt(t, 41, "n", "a,b", "")
 	r.v = freezeAt(t, 42, "v", "a,b", "")
-	r.store.Note(zone, r.n, nil)
-	enforced(t, r.store, zone)
+	knownAs(t, r.store, zone, r.n) // the zone steady at 41, with no freeze on the way
 	return r
 }
 
@@ -298,26 +297,26 @@ func TestAZoneIsFrozenWhileItAgreesReconcilesOrHoldsAnOwnerError(t *testing.T) {
 	}
 }
 
-// A record kept before S7, whose active serial is not enforced, freezes
-// nothing: it followed the copy, and its owner error is shown and not
-// enforced. From S7 the next copy noted enforces it, and the owner error
-// holds the zone.
-func TestNothingIsFrozenUntilTheActiveSerialIsEnforced(t *testing.T) {
+// A zone whose active serial is not known is frozen, with its owner error;
+// made known, the owner error alone holds it (plan S9).
+func TestAZoneIsFrozenUntilItsActiveSerialIsKnown(t *testing.T) {
 	s := newStore(t)
 	eight := at(t, 8, "beta")
+	s.Note(storeZone, eight, nil)
+	if why := s.frozen(storeZone); len(why) != 1 || why[0] != "the active serial is not known" {
+		t.Errorf("a zone with no active serial known: frozen %v", why)
+	}
 	if err := s.update(storeZone, func(z *zoneSerials) error {
-		z.Active = &heldSerial{SerialDigest: sd(eight), Reading: eight, Since: time.Now()}
 		z.ownerError(storeZone, "serial 8 with two digests")
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if why := s.frozen(storeZone); len(why) != 0 {
-		t.Errorf("a zone whose active serial is not enforced is frozen: %v", why)
+	if err := s.Know(storeZone, sd(eight), nil); err != nil {
+		t.Fatal(err)
 	}
-	s.Note(storeZone, eight, nil)
-	if why := s.frozen(storeZone); len(why) == 0 {
-		t.Error("the owner error holds nothing once the record is enforced")
+	if why := s.frozen(storeZone); len(why) != 1 || !strings.HasPrefix(why[0], "owner error") {
+		t.Errorf("once known: frozen %v, want the owner error alone", why)
 	}
 }
 

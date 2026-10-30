@@ -6,8 +6,8 @@
  * nothing new starts for the zone: this provider's own changes are owed
  * (instr_kept.go), the leader sends nothing new to the parent, and the
  * signer starts no new rollover. Work under way finishes by the active
- * serial. The step is dormant until the thaw enforces the active serial
- * (S7): until then it follows the copy, and nothing is frozen.
+ * serial. A zone whose active serial this agent does not know yet is frozen
+ * too, until the restart rule makes it known (S9).
  */
 package tdnsmp
 
@@ -26,20 +26,18 @@ import (
 
 // freezeReasons are why the zone is frozen: an owner error holds it (design
 // 3.6); its transition is not done (3.3); or it agrees on a serial above
-// its active one (3.1, decision 94). A refused newest serial with none
-// agreed on is no reason: the zone is steady (3.6). A newer serial during
-// the reconciliation waits for "done", and is no reason of its own. None
-// while the active serial is not enforced (S7): it follows the copy. S9
-// adds that the active serial is not known.
+// its active one (3.1, decision 94); or this agent does not know its active
+// serial yet (3.4, S9). A refused newest serial with none agreed on is no
+// reason: the zone is steady (3.6). A newer serial during the
+// reconciliation waits for "done", and is no reason of its own.
 func (z *zoneSerials) freezeReasons() []string {
-	if !z.Enforced {
-		return nil
-	}
 	var why []string
 	if z.OwnerError != "" {
 		why = append(why, "owner error: "+z.OwnerError)
 	}
 	switch {
+	case z.Active == nil:
+		why = append(why, "the active serial is not known")
 	case z.From != nil:
 		why = append(why, fmt.Sprintf("reconciling from %d to %d", z.From.Serial, z.Active.Serial))
 	case len(z.Removals) > 0:

@@ -150,13 +150,17 @@ func (mpzd *MPZoneData) actingSets() Roles {
 // zone's signing set, signers= with the providers leaving it (#275): so the
 // other providers' combiners keep a leaving signer's DNSKEYs and CDS while
 // it signs on, until the owner removes its HSYNC3 record. Nil for a zone
-// that is not loaded here or not multi-provider; one with no records for a
-// zone whose instructions are gone (the end of multi-provider service).
+// that is not loaded here or not multi-provider, and for one whose active
+// serial this agent does not know (S9); one with no records for a zone
+// whose instructions are gone (the end of multi-provider service).
 func (conf *Config) wantedHandover(zone string) *ActingHandover {
 	zone = dns.Fqdn(zone)
 	mpzd, ok := Zones.Get(zone)
 	if !ok || mpzd == nil || !mpzd.Options[tdns.OptMultiProvider] || !mpzd.Ready {
 		return nil
+	}
+	if conf.InternalMp.Instructions.activeUnknown(zone) {
+		return nil // nothing new until the active serial is known (design 3.3, 3.4)
 	}
 	h := &ActingHandover{Zone: zone, Phase: PhaseSteady, Made: time.Now()}
 	in := mpzd.instructions()
@@ -608,6 +612,39 @@ func (t *handoverTracker) letHoldGo(zone string) {
 	t.send(send)
 }
 
+// holdLast: this agent knows no active serial for the zone, so it hands
+// its parts nothing new (design 3.3, 3.4), and nothing new starts at its
+// signer either (the project owner, 2026-10-29): the signer is handed what
+// it holds, or failing that what this agent last wanted it to hold, with
+// the hold set and its sets as they are. Nothing when neither carries
+// instructions: a signer that holds nothing acts by nothing (rule 5), and
+// its inventory says what it holds when it has something (learned).
+func (t *handoverTracker) holdLast(zone string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	z := t.zone(zone)
+	base := z.held
+	if base == nil {
+		base = z.want
+	}
+	if base == nil || len(base.Records) == 0 {
+		t.mu.Unlock()
+		return
+	}
+	h := *base
+	h.Sets.Hold = true
+	if h.sameAs(z.want) {
+		t.mu.Unlock()
+		return
+	}
+	z.want = &h
+	send := t.dueLocked(z, false)
+	t.mu.Unlock()
+	t.send(send)
+}
+
 // holdHeld: the part holds what is wanted for the zone, and that carries
 // the hold.
 func (t *handoverTracker) holdHeld(zone string) bool {
@@ -712,6 +749,10 @@ func (conf *Config) handOverToParts(zone string) {
 	}
 	h := conf.wantedHandover(zone)
 	t.handOver(h)
+	if h == nil && conf.InternalMp.Instructions.activeUnknown(zone) {
+		ts.holdLast(zone)
+		return
+	}
 	ts.handOver(h)
 }
 
