@@ -329,3 +329,25 @@ func TestEveryAgentsStatusShowsWhetherAMemberHasCaughtUp(t *testing.T) {
 		t.Error("the stamp or the status row does not say caught up")
 	}
 }
+
+// A put-back's replace wins over the leader's withdrawal by the serial each
+// was sent under, whatever the clocks (S16's order, design 5.2): the
+// withdrawal made under 42, the put-back under 43 with an earlier clock.
+func TestAPutBackWinsOverTheLeadersWithdrawalBySerial(t *testing.T) {
+	zdr, err := NewZoneDataRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	under := func(serial uint32) *MsgStamp {
+		return &MsgStamp{InstrStamp: InstrStamp{Known: true, Active: serial, ActiveDigest: "d"}}
+	}
+	now := time.Now()
+	withdrawal := &SynchedDataUpdate{Zone: "order.serving.example.", AgentId: srNewcomer, OriginatingTime: now, OriginatingDistID: "w1", OriginatingInstr: under(42)}
+	putBack := &SynchedDataUpdate{Zone: "order.serving.example.", AgentId: srNewcomer, OriginatingTime: now.Add(-time.Minute), OriginatingDistID: "p1", OriginatingInstr: under(43)}
+	if older, _ := zdr.noteReplaceOrigin(withdrawal, dns.TypeNS); older {
+		t.Fatal("the withdrawal is older than nothing")
+	}
+	if older, _ := zdr.noteReplaceOrigin(putBack, dns.TypeNS); older {
+		t.Error("the put-back under 43 is taken as older than the withdrawal under 42")
+	}
+}

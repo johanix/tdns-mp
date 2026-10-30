@@ -1202,6 +1202,9 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 		case "inject-replace":
 			conf.debugInjectReplace(r.Context(), mp, amp, &resp)
 
+		case "withdraw":
+			conf.debugWithdraw(&amp, &resp)
+
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Unknown debug command: %q", amp.Command)

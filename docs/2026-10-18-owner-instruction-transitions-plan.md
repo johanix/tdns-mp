@@ -206,10 +206,10 @@ The sizes are estimates from reading the code, tests apart: files touched, and l
 | S13 | Steps reach the parts; the DS set follows the step | S12 (#208 done) | 11 | 305 | 130 | **Built** (2026-10-30), on S12 (#327, head `b1fb2cd`): its pull request carries this cell. 20 files of Go; about 135 new lines and 600 removed, #275's interim with its keystore table and the key machines' pause among them; tests 9 files, about 420 new and 700 removed. Every reader takes the step's sets per purpose; the steps that take a leaving provider out of each set are the removal's runner's (S17b) |
 | S14 | The zone's SIG(0) key: what membership step 7b leaves | S8, S9 (membership 4–7b done) | 7 | 120 | 45 | **Built** (2026-10-29), tdns-mp #326, stacked on S9 (#322); S8 comes through S9: its pull request carries this cell. Fixes tdns-mp #206 |
 | S15 | The switch: every HSYNC3 provider is a member | S12, S14 | 10 | 140 | 165 | **Built** (2026-10-30), on S14 (#326, head `8fda286`) with S12 (#327, head `c59833d`) merged in: its pull request carries this cell. 34 files of Go, about 640 new lines with their comments and 250 changed; tests about 940 new and 220 changed. Catch-up asks from a member with no role; the key's gate keeps the answer of an agent asked that is no member |
-| S16 | The leader's withdrawal | S8, S10, S15 | 12 | 265 | 125 | Not started |
+| S16 | The leader's withdrawal | S8, S10, S15 | 12 | 265 | 125 | **Built** (2026-10-30), on S15 (#338, head `2b48ac4`): its pull request carries this cell. 20 files of Go; about 470 new lines with their comments and 50 changed; tests about 620. The fleet check is with S17b's |
 | S17a | The leader's roll of the zone's SIG(0) key | S7, S14, S16 | 8 | 270 | 70 | Not started |
 | S17b | The removal, and the sweep | S13, S15, S16, S17a | 14 | 675 | 130 | Not started |
-| S18a | A record, a server role, a provider put back | S13, S15, S16 | 6 | 190 | 40 | **Built** (2026-10-30), on S15 (#338, head `2b48ac4`) with S13 (#339, head `42cc7a3`) merged in: its pull request carries this cell. 18 files of Go (12 of code); about 605 new lines with their comments and 17 changed, tests about 360 new and 16 changed. The judge agrees a server role; its step waits for the newcomer's transfer confirmation; a provider put in a list is asked with peer-role at the thaw, and sends what it contributes again. S16's order of a `replace` by serial is the seam |
+| S18a | A record, a server role, a provider put back | S13, S15, S16 | 6 | 190 | 40 | **Built** (2026-10-30), on S15 (#338, head `2b48ac4`) with S13 (#339, head `42cc7a3`) and S16 (#343, head `cefd397`) merged in: its pull request carries this cell. 18 files of Go (12 of code); about 605 new lines with their comments and 17 changed, tests about 360 new and 16 changed. The judge agrees a server role; its step waits for the newcomer's transfer confirmation; a provider put in a list is asked with peer-role at the thaw, and sends what it contributes again. S16's order of a `replace` by serial puts a put-back after the leader's withdrawal |
 | S18b | A signer added; a server becomes a signer | S18a, S11, S12; P5 | 6 | 290 | 75 | Not started |
 | S19 | NS management | S5a, S10, S12 | 5 | 130 | 40 | Not started |
 | S20 | Parent sync | S12, S14, S17a; P3 (#209 done) | 7 | 220 | 60 | Not started |
@@ -1200,6 +1200,33 @@ The membership plan's step 10 (#158), under this design.
 
 **Size.** 12 files, about 265 new and 125 changed lines.
 
+**Status (2026-10-30):** Built, on S15 (#338, head `2b48ac4`). Where the text left a choice, its most literal reading, for the project owner:
+
+1. **The wire.** The field is `withdraw: {provider, rrtype}` on the sync wrapper (`syncWirePayload`), carried by `PeerSyncRequest`, `DnsSyncPayload`, `AgentMsgPost`, `ZoneUpdate` and `SynchedDataUpdate`. To the combiner the agent sends the same field, in the provider's name: that is the flag.
+2. **At a receiving agent.** `routeSyncMessage` makes the named provider the update's agent and the leader its deliverer. After S8's rule, S15's `keepForLeader` keeps a withdrawal as it keeps a CSYNC or a KEY while no leader is known here, and releases it the same way. `acceptWithdrawal` then asks:
+   - that the deliverer is the zone's leader as known here;
+   - that the active reading does not list the provider (by `labelOf`) in `servers=` for NS, or in `signers=` for DNSKEY and CDS;
+   - that the update is one operation, an empty `replace` of the type it names.
+
+   Every answer to a withdrawal goes to the leader (`answerTo`): the "kept" PENDING, the stale REJECTED, a refusal, the immediate confirmation, and the final one through `PendingRemoteConfirms`.
+3. **The order.** The text says `noteReplaceOrigin` "is not asked", and that withdrawals and the provider's own operations are ordered at `processReplaceOp`, which is where `noteReplaceOrigin` keeps the order. Read with design 5.2: the old order by time alone is not asked. `noteReplaceOrigin` now orders every replace, a withdrawal in the provider's name among them, by the active serial stamped at its send when both stamps tell one, then by time, then by distribution ID (`olderThan`). The combiner does the same (`staleCombinerReplace`) by the stamp of its agent's send, now on `CombinerSyncRequest.Instr`. The serial is kept with the persisted origin: `ZoneDataReplaceOrigin` gains `under` and `has_under`, which are added to an existing table at start. Rule 6 keeps or refuses a message made under another serial than the receiver's before the order is asked, so the ordering tests check the agent's and the combiner's order directly.
+4. **The combiner's flag.** It is honoured only from the combiner's own agent (`localAgents`), and only on an update whose every operation is a delete, or a `replace` whose records are a subset of what the origin holds (`combinerTakesRemoval`, `combinerRemovesOnly`). Such an update passes three checks:
+   - the origin's vote, both before an edit is kept and in `CombinerProcessUpdate`;
+   - the DNSKEY signer check;
+   - the KEY and CDS de-duplication.
+
+   A `replace` that adds a record is judged as before.
+5. **At the leader.** `sendWithdrawal` runs on the data engine.
+   - It marks pending removal the records this agent holds of the provider's type, adding a tracked entry for one that had none.
+   - Every recipient is expected to confirm: the combiner and every member, the leaving provider's agent among them. The withdrawal goes to all of them under one ID.
+   - A recipient's success of the withdrawal removes every record of it pending removal, named or not: an empty `replace` leaves none, and a recipient that held none names none.
+   - `withdrawalDone` reads the tracking. It is done when this agent holds none of those records; or when every one it holds is pending removal, and every recipient that has not confirmed it is a member with no role, past S12's time-out from the withdrawal's start. A refusal leaves the record held, so the withdrawal is not done.
+6. **A new leader, and rule 6.** `withdraw` is the plan's call, for S17b. It sends when this agent holds the provider's records of the type and none is pending removal, so a new leader that still holds them sends again. A withdrawal refused as stale is sent again by rule 6 (`resendInStep`), as a withdrawal under its own ID, while this agent still leads and the active instructions still call for it; otherwise it is dropped.
+7. **`agent debug withdraw --zone --provider --rrtype`** is refused unless this agent leads and the acceptance holds here. It runs `sendWithdrawal` on the data engine.
+8. **The log lines** are as named, and two more: a withdrawal sent again, and one no longer called for.
+9. **Tests** as named, and two more: `TestAWithdrawalRefusedAsStaleIsSentAgainWhenInStep`, and `TestTheWithdrawFieldTravelsOnTheSyncWrapper`. The harness checks the routing, the hand-over to the agent's combiner and the leader's final word. The rig's queue shows no payload, so the flag at the combiner is the unit tests'.
+10. **The fleet check** is with S17b's.
+
 ### S17a. The leader's roll of the zone's SIG(0) key
 
 **Before it:** S14, S16 (the combiner's flag, for the KEY purge), S7 (the parent context). Membership step 7b: one active key per zone, `zoneKeyHeld`, `keyCheck`, and the import that retires the other key, which the roll's phases have to fit (below). A fleet test of a roll designed first: a roll has never been run in tdns-mp (membership decision 22).
@@ -1275,7 +1302,7 @@ The membership plan's step 10 (#158), under this design.
 
 ### S18a. A record, a server role, a provider put back
 
-**Status (2026-10-30):** Built, on S15 (#338, head `2b48ac4`) with S13 (#339, head `42cc7a3`) merged in; S16 is not built, and the put-back's `replace` is stamped at its send (S5b), the order S16's `staleCombinerReplace` and `processReplaceOp` will read. Where the text left a choice, the most literal reading was taken, each for the project owner:
+**Status (2026-10-30):** Built, on S15 (#338, head `2b48ac4`) with S13 (#339, head `42cc7a3`) and S16 (#343, head `cefd397`) merged in. The put-back's `replace` is stamped at its send (S5b), so S16's order (`replaceOrigin.olderThan`: the serial at send first, then the time) puts it after the leader's withdrawal made under an earlier serial, whatever the clocks (`TestAPutBackWinsOverTheLeadersWithdrawalBySerial`). Where the text left a choice, the most literal reading was taken, each for the project owner:
 
 1. **The server role's step changes no set.** `serverRoleSteps` plans one step per provider in V's `servers=` whose identity the sets held do not serve, keyed `server-role <identity>`; the newcomer enters `Servers` at the last step, with V's lists. Its agent tells the step held (`step_held`) only once the runner's `holds` passes: that is the transfer confirmation the step's confirmation carries. Every other agent's part of the step is its parts alone. `builtKinds` holds `kindServerRole`.
 2. **"The zone's" SOA serial** is the serial of the zone's copy at the agent that checks (`CurrentSerial`). The status names it so at every agent.
@@ -1285,7 +1312,7 @@ The membership plan's step 10 (#158), under this design.
 6. **`peer-role` at the activation.** S3 widened it at a refresh; S7's activation at the thaw asked nothing of it. The thaw's `activate` and `know` now ask, with `peer-role`, every other provider put in `servers=` or `signers=` (`peersEntered`), before `askUnasked`.
 7. **The put-back** runs when a thaw puts this agent's own provider in a list it was not in, whether or not its records were withdrawn (no withdrawal exists before S16; at a first role it sends what it holds). It sends, from the data engine, a complete `replace` of NS for `servers=` and of DNSKEY and CDS for `signers=` (design 5.2's lists), built as the catch-up answer is, to every other member and, but for the DNSKEYs, to its combiner. Like a catch-up answer it passes the freeze, and it is not tracked. An agent whose answer cannot be complete yet sends nothing; the members' `peer-role` requests get the same. Its NS are what its own data holds: none after a withdrawal, until its operator adds them.
 
-Names as below, and also: log, info, logger `engine`, "a provider put back sends what it contributes again" (`zone`, `types`); the transfer confirmation's log line adds `want` and `why` when it fails, and is logged when its outcome changes. Tests as named, and `TestEveryAgentsStatusShowsWhetherAMemberHasCaughtUp`. The tests that used a server role as a kind not built take another kind, or now agree it.
+Names as below, and also: log, info, logger `engine`, "a provider put back sends what it contributes again" (`zone`, `types`); the transfer confirmation's log line adds `want` and `why` when it fails, and is logged when its outcome changes. Tests as named, and `TestEveryAgentsStatusShowsWhetherAMemberHasCaughtUp` and `TestAPutBackWinsOverTheLeadersWithdrawalBySerial`. The tests that used a server role as a kind not built take another kind, or now agree it.
 
 **Before it:** S13, S15, S16 (the order of a `replace` by serial).
 
