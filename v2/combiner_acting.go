@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -128,8 +129,8 @@ func (s *actingStore) get(zone string) (heldHandover, bool) {
 
 // actsBy is the hand-over the combiner acts by for the zone, given the apex
 // of its own copy (the zone as served, or a copy being analysed): the one it
-// holds, unless that copy carries a newer serial (RFC 1982; a copy with no
-// serial is not newer). Until S7 the
+// holds, unless that copy carries a newer serial (RFC 1982; a copy without
+// one has no reading, #308). Until S7 the
 // agent's serial follows its own copy, which it takes from its signer, and
 // the signer from this combiner: at every edit the hand-over trails this
 // combiner's copy by two transfers, and in that gap the combiner acts by its
@@ -140,7 +141,7 @@ func (s *actingStore) actsBy(zone string, apex *tdns.OwnerData) (heldHandover, b
 	if !ok {
 		return heldHandover{}, false
 	}
-	if own := readingOf(apex); own != nil && own.Serial != 0 && CompareSerial(own.Serial, held.handover.Serial) == 1 {
+	if own := readingOf(apex); own != nil && CompareSerial(own.Serial, held.handover.Serial) == 1 {
 		return heldHandover{}, false
 	}
 	return held, true
@@ -325,7 +326,7 @@ func (conf *Config) combinerTakeHandover(msg *AgentMsgPostPlus, localAgents map[
 		store.owe(zone, actErr != nil)
 	}
 	if h.Refresh {
-		conf.refreshFromUpstream(mpzd)
+		conf.refreshFromUpstream(mpzd, lgCombiner)
 	}
 	if actErr != nil {
 		// Held and judged by, not served: said so, as a contribution's
@@ -353,7 +354,10 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 		signing = nextSigningSetOf(mpzd.instructions(), mpzd.signingSet())
 	}
 	// Computed on a wrapper of the zone as served, with a map of its own:
-	// the zone's options map is read without a lock.
+	// the zone's options map is read without a lock. One refresh or
+	// hand-over at a time (mpDataLock).
+	mpMu := mpDataLock(mpzd.ZoneName)
+	mpMu.Lock()
 	mpzd.Lock()
 	mpzd.EnsureMP()
 	opts := make(map[tdns.ZoneOption]bool, len(mpzd.MPOptions))
@@ -371,6 +375,7 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 	mpzd.RebuildCombinerData()
 	allow := mpzd.MPOptions[tdns.OptAllowEdits]
 	mpzd.Unlock()
+	mpMu.Unlock()
 	var combineErr error
 	if allow {
 		if _, combineErr = mpzd.CombineWithLocalChanges(); combineErr != nil {
@@ -404,21 +409,22 @@ func handedOrigin(r Roles, origin string, rrtype uint16) bool {
 	})
 }
 
-// refreshFromUpstream asks for a refresh of the zone from the combiner's
-// upstream (the hand-over's Refresh: the fetch down the provider's chain,
-// design 3.1). One already asked for is enough.
-func (conf *Config) refreshFromUpstream(mpzd *MPZoneData) {
+// refreshFromUpstream asks for a refresh of the zone from the combiner's or
+// the signer's upstream (the hand-over's Refresh: the fetch down the
+// provider's chain, design 3.1), logged by the part's logger. One already
+// asked for is enough.
+func (conf *Config) refreshFromUpstream(mpzd *MPZoneData, lg *slog.Logger) {
 	zr := tdns.ZoneRefresher{Name: mpzd.ZoneName, ZoneType: mpzd.ZoneType, ZoneStore: mpzd.ZoneStore}
 	select {
 	case conf.Config.Internal.RefreshZoneCh <- zr:
-		lgCombiner.Info("refreshing the zone from upstream, as the agent asks", "zone", mpzd.ZoneName)
+		lg.Info("refreshing the zone from upstream, as the agent asks", "zone", mpzd.ZoneName)
 	default:
-		lgCombiner.Warn("the refresh engine's queue is full; the agent asks again", "zone", mpzd.ZoneName)
+		lg.Warn("the refresh engine's queue is full; the agent asks again", "zone", mpzd.ZoneName)
 	}
 }
 
 // waitsForHandover: the combiner holds no hand-over for the zone, and the
-// zone's copy carries a serial. Its agent hands it one at the combiner's
+// zone's copy has a reading, which carries a serial (#308). Its agent hands it one at the combiner's
 // start report; meanwhile the combiner serves what it served (rule 5).
 func (mpzd *MPZoneData) waitsForHandover() bool {
 	if _, held := actingHeld.Load().get(mpzd.ZoneName); held {
@@ -429,7 +435,7 @@ func (mpzd *MPZoneData) waitsForHandover() bool {
 		return false
 	}
 	in, err := ReadInstructions(apex)
-	return err == nil && in != nil && in.Serial != 0
+	return err == nil && in != nil
 }
 
 // combinerActingLine is what the combiner acts by for the zone, as `zone

@@ -42,9 +42,6 @@ type MPKeyLifecycleOwner struct {
 	// owned from the signer's start, taken or not, once it has keys to
 	// sign with (#191). nil on every other role.
 	configured func() []string
-	// released are the zones the engine gave back to tdns's own machine
-	// (this provider is not one of the zone's signers), until the next take.
-	released map[string]bool
 }
 
 // SetConfiguredZones installs the signer's key-lifecycle-zones; the
@@ -86,7 +83,7 @@ func (o *MPKeyLifecycleOwner) foreignDSCheck() func(zone string, inv []tdns.KeyI
 // NewMPKeyLifecycleOwner: keyDB is looked up at call time, since the
 // keystore does not exist when the owner registers.
 func NewMPKeyLifecycleOwner(keyDB func() *tdns.KeyDB) *MPKeyLifecycleOwner {
-	return &MPKeyLifecycleOwner{owned: map[string]bool{}, keyDB: keyDB, inv: map[string]*KeyInventorySnapshot{}, released: map[string]bool{}}
+	return &MPKeyLifecycleOwner{owned: map[string]bool{}, keyDB: keyDB, inv: map[string]*KeyInventorySnapshot{}}
 }
 
 // SetInventory records the signer's latest inventory for a zone on the
@@ -109,21 +106,13 @@ func (o *MPKeyLifecycleOwner) inventoryOf(zone string) *KeyInventorySnapshot {
 
 func (o *MPKeyLifecycleOwner) Name() string { return "tdns-mp" }
 
-// Take makes the owner run zone's key lifecycle from now on; Release hands
-// it back to tdns's own machine, a configured zone too, until it is taken
-// again. This is the per-zone rollout of S3.
+// Take makes the owner run zone's key lifecycle from now on. This is the
+// per-zone rollout of S3. A zone taken stays owned: one this provider does
+// not sign is owned and idle (plan S11), not given back to tdns's machine.
 func (o *MPKeyLifecycleOwner) Take(zone string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.owned[lifecycleZoneName(zone)] = true
-	delete(o.released, lifecycleZoneName(zone))
-}
-
-func (o *MPKeyLifecycleOwner) Release(zone string) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	delete(o.owned, lifecycleZoneName(zone))
-	o.released[lifecycleZoneName(zone)] = true
 }
 
 // Zones lists the zones the owner runs.
@@ -185,12 +174,12 @@ func (o *MPKeyLifecycleOwner) runsKeys(zd *tdns.ZoneData) bool {
 	}
 	zone := lifecycleZoneName(zd.ZoneName)
 	o.mu.RLock()
-	taken, released, configured, snap := o.owned[zone], o.released[zone], o.configured, o.inv[zone]
+	taken, configured, snap := o.owned[zone], o.configured, o.inv[zone]
 	o.mu.RUnlock()
 	if taken || (snap != nil && snap.Owned) {
 		return true
 	}
-	if released || configured == nil || !namedZone(zone, configured()) {
+	if configured == nil || !namedZone(zone, configured()) {
 		return false
 	}
 	return o.hasSigningKeys(zone)

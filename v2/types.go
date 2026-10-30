@@ -224,8 +224,15 @@ type KeyInventorySnapshot struct {
 	Zone      string
 	Inventory []KeyInventoryItem
 	Owned     bool // the signer's own state machine runs the zone's keys (S3): the DS set's source (S5)
-	Received  time.Time
-	seq       uint64 // the inventory's KeystateInventoryMsg.seq
+	// The signer's marks (plan S11): it does not sign the zone, a rollover
+	// is under way there, and what each of its keys in mpdist or mpremove
+	// waits on.
+	NotSigning bool
+	Rollover   bool
+	WaitsOn    map[uint16][]string
+	Hold       bool // the signer holds the zone's key machine (plan S6)
+	Received   time.Time
+	seq        uint64 // the inventory's KeystateInventoryMsg.seq
 }
 
 // END.1 (E1.a): AgentId and ZoneName are now ALIASES of the hsync types, so the

@@ -45,13 +45,16 @@ func MPZoneInfoFromMPZoneData(mpzd *MPZoneData) MPZoneInfo {
 			}
 		}
 	}
-	info.Acting = combinerActingLine(mpzd)
+	if tdns.Globals.App.Type == AppTypeMPSigner {
+		info.Acting = signerActingLine(mpzd.ZoneName)
+	} else {
+		info.Acting = combinerActingLine(mpzd)
+	}
 	apex, err := mpzd.GetOwner(mpzd.ZoneName)
 	if err != nil || apex == nil {
 		return info
 	}
-	// The serial, the digest and the owner error are the copy's (S1); a
-	// legacy zone (HSYNC3, no HSYNCPARAM) has serial 0 and a digest. The
+	// The serial, the digest and the owner error are the copy's (S1). The
 	// lists are the active instructions', which the code acts on (S3).
 	if in, err := ReadInstructions(apex); err != nil {
 		info.OwnerError = err.Error()

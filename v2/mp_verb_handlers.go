@@ -151,7 +151,7 @@ func handleAppRfi(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 
 // handleAppKeystate processes KEYSTATE messages for key lifecycle signaling.
 // Used for agent↔signer communication about DNSKEY propagation status.
-// Signals: propagated, rejected, removed (agent→signer), published, retired (signer→agent).
+// Signals: propagated, rejected, removed, foreign, acting (agent→signer), published, retired, inventory (signer→agent).
 func handleAppKeystate(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 	lgTransport.Debug("processing keystate", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
@@ -179,6 +179,11 @@ func handleAppKeystate(tm *MPTransportBridge, ctx *transport.MessageContext) err
 		// full inventory signal — KeyInventory carries the data, KeyTag not required
 	case "foreign":
 		// the other providers' key states — ForeignKeys carries the data
+	case "acting":
+		// the agent's hand-over to its signer (plan S11) — Acting carries it
+		if keystate.Acting == nil {
+			return fmt.Errorf("keystate acting without a hand-over")
+		}
 	default:
 		return fmt.Errorf("unknown keystate signal: %q", keystate.Signal)
 	}
@@ -186,7 +191,7 @@ func handleAppKeystate(tm *MPTransportBridge, ctx *transport.MessageContext) err
 	if keystate.Zone == "" {
 		return fmt.Errorf("keystate message missing zone")
 	}
-	if keystate.Signal == "inventory" || keystate.Signal == "foreign" {
+	if keystate.Signal == "inventory" || keystate.Signal == "foreign" || keystate.Signal == "acting" {
 		// Empty inventory is valid (signer has no keys for this zone).
 		// The recipient decides what to do with it. So is an empty set of
 		// foreign key states (nobody has said anything).

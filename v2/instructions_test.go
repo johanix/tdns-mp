@@ -79,7 +79,7 @@ func digestOf(t *testing.T, records ...string) string {
 
 // withParam is instrBase with its HSYNCPARAM record replaced.
 func withParam(param string) []string {
-	return append(slices.Clone(instrBase[:3]), `3600 IN HSYNCPARAM `+param)
+	return append(slices.Clone(instrBase[:3]), `3600 IN HSYNCPARAM `+numberedText(param))
 }
 
 func hsync3RR(state uint8, label, identity, upstream string) dns.RR {
@@ -129,12 +129,12 @@ func TestTheDigestIgnoresOrderTTLAndSignatures(t *testing.T) {
 func TestTheDigestIgnoresTheSerial(t *testing.T) {
 	seven := readOf(t, instrBase...)
 	eight := readOf(t, withParam(`serial="8" servers="alpha,beta" signers="alpha" auditors="beta" nsmgmt="agent" parentsync="agent" suffix="mp" pubkey pubcds`)...)
-	none := readOf(t, withParam(`servers="alpha,beta" signers="alpha" auditors="beta" nsmgmt="agent" parentsync="agent" suffix="mp" pubkey pubcds`)...)
-	if seven.Serial != 7 || eight.Serial != 8 || none.Serial != 0 {
-		t.Fatalf("serials %d %d %d, want 7 8 0", seven.Serial, eight.Serial, none.Serial)
+	zero := readOf(t, withParam(`serial="0" servers="alpha,beta" signers="alpha" auditors="beta" nsmgmt="agent" parentsync="agent" suffix="mp" pubkey pubcds`)...)
+	if seven.Serial != 7 || eight.Serial != 8 || zero.Serial != 0 {
+		t.Fatalf("serials %d %d %d, want 7 8 0", seven.Serial, eight.Serial, zero.Serial)
 	}
-	if seven.Digest() != eight.Digest() || seven.Digest() != none.Digest() {
-		t.Errorf("digests %s %s %s differ by the serial alone", seven.Digest(), eight.Digest(), none.Digest())
+	if seven.Digest() != eight.Digest() || seven.Digest() != zero.Digest() {
+		t.Errorf("digests %s %s %s differ by the serial alone", seven.Digest(), eight.Digest(), zero.Digest())
 	}
 }
 
@@ -198,25 +198,72 @@ func TestTheDigestSeesEveryFieldTheCodeActsOn(t *testing.T) {
 	}
 }
 
-func TestNoHsyncparamAndAnEmptyHsyncparamReadDifferently(t *testing.T) {
+// HSYNC3 without HSYNCPARAM is an owner error (#308): the legacy reading,
+// in which every ON record voted, is gone. HSYNC3 with an HSYNCPARAM that
+// names no role reads, and nobody has a role in it.
+func TestHSYNC3WithoutHSYNCPARAMIsAnOwnerError(t *testing.T) {
 	hsync3 := hsync3RR(core.HsyncStateON, "alpha", "agent.alpha.example.", ".")
+	in, err := ReadInstructions(apexOfRRs(hsync3))
+	if !errors.Is(err, errNoHsyncparam) || in != nil {
+		t.Fatalf("reading %v, error %v; want the owner error %v", in, err, errNoHsyncparam)
+	}
+	if err.Error() != "HSYNC3 without HSYNCPARAM" {
+		t.Errorf("error %q", err)
+	}
 	empty := &dns.PrivateRR{
 		Hdr:  dns.RR_Header{Name: instrZone, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
-		Data: &core.HSYNCPARAM{},
-	}
-	legacy, err := ReadInstructions(apexOfRRs(hsync3))
-	if err != nil {
-		t.Fatal(err)
+		Data: numbered(&core.HSYNCPARAM{}),
 	}
 	param, err := ReadInstructions(apexOfRRs(hsync3, empty))
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || param == nil || !param.HasParam {
+		t.Fatalf("HSYNC3 with an HSYNCPARAM of no roles: reading %v, error %v", param, err)
 	}
-	if legacy.HasParam || !param.HasParam {
-		t.Fatalf("HasParam %v and %v, want false and true", legacy.HasParam, param.HasParam)
+	if _, voting := participantsOf(param); len(voting) != 0 {
+		t.Errorf("voting %v, want nobody", voting)
 	}
-	if legacy.Digest() == param.Digest() {
-		t.Error("HSYNC3 alone and HSYNC3 with an empty HSYNCPARAM read alike: in the first every ON record votes, in the second nobody has a role")
+}
+
+// HSYNCPARAM without serial= is an owner error (#308), with HSYNC3 and
+// without. An explicit serial="0" is a serial like any other.
+func TestHSYNCPARAMWithoutASerialIsAnOwnerError(t *testing.T) {
+	for _, records := range [][]string{
+		{instrBase[0], `3600 IN HSYNCPARAM servers="alpha"`},
+		{`3600 IN HSYNCPARAM servers="alpha"`},
+	} {
+		in, err := ReadInstructions(apexOf(t, records...))
+		if !errors.Is(err, errNoSerial) || in != nil {
+			t.Errorf("%v: reading %v, error %v; want the owner error %v", records, in, err, errNoSerial)
+			continue
+		}
+		if err.Error() != "HSYNCPARAM without serial=" {
+			t.Errorf("error %q", err)
+		}
+	}
+	in := readOf(t, instrBase[0], `3600 IN HSYNCPARAM servers="alpha" serial="0"`)
+	if in.Serial != 0 || !slices.Equal(in.Servers, []string{"alpha"}) {
+		t.Errorf("serial=\"0\": serial %d servers %v", in.Serial, in.Servers)
+	}
+}
+
+// One identity under two HSYNC3 labels is an owner error (#306), the
+// converse of two records with one label; identities are compared as names.
+// An OFF record names no one.
+func TestOneIdentityUnderTwoLabelsIsAnOwnerError(t *testing.T) {
+	in, err := ReadInstructions(apexOf(t,
+		`3600 IN HSYNC3 ON beta agent.alpha.example. .`,
+		`3600 IN HSYNC3 ON alpha AGENT.Alpha.Example. .`,
+		instrBase[3]))
+	if !errors.Is(err, errIdentityTwoLabels) || in != nil {
+		t.Fatalf("reading %v, error %v; want the owner error %v", in, err, errIdentityTwoLabels)
+	}
+	if err.Error() != "one identity under two HSYNC3 labels: agent.alpha.example. under alpha and beta" {
+		t.Errorf("error %q", err)
+	}
+	if _, err := ReadInstructions(apexOf(t,
+		`3600 IN HSYNC3 ON alpha agent.alpha.example. .`,
+		`3600 IN HSYNC3 OFF beta agent.alpha.example. .`,
+		instrBase[3])); err != nil {
+		t.Errorf("an identity ON under one label and OFF under another: %v", err)
 	}
 }
 
@@ -232,17 +279,21 @@ func TestIdentitiesAreCaseFolded(t *testing.T) {
 }
 
 func TestALabelsTrailingDotIsNoDifference(t *testing.T) {
+	param := &dns.PrivateRR{
+		Hdr:  dns.RR_Header{Name: instrZone, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
+		Data: numbered(&core.HSYNCPARAM{}),
+	}
 	plain, err := ReadInstructions(apexOfRRs(
 		hsync3RR(core.HsyncStateON, "alpha", "agent.alpha.example.", "."),
 		hsync3RR(core.HsyncStateON, "beta", "agent.beta.example.", "alpha"),
-		hsync3RR(core.HsyncStateOFF, "gamma", "agent.gamma.example.", ".")))
+		hsync3RR(core.HsyncStateOFF, "gamma", "agent.gamma.example.", "."), param))
 	if err != nil {
 		t.Fatal(err)
 	}
 	dotted, err := ReadInstructions(apexOfRRs(
 		hsync3RR(core.HsyncStateON, "alpha.", "agent.alpha.example.", "."),
 		hsync3RR(core.HsyncStateON, "beta.", "agent.beta.example.", "alpha."),
-		hsync3RR(core.HsyncStateOFF, "gamma.", "agent.gamma.example.", ".")))
+		hsync3RR(core.HsyncStateOFF, "gamma.", "agent.gamma.example.", "."), param))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,13 +353,7 @@ func TestTwoRecordsWithOneLabelAreAnOwnerErrorInAnyState(t *testing.T) {
 	}
 }
 
-func TestAMissingSerialIsZero(t *testing.T) {
-	if in := readOf(t, withParam(`servers="alpha"`)...); in.Serial != 0 || !in.HasParam {
-		t.Errorf("no serial key: serial %d, HasParam %v; want 0, true", in.Serial, in.HasParam)
-	}
-	if in := readOf(t, instrBase[:3]...); in.Serial != 0 || in.HasParam {
-		t.Errorf("no HSYNCPARAM: serial %d, HasParam %v; want 0, false", in.Serial, in.HasParam)
-	}
+func TestNeitherRecordIsNoInstructions(t *testing.T) {
 	if in, err := ReadInstructions(apexOf(t, `3600 IN TXT "no instructions"`)); in != nil || err != nil {
 		t.Errorf("neither record: reading %v, error %v; want neither", in, err)
 	}
@@ -474,8 +519,8 @@ func TestMplistShowsTheCopysSerialAndDigest(t *testing.T) {
 	}
 
 	legacy := MPZoneInfoFromMPZoneData(instrTestZone(t, "legacy.example.", instrBase[:3]...))
-	if legacy.Serial != 0 || legacy.Digest == "" || legacy.Digest == want {
-		t.Errorf("HSYNC3 without HSYNCPARAM: serial %d digest %q; want 0 and a digest of its own", legacy.Serial, legacy.Digest)
+	if legacy.OwnerError != "HSYNC3 without HSYNCPARAM" || legacy.Digest != "" {
+		t.Errorf("HSYNC3 without HSYNCPARAM: owner error %q digest %q; want the owner error, no digest", legacy.OwnerError, legacy.Digest)
 	}
 
 	twice := instrTestZone(t, "twice.example.", instrBase...)
@@ -504,4 +549,22 @@ func TestTheAuditorListsTheOwnerErrors(t *testing.T) {
 	if errs := checkMPZoneHSYNCConfig(dup); len(errs) == 0 || errs[0] != "two HSYNC3 records with the label alpha" {
 		t.Errorf("two records with one label: config errors %v", errs)
 	}
+}
+
+// numbered is hp with serial 1 when it has no serial=: every reading has the
+// owner's serial (#308), and a test that is not about the serial takes 1.
+func numbered(hp *core.HSYNCPARAM) *core.HSYNCPARAM {
+	if _, ok := hp.GetSerial(); !ok {
+		hp.Value = append(hp.Value, &core.HSYNCPARAMSerial{Value: 1})
+	}
+	return hp
+}
+
+// numberedText is an HSYNCPARAM's presentation form with serial="1" when it
+// has no serial=, as numbered.
+func numberedText(param string) string {
+	if strings.Contains(param, "serial=") {
+		return param
+	}
+	return strings.TrimSpace(param + ` serial="1"`)
 }

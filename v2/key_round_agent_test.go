@@ -35,9 +35,7 @@ func newKeyRoundRig(t *testing.T, zone, scheme string) *keyRoundRig {
 	t.Helper()
 	// the agent's logger first, so that it is put back after the rig stops
 	alog := &lockedBuffer{}
-	saved := lgAgent
-	lgAgent = slog.New(slog.NewTextHandler(alog, nil))
-	t.Cleanup(func() { lgAgent = saved })
+	logTo(t, lgAgent, slog.NewTextHandler(alog, nil))
 	h := newHoldRig(t, zone, scheme, false, repeat(time.Hour, 4)...)
 	r := &keyRoundRig{holdRig: h, zone: ZoneName(h.mpzd.ZoneName), them: AgentId(h.peer.Identity), us: AgentId(h.notifyRig.us.Identity),
 		alog: alog, polls: make(chan uint16, 8)}
@@ -332,9 +330,9 @@ func testAnAuditorNeverAsks(t *testing.T) {
 	zd := a.mpzd.ZoneData
 	apex, _ := zd.Data.Get(zd.ZoneName)
 	hp := &dns.PrivateRR{Hdr: dns.RR_Header{Name: zd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
-		Data: &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
+		Data: numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
 			&core.HSYNCPARAMServers{Servers: []string{shortLabel(string(a.them))}},
-			&core.HSYNCPARAMAuditors{Auditors: []string{shortLabel(string(a.us))}}}}}
+			&core.HSYNCPARAMAuditors{Auditors: []string{shortLabel(string(a.us))}}}})}
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{hp}})
 	zd.Data.Set(zd.ZoneName, apex)
 	zd.InstallInitialSnapshot()

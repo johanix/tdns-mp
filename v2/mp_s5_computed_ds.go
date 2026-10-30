@@ -108,7 +108,7 @@ func (tm *MPTransportBridge) foreignSharesFor(zone ZoneName) map[AgentId]foreign
 // from a provider heard from before (NoteForeignKeyStates); a provider that
 // never said has none. This provider's own share, when it signs the zone,
 // is its signer's latest inventory, since a signer never distributes to its
-// own agent. As with the owner's answer from the inventory, a set with no
+// own agent; an inventory marked not signing is an empty share. As with the owner's answer from the inventory, a set with no
 // SEP key in it is not an answer: nobody has said anything about a key.
 func (conf *Config) computedDSIntent(zone string, digest uint8) (tdns.DSIntent, error) {
 	in, _, err := conf.computedDSSet(zone, digest)
@@ -220,6 +220,9 @@ func (conf *Config) computedDSSet(zone string, digest uint8) (tdns.DSIntent, []d
 			if snap == nil {
 				waits = append(waits, dsWait{provider: identity(s), why: dsWaitNoInventory})
 				continue
+			}
+			if snap.NotSigning {
+				continue // its keys are no DS set's source (plan S11): an empty share
 			}
 			for _, it := range snap.Inventory {
 				if it.Flags&dns.SEP == 0 {

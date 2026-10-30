@@ -284,7 +284,14 @@ type ParentSyncStatus struct {
 	// Instructions is what the agent keeps of the zone's instructions
 	// (instructions_store.go); nil when it keeps none.
 	Instructions *InstructionsStatus `json:"instructions,omitempty"`
+	// Frozen is why the zone is frozen, and whom its agreement waits for;
+	// Kept is what this agent keeps of its own until the transition is done
+	// (instr_freeze.go). Empty when it is not frozen and keeps nothing.
+	Frozen string `json:"frozen,omitempty"`
+	Kept   string `json:"kept,omitempty"`
 	// Combiner is what the agent knows its combiner acts by for the zone
 	// (the hand-over, plan S10); empty when it hands it nothing.
 	Combiner string `json:"combiner,omitempty"`
+	// Signer is the same of its signer (plan S11).
+	Signer string `json:"signer,omitempty"`
 }

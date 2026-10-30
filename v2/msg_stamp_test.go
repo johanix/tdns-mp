@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -30,7 +31,7 @@ func TestEverySyncFamilyMessageCarriesTheSendersStamp(t *testing.T) {
 		if err := json.Unmarshal(msg.Payload, &p); err != nil {
 			t.Fatal(err)
 		}
-		if p.Instr == nil || *p.Instr != *ms || p.Instr.Active != 7 {
+		if p.Instr == nil || !reflect.DeepEqual(*p.Instr, *ms) || p.Instr.Active != 7 {
 			t.Errorf("%s: the stamp on the wire: %+v, want %+v", verb, p.Instr, ms)
 		}
 	}
@@ -63,7 +64,7 @@ func TestConfigEditsAndAuditCarryTheStamp(t *testing.T) {
 		if err := json.Unmarshal(d.raw, d.v); err != nil {
 			t.Fatal(err)
 		}
-		if got := d.got(); got == nil || *got != *ms {
+		if got := d.got(); got == nil || !reflect.DeepEqual(*got, *ms) {
 			t.Errorf("%T: the stamp on the wire: %+v", d.v, got)
 		}
 	}
@@ -324,5 +325,55 @@ func TestACONFIGAnswerIsRecordedUnderItsDistribution(t *testing.T) {
 	rows := c.stamps.distributionStamps(stampZone)
 	if req.DistributionID == "" || len(rows) != 1 || rows[0].DistributionID != req.DistributionID || rows[0].Sent == nil {
 		t.Errorf("distribution %q, rows %+v", req.DistributionID, rows)
+	}
+}
+
+// A confirmer's PENDING and its final word go out apart, so the PENDING can
+// arrive last: it replaces neither the final word's status nor its stamp. A
+// later stamp, a resend's PENDING, does (cubic's review of 347fe5b).
+func TestALatePendingDoesNotReplaceTheFinalWord(t *testing.T) {
+	seven, eight := stampAt(t, 7, "a"), stampAt(t, 8, "a")
+	st := stampTableAt(t, stampAlpha, seven)
+	row := func(distID string) DistributionStamps {
+		t.Helper()
+		for _, r := range st.distributionStamps("") {
+			if r.DistributionID == distID {
+				return r
+			}
+		}
+		t.Fatalf("no row for %s", distID)
+		return DistributionStamps{}
+	}
+	st.confirmed("d1", stampBeta, stampZone, &MsgStamp{Epoch: 3, Seq: 10, InstrStamp: tells(eight, eight)}, "SUCCESS")
+	st.confirmed("d1", stampBeta, stampZone, &MsgStamp{Epoch: 3, Seq: 9, InstrStamp: tells(seven, seven)}, "PENDING")
+	if r := row("d1"); r.Status != "SUCCESS" || r.Confirmed == nil || r.Confirmed.Serial != 8 {
+		t.Errorf("a late PENDING replaced the final word: %+v", r)
+	}
+	st.confirmed("d1", stampBeta, stampZone, &MsgStamp{Epoch: 3, Seq: 11, InstrStamp: tells(eight, eight)}, "PENDING")
+	if r := row("d1"); r.Status != "PENDING" {
+		t.Errorf("a later PENDING, of a resend, did not replace it: %+v", r)
+	}
+
+	// a later start comes after any sequence of an earlier one, and not the
+	// other way round
+	st.confirmed("d3", stampBeta, stampZone, &MsgStamp{Epoch: 3, Seq: 99, InstrStamp: tells(seven, seven)}, "SUCCESS")
+	st.confirmed("d3", stampBeta, stampZone, &MsgStamp{Epoch: 4, Seq: 1, InstrStamp: tells(eight, eight)}, "PENDING")
+	if r := row("d3"); r.Status != "PENDING" || r.Confirmed == nil || r.Confirmed.Serial != 8 {
+		t.Errorf("a later start's confirmation did not replace an earlier start's: %+v", r)
+	}
+	st.confirmed("d3", stampBeta, stampZone, &MsgStamp{Epoch: 3, Seq: 100, InstrStamp: tells(seven, seven)}, "SUCCESS")
+	if r := row("d3"); r.Status != "PENDING" || r.Confirmed.Serial != 8 {
+		t.Errorf("an earlier start's confirmation replaced a later start's: %+v", r)
+	}
+
+	// with no stamps to order them by, a PENDING never replaces a final word
+	st.confirmed("d2", stampBeta, stampZone, nil, "SUCCESS")
+	st.confirmed("d2", stampBeta, stampZone, nil, "PENDING")
+	if r := row("d2"); r.Status != "SUCCESS" {
+		t.Errorf("an unstamped PENDING replaced the final word: %+v", r)
+	}
+	st.confirmed("d2", stampBeta, stampZone, nil, "FAILED")
+	if r := row("d2"); r.Status != "FAILED" {
+		t.Errorf("a final word did not replace another: %+v", r)
 	}
 }

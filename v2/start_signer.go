@@ -121,6 +121,9 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	tm := conf.InternalMp.MPTransport
 	if tm != nil {
 		tm.Start(ctx) // D3: router dispatch (chunk handler registered at init)
+		// the start report: each zone's inventory says what the signer
+		// holds, and the agent hands it what it does not (plan S11)
+		go conf.reportSignerStart(ctx)
 	}
 
 	tdns.StartEngineNoError(&tdns.Globals.App, "SignerMsgHandler",
