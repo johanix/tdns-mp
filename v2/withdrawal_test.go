@@ -366,9 +366,25 @@ func TestAWithdrawalIsNotKeptForManualApproval(t *testing.T) {
 	msgQs.Msg <- &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: AgentMsgNotify, OriginatorID: goneOrigin, DeliveredBy: csyncOurAgent,
 		Zone: ZoneName(mpzd.ZoneName), DistributionID: nextDistributionID(), Withdraw: &Withdraw{Provider: goneOrigin, RRtype: "NS"},
 		Operations: []core.RROperation{{Operation: "replace", RRtype: "NS"}}}}
-	waitUntil(t, "the withdrawal was not applied", func() bool { return len(combinerHolds(mpzd, goneOrigin)) == 0 })
-	if edits, _ := ListPendingEdits(hdb, mpzd.ZoneName); len(edits) != 0 {
-		t.Errorf("the withdrawal is kept for approval: %+v", edits)
+	// a voting origin's edit behind it is kept for approval: once it is,
+	// the withdrawal before it has been handled
+	msgQs.Msg <- &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: AgentMsgNotify, OriginatorID: AgentId(csyncLeaderA), DeliveredBy: csyncOurAgent,
+		Zone: ZoneName(mpzd.ZoneName), DistributionID: nextDistributionID(),
+		Operations: []core.RROperation{{Operation: "add", RRtype: "NS", Records: []string{mpzd.ZoneName + " 3600 IN NS ns.alpha.example."}}}}}
+	waitUntil(t, "the edit behind the withdrawal was not kept for approval", func() bool {
+		edits, _ := ListPendingEdits(hdb, mpzd.ZoneName)
+		return len(edits) > 0
+	})
+	cancel()
+	<-done
+	edits, _ := ListPendingEdits(hdb, mpzd.ZoneName)
+	for _, e := range edits {
+		if e.SenderID == goneOrigin {
+			t.Errorf("the withdrawal is kept for approval: %+v", e)
+		}
+	}
+	if held := combinerHolds(mpzd, goneOrigin); len(held) != 0 {
+		t.Errorf("the origin's NS after the withdrawal: %v", held)
 	}
 }
 

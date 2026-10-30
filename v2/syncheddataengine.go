@@ -1965,7 +1965,7 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 				// of these keys waiting for good.
 				zdr.waitForCombiner(staleKeysWaitOn, &staleWait{
 					origDistID: synchedDataUpdate.OriginatingDistID,
-					sender:     agentId,
+					sender:     synchedDataUpdate.answerTo(),
 					zone:       zone,
 					ops:        received,
 					mechanism:  synchedDataUpdate.Mechanism,
