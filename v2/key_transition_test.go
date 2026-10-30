@@ -9,6 +9,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -697,5 +698,50 @@ func TestAKEYReplaceWhoseRemovalFailsIsRefused(t *testing.T) {
 	}
 	if len(stored) != 0 {
 		t.Errorf("after the retry the store holds the peer's KEYs %v", stored)
+	}
+}
+
+// A newer REPLACE of the same peer's KEY that comes while a failed removal
+// is undone is not undone with it: the removal and its undoing hold the
+// zone's lock between them, so the newer one lands after, and stays.
+func TestANewerKEYReplaceIsNotUndoneByAFailedRemoval(t *testing.T) {
+	const zone = "keydedupnewer.acting.example."
+	_, mpzd := actingCombiner(t, zone, actRecords(`serial="5" servers="alpha,beta" signers="alpha,beta" parentsync="agent"`)...)
+	pub, second, third := testSig0Key(t, newMPTestKeyDB(t), zone).key, testSig0Key(t, newMPTestKeyDB(t), zone).key, testSig0Key(t, newMPTestKeyDB(t), zone).key
+	newer := make(chan struct{})
+	var once sync.Once
+	mpzd.Lock()
+	mpzd.MP.AgentContributions = map[string]map[string]map[uint16]core.RRset{
+		actUs:    {zone: {dns.TypeKEY: core.RRset{Name: zone, RRtype: dns.TypeKEY, RRs: []dns.RR{pub}}}},
+		actOther: {zone: {dns.TypeKEY: core.RRset{Name: zone, RRtype: dns.TypeKEY, RRs: []dns.RR{pub, second}}}},
+	}
+	mpzd.MP.PersistContributions = func(string, string, map[string]map[uint16]core.RRset) error {
+		failed := false
+		once.Do(func() {
+			failed = true
+			// the newer REPLACE comes now, and waits for the zone
+			go func() {
+				defer close(newer)
+				mpzd.ReplaceCombinerDataByRRtype(actOther, zone, dns.TypeKEY, []dns.RR{third})
+			}()
+			time.Sleep(50 * time.Millisecond)
+		})
+		if failed {
+			return errors.New("the store is full")
+		}
+		return nil
+	}
+	mpzd.Unlock()
+	req := &CombinerSyncRequest{SenderID: actOther, Zone: zone, DistributionID: nextDistributionID(), Timestamp: time.Now(),
+		Operations: []core.RROperation{{Operation: "replace", RRtype: "KEY", Records: []string{pub.String()}}}}
+	mpzd.combinerProcessOperations(req, zone, nil, map[string]bool{actUs: true}, mpzd.getEditPolicy())
+	if _, ok := recvWithin(newer, 5*time.Second); !ok {
+		t.Fatal("the newer REPLACE did not end")
+	}
+	mpzd.Lock()
+	got := slices.Clone(mpzd.MP.AgentContributions[actOther][zone][dns.TypeKEY].RRs)
+	mpzd.Unlock()
+	if len(got) != 1 || got[0].String() != third.String() {
+		t.Errorf("the peer's KEY after the failed removal and the newer REPLACE: %v, want the newer one alone", got)
 	}
 }
