@@ -910,6 +910,7 @@ func syncStoppedBecauseThisAgentLeft(t *testing.T, zone string, before, after fu
 		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
 		t.Fatalf("the zone's SIG(0) key: %v", err)
 	}
+	trustActiveKeys(t, r.mpzd.KeyDB, z)
 	r.parent.refuses()
 	r.parent.holdsNS("ns1."+z, r.oldNS)
 	r.ask()

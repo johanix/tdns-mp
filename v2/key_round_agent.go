@@ -15,6 +15,7 @@ import (
 
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -46,11 +47,19 @@ func (h *hourlyLog) due(key string) bool {
 func (conf *Config) keyRoundHooks() *keyHooks {
 	return &keyHooks{
 		wants:   conf.wantsZoneKey,
-		peers:   conf.zoneKeyPeerIDs,
+		peers:   conf.keyRoundPeers,
+		active:  conf.activeSerial,
 		prepare: conf.prepareKeyReq,
 		send:    conf.sendKeyReq,
 		decide:  conf.decideZoneKey,
 	}
+}
+
+// activeSerial is this agent's active serial for the zone, if it knows one:
+// a key answer counts only at it (S14).
+func (conf *Config) activeSerial(zone ZoneName) (SerialDigest, bool) {
+	st, ok := conf.InternalMp.Instructions.stampOf(string(zone))
+	return SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}, ok && st.Known
 }
 
 // zoneKeyDB is the keystore that signs the zone's UPDATE: the zone's own,
@@ -100,8 +109,9 @@ func (conf *Config) logSeveralKeys(zone ZoneName, zk *zoneKey) {
 }
 
 // wantsZoneKey: this agent votes in the zone, the zone has loaded here and
-// uses a key, and this agent does not hold the zone's key. When it holds it,
-// every other active key for the zone is retired. Reads the keystore and
+// uses a key, and this agent does not hold the zone's key, or leads the zone
+// and the parent does not trust the key yet (keyPending, S14). When it holds
+// it, every other active key for the zone is retired. Reads the keystore and
 // asks the resolver: run by the round loop, never under the tracker's lock.
 func (conf *Config) wantsZoneKey(ctx context.Context, zone ZoneName) bool {
 	in := instructionsFor(zone)
@@ -117,7 +127,7 @@ func (conf *Config) wantsZoneKey(ctx context.Context, zone ZoneName) bool {
 	if kdb == nil {
 		return false
 	}
-	var wants, retired bool
+	var wants, retired, several bool
 	_ = conf.keySetupLocked(zone, func() error {
 		zk, err := readZoneKey(kdb, zone)
 		switch {
@@ -126,6 +136,7 @@ func (conf *Config) wantsZoneKey(ctx context.Context, zone ZoneName) bool {
 			lgAgent.Warn("the zone's SIG(0) keys could not be read; asking for the key", "zone", zone, "err", err)
 			wants = true
 		case zk.several():
+			several = true
 			conf.logSeveralKeys(zone, zk)
 		case zk.held == nil:
 			wants = true
@@ -141,12 +152,27 @@ func (conf *Config) wantsZoneKey(ctx context.Context, zone ZoneName) bool {
 	if retired {
 		conf.releaseKeyHold(ctx, zone)
 	}
-	return wants
+	// at the leader the entry stays until the key is usable: its rounds
+	// offer the key again (S14)
+	return wants || (!several && conf.keyPending(ctx, zone))
+}
+
+// keyRoundPeers are the agents a round asks: none at a leader that holds the
+// zone's key, whose round only offers it to the parent again (S14), and
+// otherwise zoneKeyPeerIDs.
+func (conf *Config) keyRoundPeers(zone ZoneName) []AgentId {
+	if kdb := conf.zoneKeyDB(zone); kdb != nil {
+		if zk, err := readZoneKey(kdb, zone); err == nil && zk.held != nil {
+			return nil
+		}
+	}
+	return conf.zoneKeyPeerIDs(zone)
 }
 
 // zoneKeyPeerIDs are the agents asked for the zone's key (zoneKeyPeers): the
 // voting members other than this agent, and every agent the zone lists ON
-// with no role.
+// with no role; during a transition, every voting member under both its
+// serials too (design 6, S14).
 func (conf *Config) zoneKeyPeerIDs(zone ZoneName) []AgentId {
 	ar := conf.InternalMp.AgentRegistry
 	if ar == nil || ar.LocalAgent == nil {
@@ -156,9 +182,18 @@ func (conf *Config) zoneKeyPeerIDs(zone ZoneName) []AgentId {
 	if zad, err := ar.GetZoneAgentData(zone); err == nil {
 		agents = zad.Agents
 	}
+	self := AgentId(ar.LocalAgent.Identity)
 	var ids []AgentId
-	for _, a := range zoneKeyPeers(zone, agents, AgentId(ar.LocalAgent.Identity), ar.roleLessKeyHolders(zone)) {
+	for _, a := range zoneKeyPeers(zone, agents, self, ar.roleLessKeyHolders(zone)) {
 		ids = append(ids, a.ID)
+	}
+	for _, id := range conf.InternalMp.Instructions.transitionVoters(string(zone)) {
+		if sameName(id, string(self)) || slices.ContainsFunc(ids, func(p AgentId) bool { return sameName(string(p), id) }) {
+			continue
+		}
+		if agent, err := ar.GetAgentInfo(AgentId(id)); err == nil {
+			ids = append(ids, agent.ID)
+		}
 	}
 	if conf.InternalMp.keyLogs.due("asking " + string(zone)) {
 		lgAgent.Info("asking for the zone's SIG(0) key: this agent does not hold it", "zone", zone, "asked", ids,
@@ -272,8 +307,16 @@ func (conf *Config) decideZoneKeyLocked(ctx context.Context, zone ZoneName, answ
 		conf.logSeveralKeys(zone, zk)
 		return true, false // a refresh that leaves one KEY checks again
 	}
+	// A key LOST (S14) stays so until it is held, or the zone publishes no
+	// KEY: a later round with a silent peer does not end it
+	if zk.held != nil || len(zk.published) == 0 {
+		conf.InternalMp.keyPolls.setLost(zone, false, 0)
+	}
 	if zk.held != nil {
-		return true, false // held meanwhile: the leader's set-up publishes it
+		// held meanwhile: the leader's set-up publishes it. A leader keeps
+		// the entry, and offers the key again, until the parent trusts it
+		// (S14)
+		return !(leads && conf.reofferZoneKey(ctx, zone, zk)), false
 	}
 
 	// The leader's sync waits from when a key is taken or made until the
@@ -317,14 +360,23 @@ func (conf *Config) decideZoneKeyLocked(ctx context.Context, zone ZoneName, answ
 	if !leads {
 		return false, false
 	}
-	allNone := len(answers) > 0 || len(votingPeers(zone, conf.localAgentID())) == 0
+	// every voting member, during a transition under both its serials
+	// (S14), has said it holds none
+	self := conf.localAgentID()
+	voters := votingPeers(zone, self)
+	for _, id := range conf.InternalMp.Instructions.transitionVoters(string(zone)) {
+		if !sameName(id, string(self)) && !slices.ContainsFunc(voters, func(v AgentId) bool { return sameName(string(v), id) }) {
+			voters = append(voters, AgentId(id))
+		}
+	}
+	allNone := len(answers) > 0 || len(voters) == 0
 	for _, a := range answers {
 		if a.outcome != keyNone {
 			allNone = false
 		}
 	}
-	for _, id := range votingPeers(zone, conf.localAgentID()) {
-		if !slices.ContainsFunc(sortedPeers(answers), func(p AgentId) bool { return isAmong([]string{string(p)}, id) }) {
+	for _, id := range voters {
+		if !slices.ContainsFunc(sortedPeers(answers), func(p AgentId) bool { return sameName(string(p), string(id)) }) {
 			allNone = false // a voting member not asked has not said it holds none
 		}
 	}
@@ -332,6 +384,7 @@ func (conf *Config) decideZoneKeyLocked(ctx context.Context, zone ZoneName, answ
 		return false, false
 	}
 	if len(zk.published) > 0 {
+		conf.InternalMp.keyPolls.setLost(zone, true, zk.published[0].KeyTag())
 		if conf.InternalMp.keyLogs.due("lost " + string(zone)) {
 			lgAgent.Error("the zone publishes a SIG(0) key that no voting member holds: an operator has to act",
 				"zone", zone, "keyid", zk.published[0].KeyTag())
@@ -372,4 +425,41 @@ func (conf *Config) decideZoneKeyLocked(ctx context.Context, zone ZoneName, answ
 	}
 	unpublished = false
 	return true, true
+}
+
+// keyOfferEvery paces the leader's offers of a key the parent has not taken
+// (S14). A variable, so that a test can shorten it.
+var keyOfferEvery = 5 * time.Minute
+
+// reofferZoneKey is a round's word at the leader that holds the zone's key:
+// while the parent does not trust it (keyPending) the key is offered again,
+// at most every keyOfferEvery and not while a poll of it runs, under the
+// zone's parent context (launchKeyPoll); a key whose publication failed is
+// published again, which starts its poll. It reports whether the key is
+// still pending: the round's entry stays until the key is usable (S14).
+// Under the zone's key-setup lock.
+func (conf *Config) reofferZoneKey(ctx context.Context, zone ZoneName, zk *zoneKey) bool {
+	if !conf.keyPending(ctx, zone) {
+		return false
+	}
+	b := &conf.InternalMp.keyPolls
+	running, unpublished, _ := b.state(zone)
+	if running > 0 || time.Since(b.lastOffer(zone)) < keyOfferEvery || zk.held.key == nil {
+		return true
+	}
+	// an offer the freeze holds is not made, and counts as none: it goes
+	// at the next round that the hold lets through
+	if held, _ := conf.offerHeld(ctx, zone); held {
+		return true
+	}
+	lgAgent.Info("the parent has not taken the zone's SIG(0) key, offering it again", "zone", zone, "keyid", zk.held.keyid,
+		"parent_state", edns0.KeyStateToString(zk.held.parentState), "in", keyOfferEvery)
+	if unpublished {
+		tk := b.begin(zone)
+		err := conf.publishZoneKey(ctx, zone, tk, false, 0)
+		tk.end(err != nil && !errors.Is(err, errLeadMoved))
+		return true
+	}
+	conf.launchKeyPoll(ctx, nil, zone, string(zone), zk.held.keyid, zk.held.key.Algorithm)
+	return true
 }

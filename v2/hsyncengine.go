@@ -166,6 +166,10 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 
 		zu.Operations = ampp.Operations
 		zu.CatchUp = ampp.CatchUp
+		// the leader's KEY carries where its combiner publishes it, and
+		// every provider's combiner publishes it there (#206); taken from
+		// the leader only (refuseCsyncNotFromLeader)
+		zu.Publish = ampp.Publish
 
 		var cresp = make(chan *AgentMsgResponse, 1)
 		synchedDataUpdateQ <- &SynchedDataUpdate{

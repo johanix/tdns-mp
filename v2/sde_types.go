@@ -74,10 +74,15 @@ type SynchedDataUpdate struct {
 
 // dropStaleOperations takes the operations the repo found stale out of the
 // update, so that they go no further: not to the key states, and not to the
-// combiner, which would put an older set back in the zone it publishes.
+// combiner, which would put an older set back in the zone it publishes. A
+// KEY's publish instruction goes with its KEY (#206, S14): it names the
+// same older KEY.
 func (u *SynchedDataUpdate) dropStaleOperations() {
 	if u.Update != nil && len(u.staleTypes) > 0 {
 		u.Update.Operations = u.freshOperations()
+		if u.staleTypes[dns.TypeKEY] {
+			u.Update.Publish = nil
+		}
 	}
 }
 

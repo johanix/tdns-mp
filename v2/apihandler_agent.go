@@ -546,6 +546,7 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 				if why := conf.keyHoldReason(ctx, amp.Zone); why != "" {
 					status.KeyHold = "held until the zone's SIG(0) key is held and bootstrapped (" + why + ")"
 				}
+				status.ZoneKey = conf.zoneKeyLine(ctx, amp.Zone)
 			}
 			resp.Data = status
 			resp.Msg = fmt.Sprintf("Parent sync status for zone %s", amp.Zone)

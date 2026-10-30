@@ -37,6 +37,11 @@ type sig0Row struct {
 	privatekey string
 	keyrr      string
 	key        *dns.KEY
+	// parentState is what the parent last said of the key, as tdns's poll
+	// records it (a KeyState code; 0: never asked), and creator who made
+	// it ("leader-election": this agent's set-up)
+	parentState uint8
+	creator     string
 }
 
 // zoneKey is what readZoneKey found.
@@ -88,7 +93,7 @@ func publishedKeys(zone ZoneName) []*dns.KEY {
 // activeSig0Rows reads the zone's active SIG(0) keys from the keystore, every
 // row, with no cache.
 func activeSig0Rows(kdb *tdns.KeyDB, zone ZoneName) ([]sig0Row, error) {
-	rows, err := kdb.Query(`SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND state=?`,
+	rows, err := kdb.Query(`SELECT keyid, algorithm, privatekey, keyrr, COALESCE(parent_state, 0), COALESCE(creator, '') FROM Sig0KeyStore WHERE zonename=? AND state=?`,
 		dns.Fqdn(string(zone)), tdns.Sig0StateActive)
 	if err != nil {
 		return nil, err
@@ -97,11 +102,11 @@ func activeSig0Rows(kdb *tdns.KeyDB, zone ZoneName) ([]sig0Row, error) {
 	var out []sig0Row
 	for rows.Next() {
 		var r sig0Row
-		var keyid int
-		if err := rows.Scan(&keyid, &r.algorithm, &r.privatekey, &r.keyrr); err != nil {
+		var keyid, parentState int
+		if err := rows.Scan(&keyid, &r.algorithm, &r.privatekey, &r.keyrr, &parentState, &r.creator); err != nil {
 			return nil, err
 		}
-		r.keyid = uint16(keyid)
+		r.keyid, r.parentState = uint16(keyid), uint8(parentState)
 		if rr, err := dns.NewRR(r.keyrr); err == nil {
 			if k, ok := rr.(*dns.KEY); ok {
 				r.key = k
