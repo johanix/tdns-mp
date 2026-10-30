@@ -897,6 +897,30 @@ func TestARepeatedRefusalIsLoggedOnce(t *testing.T) {
 	}
 }
 
+// The notes of refusals logged handoverResend ago are dropped when another
+// is noted: the zone a refused message names is the sender's, and the notes
+// of zones named once each would pile up (cubic on tdns-mp #336).
+func TestOldRefusalNotesAreDropped(t *testing.T) {
+	const once, later = "once.refused.example.", "later.refused.example."
+	t.Cleanup(func() {
+		refusalLogged.Delete(handoverKey(once))
+		refusalLogged.Delete(handoverKey(later))
+	})
+	now := time.Now()
+	warnRefusal(once, "the zone is not a multi-provider zone here", now)
+	warnRefusal(later, "the zone is not a multi-provider zone here", now.Add(handoverResend-time.Second))
+	if _, ok := refusalLogged.Load(handoverKey(once)); !ok {
+		t.Fatal("a note younger than handoverResend was dropped")
+	}
+	warnRefusal(later, "it names zone other.example.", now.Add(handoverResend))
+	if _, ok := refusalLogged.Load(handoverKey(once)); ok {
+		t.Error("a note handoverResend old was kept")
+	}
+	if _, ok := refusalLogged.Load(handoverKey(later)); !ok {
+		t.Error("the note just made was dropped")
+	}
+}
+
 // The agent's resend to the signer, every 30s while the signer does not
 // hold the hand-over, is logged at Info once per handoverResend.
 func TestTheResendToTheSignerIsLoggedOncePerFiveMinutes(t *testing.T) {

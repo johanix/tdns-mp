@@ -114,7 +114,9 @@ type refusal struct {
 }
 
 // warnRefusal: the refusal is not the one last logged for the zone, or
-// that was logged handoverResend ago; it is noted as logged now.
+// that was logged handoverResend ago; it is noted as logged now. The notes
+// that old are dropped then, since they no longer quiet anything: the zone
+// a refused message names is the sender's, and they would pile up.
 func warnRefusal(zone, why string, now time.Time) bool {
 	key := handoverKey(zone)
 	if v, ok := refusalLogged.Load(key); ok {
@@ -122,6 +124,12 @@ func warnRefusal(zone, why string, now time.Time) bool {
 			return false
 		}
 	}
+	refusalLogged.Range(func(k, v any) bool {
+		if now.Sub(v.(refusal).at) >= handoverResend {
+			refusalLogged.Delete(k)
+		}
+		return true
+	})
 	refusalLogged.Store(key, refusal{why: why, at: now})
 	return true
 }
