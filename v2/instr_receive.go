@@ -476,12 +476,15 @@ func (conf *Config) resendInStep(zdr *ZoneDataRepo, zone ZoneName) {
 	}
 	ops := conf.catchUpOperations(zdr, zone, self)
 	for _, n := range due {
+		// out of the book before it goes: a "not yet" to what goes now,
+		// which the transport's callback books, stays booked
+		tm.notYets.drop(zone, n.peer, n.distID)
 		zu := &ZoneUpdate{Zone: zone, AgentId: self, Operations: ops}
 		if err := tm.EnqueueForSpecificAgent(zone, n.peer, zu, n.distID); err != nil {
+			tm.notYets.add(n)
 			lgEngine.Warn("sending again to a peer now in step failed; the engine's tick tries again", "zone", zone, "peer", n.peer, "distrib", n.distID, "err", err)
 			continue
 		}
-		tm.notYets.drop(zone, n.peer, n.distID)
 		lgEngine.Info("sent again to a peer now in step", "zone", zone, "peer", n.peer, "distrib", n.distID, "active", active.Serial)
 	}
 }
