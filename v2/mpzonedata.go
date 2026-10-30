@@ -67,32 +67,46 @@ var Zones = &MPZones{
 // Get returns the *MPZoneData for the named zone, creating and
 // caching the wrapper on first access. Returns false if the zone
 // does not exist in tdns.Zones.
+//
+// tdns.Zones is asked on every call, and the cached wrapper is
+// returned only while it wraps the zone tdns holds now. A zone that
+// has left tdns.Zones (a config reload, a catalog or API removal) is
+// not returned, and its wrapper is dropped. A zone tdns has replaced
+// with a new *tdns.ZoneData (a modify, or a removal and a re-add)
+// gets a new wrapper.
 func (mz *MPZones) Get(name string) (*MPZoneData, bool) {
-	mz.mu.RLock()
-	if mpzd, ok := mz.cache[name]; ok {
-		mz.mu.RUnlock()
-		return mpzd, true
-	}
-	mz.mu.RUnlock()
-
 	zd, ok := tdns.Zones.Get(name)
 	if !ok {
+		mz.drop(name)
 		return nil, false
+	}
+	return mz.getOrCreate(name, zd), true
+}
+
+// drop removes the cached wrapper of a zone tdns.Zones no longer
+// holds. It asks again under the lock, so that a wrapper of a zone
+// added back in the meantime is kept.
+func (mz *MPZones) drop(name string) {
+	mz.mu.RLock()
+	_, cached := mz.cache[name]
+	mz.mu.RUnlock()
+	if !cached {
+		return
 	}
 
 	mz.mu.Lock()
 	defer mz.mu.Unlock()
-	// Double-check after lock upgrade.
-	if mpzd, ok := mz.cache[name]; ok {
-		return mpzd, true
+	if mpzd, ok := mz.cache[name]; ok && !isLiveZone(name, mpzd.ZoneData) {
+		delete(mz.cache, name)
 	}
-	mpzd := &MPZoneData{
-		ZoneData:  zd,
-		MP:        &MPState{},
-		MPOptions: make(map[tdns.ZoneOption]bool),
-	}
-	mz.cache[name] = mpzd
-	return mpzd, true
+}
+
+// isLiveZone reports whether zd is the zone tdns.Zones holds under
+// name. tdns.Zones runs no callbacks under its own locks, so asking it
+// while holding mz.mu cannot deadlock.
+func isLiveZone(name string, zd *tdns.ZoneData) bool {
+	live, ok := tdns.Zones.Get(name)
+	return ok && live == zd
 }
 
 // Items returns all zones as a map, wrapping each in *MPZoneData.
@@ -142,19 +156,23 @@ func (mz *MPZones) Set(name string, mpzd *MPZoneData) {
 	mz.cache[name] = mpzd
 }
 
-// Invalidate removes a cached entry. Call when a zone is deleted
-// from tdns.Zones.
+// Invalidate removes a cached entry. Get drops the wrapper of a zone
+// tdns.Zones no longer holds by itself; Invalidate drops it at once.
 func (mz *MPZones) Invalidate(name string) {
 	mz.mu.Lock()
 	defer mz.mu.Unlock()
 	delete(mz.cache, name)
 }
 
-// getOrCreate returns the cached *MPZoneData or creates one from
-// the given *tdns.ZoneData.
+// getOrCreate returns the cached *MPZoneData of the given
+// *tdns.ZoneData, or creates one. A cached wrapper of another
+// *tdns.ZoneData is of a zone tdns has replaced, and is replaced in
+// turn. Only the live zone's wrapper is cached: a caller that read zd
+// from tdns.Zones just before tdns replaced it gets a wrapper of its
+// own, and the live zone's wrapper stays.
 func (mz *MPZones) getOrCreate(name string, zd *tdns.ZoneData) *MPZoneData {
 	mz.mu.RLock()
-	if mpzd, ok := mz.cache[name]; ok {
+	if mpzd, ok := mz.cache[name]; ok && mpzd.ZoneData == zd {
 		mz.mu.RUnlock()
 		return mpzd
 	}
@@ -162,7 +180,7 @@ func (mz *MPZones) getOrCreate(name string, zd *tdns.ZoneData) *MPZoneData {
 
 	mz.mu.Lock()
 	defer mz.mu.Unlock()
-	if mpzd, ok := mz.cache[name]; ok {
+	if mpzd, ok := mz.cache[name]; ok && mpzd.ZoneData == zd {
 		return mpzd
 	}
 	mpzd := &MPZoneData{
@@ -170,6 +188,8 @@ func (mz *MPZones) getOrCreate(name string, zd *tdns.ZoneData) *MPZoneData {
 		MP:        &MPState{},
 		MPOptions: make(map[tdns.ZoneOption]bool),
 	}
-	mz.cache[name] = mpzd
+	if isLiveZone(name, zd) {
+		mz.cache[name] = mpzd
+	}
 	return mpzd
 }

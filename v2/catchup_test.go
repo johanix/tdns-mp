@@ -710,7 +710,7 @@ func TestARequestIsDroppedWhenItsZoneOrItsPeerNoLongerApplies(t *testing.T) {
 	// the zone is gone
 	r.serve(t, recs, []string{usAgent, otherAgent})
 	r.t.Ask(zone, otherAgent, catchUpStart)
-	tdns.Zones.Remove(string(zone)) // as a reload takes it out: the wrapper Zones keeps stays
+	tdns.Zones.Remove(string(zone)) // as a reload takes it out
 	r.t.prune(zone)
 	if e := r.entry(zone, otherAgent); e != nil {
 		t.Errorf("a request in a zone this agent no longer holds was kept: %+v", e)
