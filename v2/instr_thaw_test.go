@@ -631,6 +631,46 @@ func TestALostLeaderThatIsNotLeavingStallsItsGroup(t *testing.T) {
 	if line := vw.line(); !strings.Contains(line, "no leader ("+roleB+" not heard since never); waiting for it or for the owner to remove it") {
 		t.Errorf("the status: %q", line)
 	}
+	// its last beat told nothing of the zone (plan S22): heard then all the
+	// same (N3 of the external review)
+	r.seq++
+	r.stamps.note(&GossipMessage{GroupHash: stampGroupHash, Members: map[string]*MemberState{
+		roleB: {Identity: roleB, Timestamp: time.Now(), Epoch: 1, Seq: r.seq, Crypto: true}}}, roleB, transport.MechanismDNS)
+	if vw := r.view(); vw.noLeader != roleB+" not heard since "+r.stamps.heard(roleB).Heard.Format(time.TimeOnly) {
+		t.Errorf("no leader, after its beat with no zone: %q", vw.noLeader)
+	}
+}
+
+// A voting member new under V tells nothing the thaw waits for but its
+// payload encryption, which its stamp row tells while it tells nothing of
+// the zone, at rest; one not heard is not heard (S1 of the external review).
+func TestANewVoterAtRestHoldsTheThawOnlyForItsPayloadEncryption(t *testing.T) {
+	r := newThawRig(t, "newvoter.thaw.example.", roleA)
+	n, v := freezeAt(t, 41, "n", "a,b", ""), freezeAt(t, 42, "v", "a,b,n", "")
+	if err := r.store.Forget(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	knownAs(t, r.store, r.zone, n)
+	r.n, r.v = n, v
+	r.holdUnjudged(v, time.Now())
+	r.hold()
+	r.hear(roleB, r.agreeing(), true)
+	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleN+" (not heard)" {
+		t.Fatalf("n not heard: %q", vw.waits)
+	}
+	row := func(crypto bool) {
+		r.seq++
+		r.stamps.note(&GossipMessage{GroupHash: stampGroupHash, Members: map[string]*MemberState{
+			roleN: {Identity: roleN, Timestamp: time.Now(), Epoch: 1, Seq: r.seq, Crypto: crypto}}}, roleN, transport.MechanismDNS)
+	}
+	row(true)
+	if vw := r.view(); !vw.ready() {
+		t.Errorf("n at rest, payload encryption on: %q", vw.waits)
+	}
+	row(false)
+	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleN+" (payload encryption off)" {
+		t.Errorf("n at rest, payload encryption off: %q", vw.waits)
+	}
 }
 
 // A member makes V active on the first first-hand stamp that tells it
