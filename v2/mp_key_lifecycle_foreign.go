@@ -67,29 +67,9 @@ func (e *KeyLifecycleEngine) ForeignWord(zone string, keys []core.ForeignKeyStat
 		lgSigner.Warn("key lifecycle: the other providers' key states dropped, the zone's driver is not running; the agent sends them again with the next inventory", "zone", zone)
 		return true
 	}
-	if e.keepWordWhilePaused(zone, keys, spoken, true) {
-		return true
-	}
 	if err := l.SetForeignWord(keys, spoken); err != nil {
 		lgSigner.Error("key lifecycle: recording the other providers' key states failed", "zone", zone, "err", err)
 	}
-	return true
-}
-
-// keepWordWhilePaused keeps the other providers' word, the latest in place
-// of the one before, while the zone's rollovers pause (#147), and reports
-// whether it did. Recorded, it would write ds on the foreign rows and
-// change the DS set, and it would let a foreign DNSKEY row go (the word
-// foreignKeyWithdrawn reads): neither may change while a provider leaves.
-// tickOwned applies it once the pause is over.
-func (e *KeyLifecycleEngine) keepWordWhilePaused(zone string, keys []core.ForeignKeyState, spoken []string, hasSpoken bool) bool {
-	if len(e.wire.leavers(zone)) == 0 {
-		return false
-	}
-	e.keep(zone, func(k *keptWhilePaused) {
-		k.word = &keptWord{keys: keys, spoken: spoken, hasSpoken: hasSpoken}
-	})
-	lgSigner.Info("key lifecycle: the other providers' key states are kept, not applied, while the rollovers pause; applied when the leave is over (#147)", "zone", zone, "keys", len(keys))
 	return true
 }
 

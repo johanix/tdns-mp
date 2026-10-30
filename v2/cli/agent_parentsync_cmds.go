@@ -290,6 +290,9 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 	if s.Signer != "" {
 		fmt.Fprintf(w, "  signer:         %s\n", termSafe(s.Signer))
 	}
+	if s.Sets != "" {
+		fmt.Fprintf(w, "  sets:           %s\n", termSafe(s.Sets))
+	}
 
 	if s.KeyAlgorithm == "" {
 		fmt.Fprintln(w, "  SIG(0) key:     none active for the zone")

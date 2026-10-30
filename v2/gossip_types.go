@@ -298,4 +298,7 @@ type ParentSyncStatus struct {
 	Combiner string `json:"combiner,omitempty"`
 	// Signer is the same of its signer (plan S11).
 	Signer string `json:"signer,omitempty"`
+	// Sets are the zone's sets per purpose as this agent acts by them: the
+	// step's, at rest the active serial's lists (plan S13).
+	Sets string `json:"sets,omitempty"`
 }

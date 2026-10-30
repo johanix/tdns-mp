@@ -282,15 +282,6 @@ var HsyncTables = map[string]string{
 		algorithm INTEGER NOT NULL,
 		UNIQUE (zonename, role)
 	)`,
-	// MPSigningProviders is a zone's signing set (leaving_signer.go): the
-	// providers in signers= and those leaving it, which sign on until the
-	// owner removes their HSYNC3 records (#147). The row keeps a leaving
-	// provider over a restart. Every role keeps its own.
-	"MPSigningProviders": `CREATE TABLE IF NOT EXISTS 'MPSigningProviders' (
-		zonename  TEXT NOT NULL,
-		providers TEXT NOT NULL DEFAULT '',
-		UNIQUE (zonename)
-	)`,
 	"MPKeyDistribution": `CREATE TABLE IF NOT EXISTS 'MPKeyDistribution' (
 		zonename  TEXT NOT NULL,
 		keyid     INTEGER NOT NULL,
