@@ -392,7 +392,10 @@ func (t *catchUpTracker) AskZone(zone ZoneName, reason string) map[AgentId]askRe
 		if t.unasked == nil {
 			t.unasked = map[ZoneName]string{}
 		}
-		t.unasked[ZoneName(dns.Fqdn(string(zone)))] = reason
+		// a first load's start is kept over a later refresh's join
+		if z := ZoneName(dns.Fqdn(string(zone))); t.unasked[z] != catchUpStart {
+			t.unasked[z] = reason
+		}
 		t.mu.Unlock()
 		return nil
 	}

@@ -264,7 +264,7 @@ func TestTransportBoundary_ConfirmationCarriesTheReceiversStamp(t *testing.T) {
 // A message a refusal stops notes nothing: the stamp is noted after every
 // refusal of the router's middleware, in the order the router runs it. An
 // agent that is no member, let in for the zone's SIG(0) key alone, tells
-// nothing by another request; by its request for the key it does.
+// nothing by a request; by its answer about the key it does.
 func TestARefusedMessagesStampIsNotNoted(t *testing.T) {
 	moved, _ := handoverZones(t)
 	c := handoverBridge(arrivalA)
@@ -282,15 +282,21 @@ func TestARefusedMessagesStampIsNotNoted(t *testing.T) {
 	s := newStore(t)
 	noteKnown(t, s, string(moved), in)
 	c.stamps = newStampTable(arrivalA, s, 1, false, nil)
-	route := func(subtype string, seq uint64) {
+	route := func(token, subtype string, seq uint64) {
 		t.Helper()
-		payload, err := json.Marshal(&DnsSyncPayload{MessageType: "rfi", OriginatorID: handoverStranger, Zone: string(moved), RfiType: "CONFIG", RfiSubtype: subtype,
-			Instr: &MsgStamp{Epoch: 1, Seq: seq, InstrStamp: InstrStamp{Known: true, Active: in.Serial, ActiveDigest: in.Digest(), Newest: in.Serial, NewestDigest: in.Digest()}}})
+		ms := &MsgStamp{Epoch: 1, Seq: seq, InstrStamp: InstrStamp{Known: true, Active: in.Serial, ActiveDigest: in.Digest(), Newest: in.Serial, NewestDigest: in.Digest()}}
+		var payload []byte
+		var err error
+		if token == "config" {
+			payload, err = json.Marshal(&DnsConfigPayload{MessageType: "config", SenderID: handoverStranger, Zone: string(moved), Subtype: subtype, Instr: ms})
+		} else {
+			payload, err = json.Marshal(&DnsSyncPayload{MessageType: "rfi", OriginatorID: handoverStranger, Zone: string(moved), RfiType: "CONFIG", RfiSubtype: subtype, Instr: ms})
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
 		ctx := &transport.MessageContext{Data: map[string]interface{}{}}
-		ctx.SetIncoming(&transport.IncomingMessage{TypeToken: "rfi", SenderID: handoverStranger, TransportSender: handoverStranger, Zone: string(moved), Payload: payload})
+		ctx.SetIncoming(&transport.IncomingMessage{TypeToken: token, SenderID: handoverStranger, TransportSender: handoverStranger, Zone: string(moved), Payload: payload})
 		next := func(*transport.MessageContext) error { return nil }
 		mws := c.routerMiddleware()
 		for i := len(mws) - 1; i >= 0; i-- {
@@ -299,13 +305,13 @@ func TestARefusedMessagesStampIsNotNoted(t *testing.T) {
 		}
 		_ = next(ctx)
 	}
-	route("upstream", 1)
+	route("rfi", "upstream", 1)
 	if m := c.stamps.heard(handoverStranger); m != nil {
 		t.Fatalf("the stamp of a request the gate refused was noted: %+v", m)
 	}
-	route("sig0key", 2)
+	route("config", "sig0key", 2)
 	if m := c.stamps.heard(handoverStranger); m == nil || m.ZoneSeq[canonicalName(string(moved))] != 2 {
-		t.Errorf("the request for the key: %+v", m)
+		t.Errorf("the answer about the key: %+v", m)
 	}
 }
 
