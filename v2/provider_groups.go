@@ -55,24 +55,31 @@ func sortedUnique(ids []string) []string {
 	return slices.Compact(out)
 }
 
-// groupMakeUp is a zone's make-up: who votes, who audits, and who is listed
-// with no role. Until step 10 the third list is empty: a member with no role
-// is no member.
+// groupMakeUp is a zone's make-up: who votes, who audits, and who is a
+// member with no role (plan S15).
 type groupMakeUp struct {
 	voting, auditors, noRole []string
 }
 
-// zoneMakeUp is the zone's make-up by its instructions, each list sorted and
-// deduplicated.
-func zoneMakeUp(in *Instructions) groupMakeUp {
-	participants, voting := participantsOf(in)
-	var auditors []string
-	for _, id := range participants {
-		if !slices.Contains(voting, id) {
-			auditors = append(auditors, id)
+// zoneMakeUp is the zone's make-up by its instructions in, each list sorted
+// and deduplicated: the members with no role are its members that neither
+// vote nor audit, a provider whose removal is under way among them
+// (zoneParticipants).
+func zoneMakeUp(zone string, in *Instructions) groupMakeUp {
+	members, voting, auditors := zoneParticipants(zone, in)
+	return groupMakeUp{voting: voting, auditors: auditors, noRole: withoutRole(members, voting, auditors)}
+}
+
+// withoutRole are the members that are neither among the voting members nor
+// among the auditors.
+func withoutRole(members, voting, auditors []string) []string {
+	var out []string
+	for _, id := range members {
+		if !slices.Contains(voting, id) && !slices.Contains(auditors, id) {
+			out = append(out, id)
 		}
 	}
-	return groupMakeUp{voting: voting, auditors: auditors}
+	return out
 }
 
 // key is the make-up as a map key: each list under its label.
@@ -112,22 +119,69 @@ const (
 // votes is participantsOf's voting set, as VotingMembersForZone and
 // isVotingMember have it.
 func zoneStanding(in *Instructions, identity string) standing {
-	participants, voting := participantsOf(in)
-	return standingIn(in, participants, voting, identity)
+	_, voting, auditors := participantsOf(in)
+	return standingIn(in, voting, auditors, identity)
 }
 
-// standingIn is zoneStanding for a caller that has read the zone's
-// participants already.
-func standingIn(in *Instructions, participants, voting []string, identity string) standing {
+// standingIn is zoneStanding for a caller that has read the zone's voting
+// members and auditors already.
+func standingIn(in *Instructions, voting, auditors []string, identity string) standing {
 	switch {
 	case isAmong(voting, AgentId(identity)):
 		return standingVoting
-	case isAmong(participants, AgentId(identity)):
+	case isAmong(auditors, AgentId(identity)):
 		return standingAuditor
 	case listsAgent(in, AgentId(identity)):
 		return standingNoRole
 	}
 	return standingNone
+}
+
+// The standings as zone mplist's This column and ZoneAgentData name them
+// (plan S15).
+const (
+	standingNameNoRole    = "member, no role"
+	standingNameAuditor   = "auditor"
+	standingNameNotListed = "not listed"
+)
+
+// standingName names the identity's standing among the zone's sets:
+// signer, server or signer,server for a voting member, auditor, "member, no
+// role" for any other member (a provider whose removal is under way with no
+// record among them), and "not listed".
+func standingName(in *Instructions, members, voting, auditors []string, identity string) string {
+	switch standingIn(in, voting, auditors, identity) {
+	case standingVoting:
+		label, _ := in.labelOf(identity)
+		var roles []string
+		if slices.Contains(in.Signers, label) {
+			roles = append(roles, "signer")
+		}
+		if slices.Contains(in.Servers, label) {
+			roles = append(roles, "server")
+		}
+		return strings.Join(roles, ",")
+	case standingAuditor:
+		return standingNameAuditor
+	case standingNoRole:
+		return standingNameNoRole
+	}
+	if isAmong(members, AgentId(identity)) {
+		return standingNameNoRole
+	}
+	return standingNameNotListed
+}
+
+// zoneStandingName is the identity's standing in the zone by its active
+// instructions, as standingName names it; "" for a zone with no HSYNC3
+// records here.
+func zoneStandingName(zone, identity string) string {
+	in := instructionsFor(ZoneName(zone))
+	if !hasHSYNC3(in) {
+		return ""
+	}
+	members, voting, auditors := zoneParticipants(zone, in)
+	return standingName(in, members, voting, auditors, identity)
 }
 
 // hasHSYNC3 reports whether the instructions have HSYNC3 records: only such
@@ -206,7 +260,7 @@ func (ar *AgentRegistry) operationalVotingPeers(zone ZoneName, self AgentId) int
 // (isAmong): the zone's records carry the trailing dot, and an agent's
 // configured identity need not.
 func mayHoldZoneSig0Key(zone ZoneName, agent AgentId) bool {
-	_, voting := participantsOf(instructionsFor(zone))
+	_, voting, _ := participantsOf(instructionsFor(zone))
 	return isAmong(voting, agent)
 }
 
@@ -225,7 +279,7 @@ func sig0KeyPeers(zone ZoneName, agents []*Agent, self AgentId) []*Agent {
 }
 
 // zoneKeyPeers are the agents leaderKeySetup asks for the zone's SIG(0) key:
-// sig0KeyPeers, and also previous, the agents the zone lists with no role
+// sig0KeyPeers, and also previous, the zone's members with no role
 // (roleLessKeyHolders), those not among them already. They hand the key to
 // a voting member as any holder does.
 func zoneKeyPeers(zone ZoneName, agents []*Agent, self AgentId, previous []*Agent) []*Agent {
@@ -269,65 +323,59 @@ func listsAgent(in *Instructions, id AgentId) bool {
 	return ok
 }
 
-// roleLessKeyHolders are the agents the zone's HSYNC3 lists ON with no role
-// in HSYNCPARAM, as the registry has them, other than this agent. The owner
-// takes a provider's role first and its HSYNC3 record later, and in between
-// that provider may hold the zone's SIG(0) key: it led the zone's group, and
-// set the key up. It is no voting member and none of the zone's agents
-// (GetZoneAgentData has the role holders only), so the voting members alone
-// were asked, none had a key to hand over, the new leader made none while
-// the zone published one, and the zone's delegation sync waited for good.
+// roleLessKeyHolders are the zone's members with no role (zoneParticipants),
+// as the registry has them, other than this agent. The owner takes a
+// provider's role first and its HSYNC3 record later, and in between that
+// provider may hold the zone's SIG(0) key: it led the zone's group, and set
+// the key up. It does not vote, so asking the voting members alone found no
+// key to hand over, the new leader made none while the zone published one,
+// and the zone's delegation sync waited for good.
 //
 // Read from the zone as it is, so nothing is lost at a restart, and a leader
 // that was never in the group the zone left asks as well. Outside such an
-// edit the zone lists no agent without a role, and nobody more is asked.
+// edit the zone has no member without a role, and nobody more is asked.
 func (ar *AgentRegistry) roleLessKeyHolders(zone ZoneName) []*Agent {
 	in := instructionsFor(zone)
 	if in == nil {
 		return nil
 	}
-	participants, _ := participantsOf(in)
+	members, voting, auditors := zoneParticipants(string(zone), in)
 	var out []*Agent
-	for _, r := range in.Records {
-		if isAmong(participants, AgentId(r.Identity)) ||
-			(ar.LocalAgent != nil && isAmong([]string{ar.LocalAgent.Identity}, AgentId(r.Identity))) {
+	for _, id := range withoutRole(members, voting, auditors) {
+		if ar.LocalAgent != nil && isAmong([]string{ar.LocalAgent.Identity}, AgentId(id)) {
 			continue
 		}
-		if agent, err := ar.GetAgentInfo(AgentId(r.Identity)); err == nil {
+		if agent, err := ar.GetAgentInfo(AgentId(id)); err == nil {
 			out = append(out, agent)
 		}
 	}
 	return out
 }
 
-// ParticipantsForZone is the single membership truth for agent/auditor reads:
-// the identities holding a membership-conferring HSYNCPARAM role in the zone
-// (resolved via ON HSYNC3 labels). Returns nil for an unknown zone or one with
-// no HSYNC3. Every membership reader routes through this (or the apex/FQDN-set
-// variants below) so there is one derivation — zoneParticipants — and no
-// raw-HSYNC3 co-presence path survives.
+// ParticipantsForZone is the single membership truth for agent/auditor
+// reads: the zone's members (zoneParticipants), every ON record with a role
+// or without and every provider whose removal is under way. Returns nil for
+// an unknown zone or one with no HSYNC3. Every membership reader routes
+// through this (or the FQDN-set variants below) so there is one derivation,
+// and no raw-HSYNC3 co-presence path survives.
 func ParticipantsForZone(zone ZoneName) []AgentId {
-	participants, _ := participantsOf(instructionsFor(zone))
-	out := make([]AgentId, len(participants))
-	for i, id := range participants {
+	members, _, _ := zoneParticipants(string(zone), instructionsFor(zone))
+	out := make([]AgentId, len(members))
+	for i, id := range members {
 		out[i] = AgentId(id)
 	}
 	return out
 }
 
 // AuditorsForZone returns the zone's members that are auditors and nothing
-// else: the participants without a vote, auditors= being the one role that
-// confers membership and no vote (zoneParticipants). An identity that the
-// zone lists as a server or signer too is a provider, and is not returned.
-// Nil for an unknown zone, and for a zone without HSYNCPARAM, which declares
-// no auditors.
+// else (zoneParticipants' third set): an identity that the zone lists as a
+// server or signer too is a provider, and a member with no role is no
+// auditor. Nil for an unknown zone.
 func AuditorsForZone(zone ZoneName) []AgentId {
-	participants, voting := participantsOf(instructionsFor(zone))
+	_, _, auditors := participantsOf(instructionsFor(zone))
 	var out []AgentId
-	for _, id := range participants {
-		if !slices.Contains(voting, id) {
-			out = append(out, AgentId(id))
-		}
+	for _, id := range auditors {
+		out = append(out, AgentId(id))
 	}
 	return out
 }
@@ -336,7 +384,7 @@ func AuditorsForZone(zone ZoneName) []AgentId {
 // with a servers= or signers= role (zoneParticipants). Nil for an unknown
 // zone.
 func VotingMembersForZone(zone ZoneName) []AgentId {
-	_, voting := participantsOf(instructionsFor(zone))
+	_, voting, _ := participantsOf(instructionsFor(zone))
 	out := make([]AgentId, len(voting))
 	for i, id := range voting {
 		out[i] = AgentId(id)
@@ -357,37 +405,44 @@ func isVotingMember(zone ZoneName, identity string) bool {
 	return false
 }
 
-// participantFQDNSet returns the FQDN-keyed participant set of a zone's
-// instructions. Used by the wire boundary (auth/HELLO).
-func participantFQDNSet(in *Instructions) memberSet {
-	participants, _ := participantsOf(in)
-	set := make(memberSet, len(participants))
-	for _, id := range participants {
+// participantFQDNSet returns the FQDN-keyed member set of the zone's
+// instructions in (zoneParticipants). Used by the wire boundary
+// (auth/HELLO).
+func participantFQDNSet(zone string, in *Instructions) memberSet {
+	members, _, _ := zoneParticipants(zone, in)
+	return memberSetOf(members)
+}
+
+// memberSetOf is the identities as a memberSet.
+func memberSetOf(ids []string) memberSet {
+	set := make(memberSet, len(ids))
+	for _, id := range ids {
 		set[canonicalName(id)] = true
 	}
 	return set
 }
 
-// memberSet is a zone's participants, each identity folded as a DNS name
+// memberSet is a zone's members, each identity folded as a DNS name
 // (canonicalName): the reading's identities are folded, and an identity
 // asked about from elsewhere, a registry entry or a sender, is folded the
 // same way before it is looked up.
 type memberSet map[string]bool
 
-// has reports whether id, compared as a DNS name, is a participant.
+// has reports whether id, compared as a DNS name, is a member.
 func (s memberSet) has(id string) bool { return s[canonicalName(id)] }
 
-// sharedParticipantZones returns the zones in which both the local identity and
-// the given identity hold a membership role — the derived shared-zone set that
-// replaces the stored agent.Zones for outbound beats, HELLO, and the
-// OPERATIONAL/LEGACY transition (LEGACY == derived participations == 0).
+// sharedParticipantZones returns the zones of which both the local identity
+// and the given identity are members, with a role or without (plan S15):
+// the derived shared-zone set that replaces the stored agent.Zones for
+// outbound beats, HELLO, and the OPERATIONAL/LEGACY transition (LEGACY ==
+// derived participations == 0).
 func (ar *AgentRegistry) sharedParticipantZones(identity AgentId) []ZoneName {
 	var out []ZoneName
 	for zoneName, zd := range Zones.Items() {
 		if zd == nil {
 			continue
 		}
-		set := participantFQDNSet(instructionsFor(ZoneName(zoneName)))
+		set := participantFQDNSet(zoneName, instructionsFor(ZoneName(zoneName)))
 		if set.has(string(ar.LocalAgent.Identity)) && set.has(string(identity)) {
 			out = append(out, ZoneName(zoneName))
 		}
@@ -549,14 +604,13 @@ func (pgm *ProviderGroupManager) recomputeSince(begun uint64) {
 		if !zd.Ready && instrStore.Load().reading(dns.Fqdn(zname)) == nil {
 			continue
 		}
-		// Membership is defined by the roles of the zone's active
-		// instructions (resolved through its ON HSYNC3 records), NOT by the
-		// raw HSYNC3 identity set. An identity with an HSYNC3 record but no
-		// role is not a member. participants/voting are sorted+deduped.
-		// The group is the make-up (step 8): zones with the same providers
-		// and another split of who votes and who audits are two groups,
-		// and every zone of a group agrees on who votes.
-		makeUp := zoneMakeUp(instructionsFor(ZoneName(zname)))
+		// Membership is defined by the zone's active instructions: every ON
+		// record is a member, with a role or without (plan S15), and so is
+		// a provider whose removal is under way. The group is the make-up
+		// (step 8): zones with the same providers and another split of who
+		// votes, who audits and who has no role are two groups, and every
+		// zone of a group agrees on who votes.
+		makeUp := zoneMakeUp(zname, instructionsFor(ZoneName(zname)))
 		if len(makeUp.members()) < 2 {
 			continue
 		}

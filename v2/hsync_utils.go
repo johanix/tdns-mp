@@ -584,9 +584,9 @@ func requestConfigWith(ar *AgentRegistry, agent *Agent, zone string, subtype str
 	answer, cancel := msgQs.configWaiters.register(rfiWaitKey(string(agent.ID), zone, subtype, nonce))
 	defer cancel()
 	// The answer to a request for the zone's SIG(0) key is let in from a
-	// peer that has no role in the zone (keyHandOverAdmits): the leader of
-	// the group the zone left, whose role the owner may have taken.
-	// Its delivery confirmation is let in by its distribution id alone.
+	// peer that is no member of the zone here (keyHandOverAdmits): a voting
+	// member under the zone's other serial (plan S14, S15). Its delivery
+	// confirmation is let in by its distribution id alone.
 	var distributionID string
 	if subtype == "sig0key" && ar.MPTransport != nil {
 		defer ar.MPTransport.keyAsks.start(string(agent.ID), zone)()
@@ -1780,7 +1780,8 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 // through them PR #186's callbacks). Then, at the agent, membership step 8's
 // one check of the zone's election, after the groups are recomputed: called
 // before it, a zone reduced to one provider would still find its old group
-// (#149).
+// (#149). An agent whose own standing becomes "no role" says so once
+// (plan S15).
 func (mpzd *MPZoneData) onActiveChanged(tm *MPTransportBridge, from, to *Instructions) {
 	lg.Info("the zone's active instructions changed", "zone", mpzd.ZoneName, "from", instructionsName(from), "to", instructionsName(to))
 	if tm == nil || tm.agentRegistry == nil {
@@ -1791,6 +1792,11 @@ func (mpzd *MPZoneData) onActiveChanged(tm *MPTransportBridge, from, to *Instruc
 	diff := hsync.HsyncDiff{Entered: entered, Left: left}
 	switch tdns.Globals.App.Type {
 	case AppTypeMPAgent:
+		if ar.LocalAgent != nil {
+			if self := ar.LocalAgent.Identity; zoneStanding(to, self) == standingNoRole && zoneStanding(from, self) != standingNoRole {
+				lg.Info("an HSYNC3 record and no role: member, no vote, no edits", "zone", mpzd.ZoneName)
+			}
+		}
 		if ar.HsyncEngine != nil {
 			_ = ar.HsyncEngine.ApplyHsyncDiff(hsync.ZoneName(mpzd.ZoneName), diff)
 		}
@@ -1826,10 +1832,10 @@ func (mpzd *MPZoneData) onActiveChanged(tm *MPTransportBridge, from, to *Instruc
 // provider that enters either list: a provider put back, design 5.1), and
 // whether the active instructions changed.
 func catchUpReasons(a *ZoneRefreshAnalysis, from, to *Instructions, self AgentId, changed bool) {
-	pBefore, before := participantsOf(from)
-	pAfter, after := participantsOf(to)
-	a.StandingBefore = standingIn(from, pBefore, before, string(self))
-	a.StandingAfter = standingIn(to, pAfter, after, string(self))
+	_, before, aBefore := participantsOf(from)
+	_, after, aAfter := participantsOf(to)
+	a.StandingBefore = standingIn(from, before, aBefore, string(self))
+	a.StandingAfter = standingIn(to, after, aAfter, string(self))
 	a.HsyncChanged = changed
 	a.NewVoters = nil
 	newVoter := func(id string) {

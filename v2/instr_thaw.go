@@ -181,8 +181,8 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 	local := dns.Fqdn(mp.Identity)
 	timeout := leavingTimeoutFor(mp)
 	v := thawView{zone: in.name, from: in.active.SerialDigest, to: in.agreed.SerialDigest}
-	_, votersN := participantsOf(in.active.Reading)
-	_, votersV := participantsOf(in.agreed.Reading)
+	_, votersN, _ := participantsOf(in.active.Reading)
+	_, votersV, _ := participantsOf(in.agreed.Reading)
 	var t *stampTable
 	if tm := conf.InternalMp.MPTransport; tm != nil {
 		t = tm.stamps

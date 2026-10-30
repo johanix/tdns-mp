@@ -1578,6 +1578,12 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 		return
 	}
 
+	// A CSYNC or a KEY that comes before this agent knows the zone's
+	// leader is kept whole until it does (plan S15).
+	if conf.keepForLeader(synchedDataUpdate, msgQs) {
+		return
+	}
+
 	// A CSYNC or a KEY is taken from the zone's delegation sync
 	// leader only (plan S14 for the KEY); the sender of any
 	// other has been told. What else the update carries goes on.

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -636,9 +637,9 @@ func (r *refreshRig) asked() map[AgentId]string {
 const thirdAgent = "agent.ap.example."
 
 // A standing that rises asks: join for a record that arrives with its role,
-// role for a role given later. Before the switch, nothing for a record that
-// arrives with no role, no peer-role from an agent that does not vote in
-// the zone, and nothing when the standing falls.
+// role for a role given later. From the switch (plan S15) a member with no
+// role asks too: join for a record that arrives with no role, and peer-role
+// for a peer that gets its role. Nothing when the standing falls.
 func TestAStandingThatRisesAsks(t *testing.T) {
 	us, other, third := h3rec{usAgent, true}, h3rec{otherAgent, true}, h3rec{thirdAgent, true}
 	for _, tc := range []struct {
@@ -652,9 +653,9 @@ func TestAStandingThatRisesAsks(t *testing.T) {
 		{"a role given later", []h3rec{us, other}, []h3rec{us, other}, []string{otherAgent}, []string{usAgent, otherAgent},
 			map[AgentId]string{otherAgent: catchUpRole}},
 		{"a record that arrives with no role", []h3rec{other}, []h3rec{us, other}, []string{otherAgent}, []string{otherAgent},
-			map[AgentId]string{}},
+			map[AgentId]string{otherAgent: catchUpJoin}},
 		{"a peer that gets its role where this agent does not vote", []h3rec{us, other, third}, []h3rec{us, other, third}, []string{otherAgent}, []string{otherAgent, thirdAgent},
-			map[AgentId]string{}},
+			map[AgentId]string{thirdAgent: catchUpPeerRole}},
 		{"a standing that falls", []h3rec{us, other}, []h3rec{us, other}, []string{usAgent, otherAgent}, []string{otherAgent},
 			map[AgentId]string{}},
 	} {
@@ -748,34 +749,34 @@ func TestAZoneOfTheStartThatLoadsLateAsksWithStart(t *testing.T) {
 	}
 }
 
-// An agent with a record and no role asks nothing in that zone, while the
-// peer is OPERATIONAL through another zone they share: the peer's
-// admission, which goes by the roles, would refuse it (issue 158).
-func TestAnAgentWithNoRoleAsksNothingWhileThePeerIsOperationalThroughAnotherZone(t *testing.T) {
+// From the switch (plan S15) an agent with a record and no role is a member:
+// the peer admits its request for the zone's state, and it asks the zone's
+// voting members, as it does in a zone it votes in.
+func TestAMemberWithNoRoleAsksTheVotingMembers(t *testing.T) {
 	env := newIntegEnv(t, &integEnvConfig{}) // real admission: no peer is authorized by configuration
 	alice, bob := AgentId(env.Alice.Identity), AgentId(env.Bob.Identity)
 	const noRole, shared = "norole.admission.example.", "shared.admission.example."
 	catchUpZone(t, noRole, []string{string(bob)}, nil, []string{string(alice)})
 	catchUpZone(t, shared, []string{string(alice), string(bob)}, nil, nil)
-	if ok, _ := env.Bob.Bridge.IsPeerAuthorized(string(alice), noRole); ok {
-		t.Fatal("the peer admits a request from an agent with no role in the zone")
+	if ok, why := env.Bob.Bridge.IsPeerAuthorized(string(alice), noRole); !ok {
+		t.Fatalf("the peer refuses a request from a member with no role in the zone: %s", why)
 	}
-	if ok, _ := env.Bob.Bridge.IsPeerAuthorized(string(alice), ""); !ok {
-		t.Fatal("the peer does not admit the agent through the zone they share")
+	if why := env.Bob.Bridge.rfiSenderRefusal(noRole, string(alice), "SYNC", ""); why != "" {
+		t.Errorf("the peer refuses the request for the zone's state from a member with no role: %s", why)
 	}
 	r := newTrackerRig(t, string(alice), noRole, shared)
 	r.setUp(bob, true)
 	r.run()
 	r.t.afterRefresh(noRole, &ZoneRefreshAnalysis{FirstLoad: true})
 	r.t.afterRefresh(shared, &ZoneRefreshAnalysis{FirstLoad: true})
-	r.t.PeerOperational(bob)
-	got := r.waitSends(t, 1)
-	if got[0].zone != shared {
-		t.Errorf("asked %+v, want the shared zone alone", got[0])
+	got := r.waitSends(t, 2)
+	zones := []ZoneName{got[0].zone, got[1].zone}
+	slices.Sort(zones)
+	if !slices.Equal(zones, []ZoneName{noRole, shared}) {
+		t.Errorf("asked %+v, want both zones", got)
 	}
-	time.Sleep(30 * time.Millisecond)
-	if n := len(r.sent()); n != 1 {
-		t.Errorf("sent %+v", r.sent())
+	if s := r.t.Status(noRole); s == nil || s.NotVoting {
+		t.Errorf("the member with no role's catch-up status: %+v", s)
 	}
 }
 
@@ -846,14 +847,19 @@ func TestASignerIsNotCaughtUpWithoutItsInventory(t *testing.T) {
 	}
 }
 
-// An agent that does not vote in the zone asks nothing, and its status
-// says so rather than naming the voting members it does not wait for.
+// An auditor asks nothing, and its status says so rather than naming the
+// voting members it does not wait for. A member with no role asks them from
+// the switch on (plan S15), and its status names them.
 func TestTheStatusOfAnAgentThatDoesNotVote(t *testing.T) {
-	const zone = "status.novote.example."
+	const audited, zone = "status.audited.example.", "status.novote.example."
+	catchUpZone(t, audited, []string{roleB}, []string{roleA}, nil)
 	catchUpZone(t, zone, []string{roleB}, nil, []string{roleA})
 	r := newTrackerRig(t, roleA)
-	if s := r.t.Status(zone); s == nil || !s.NotVoting || len(s.Peers) != 0 {
-		t.Errorf("the status: %+v", s)
+	if s := r.t.Status(audited); s == nil || !s.NotVoting || len(s.Peers) != 0 {
+		t.Errorf("the auditor's status: %+v", s)
+	}
+	if s := r.t.Status(zone); s == nil || s.NotVoting || len(s.Peers) != 1 || s.Peers[0].Identity != roleB {
+		t.Errorf("the status of a member with no role: %+v", s)
 	}
 }
 
@@ -911,9 +917,10 @@ func TestTheTrackerSendsOnceTheHydrationIsOver(t *testing.T) {
 // through the tracker, and says what became of each request; in a zone in
 // which this agent does not vote it sends nothing, and says why.
 func TestTheOperatorsResyncPullAsksTheVotingMembers(t *testing.T) {
-	const zone, noRole = "pull.manual.example.", "pull.norole.example."
+	const zone, noRole, audited = "pull.manual.example.", "pull.norole.example.", "pull.audited.example."
 	catchUpZone(t, zone, []string{roleA, roleB}, []string{roleX}, []string{roleN})
 	catchUpZone(t, noRole, []string{roleB}, nil, []string{roleA})
+	catchUpZone(t, audited, []string{roleB}, []string{roleA}, nil)
 	r := newTrackerRig(t, roleA)
 	r.setUp(roleB, true)
 	r.run()
@@ -938,9 +945,15 @@ func TestTheOperatorsResyncPullAsksTheVotingMembers(t *testing.T) {
 	if got := pull(zone); got.RfiResponse[roleB].Msg != askOutstanding.String() {
 		t.Errorf("a second pull while the first is outstanding: %v", got.RfiResponse[roleB].Msg)
 	}
+	// a member with no role asks the voting members (plan S15); an auditor
+	// asks nothing
 	got = pull(noRole)
+	if got.Error || len(got.RfiResponse) != 1 || got.RfiResponse[roleB] == nil {
+		t.Errorf("a pull where this agent is a member with no role: %+v", got)
+	}
+	got = pull(audited)
 	if got.Error || len(got.RfiResponse) != 0 || !strings.Contains(got.Msg, "nothing is sent") {
-		t.Errorf("a pull where this agent does not vote: %+v", got)
+		t.Errorf("a pull where this agent is an auditor: %+v", got)
 	}
 	// this agent's identity configured in another case than the zone's
 	// record names it: it votes all the same
@@ -949,8 +962,8 @@ func TestTheOperatorsResyncPullAsksTheVotingMembers(t *testing.T) {
 		t.Errorf("a pull by an identity configured in another case: %+v", got)
 	}
 	time.Sleep(30 * time.Millisecond)
-	if n := len(r.sent()); n != 1 {
-		t.Errorf("%d requests sent", n)
+	if n := len(r.sent()); n != 2 {
+		t.Errorf("%d requests sent, want 2: the zone's and the zone with no role's", n)
 	}
 }
 

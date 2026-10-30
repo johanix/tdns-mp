@@ -1,8 +1,11 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  *
- * The hand-over of a zone's SIG(0) key by a provider whose role the owner has
- * taken: what the two agents let in, and what the new leader takes.
+ * The hand-over of a zone's SIG(0) key: what the agents let in, and what the
+ * new leader takes. From the switch (plan S15) a provider whose role the
+ * owner has taken and whose record stays is a member, admitted in full; the
+ * gate for the key alone lets in the answer of an agent asked that is no
+ * member of the zone here.
  */
 package tdnsmp
 
@@ -55,60 +58,62 @@ func configMessage(t *testing.T, sender string, zone ZoneName, subtype string) *
 	return &transport.IncomingMessage{TypeToken: "config", SenderID: sender, TransportSender: sender, Zone: string(zone), Payload: payload}
 }
 
+// handoverStranger is no member of the zone that moved: a voting member
+// under the zone's other serial, say, whom the new leader asks for the key
+// (transitionVoters, plan S14).
+const handoverStranger = "d.agent.example."
+
 // The provider that led the zone, C, holds the key and has no role in the
-// zone now. Admission let a message about a zone in only between two of its
-// role holders, so C refused the new leader's request for the key, while C
-// and A share another zone in which both still hold roles. C lets a request
-// about the zone in from a voting member, and only the request for the key
-// gets through. A message about the other zone is as before.
-func TestTheProviderThatLedLetsInTheRequestForTheKeyOnly(t *testing.T) {
+// zone now. From the switch (plan S15) it is a member: it admits the new
+// leader's messages about the zone in full, its request for the key and any
+// other, and the new leader admits C's. A sender that is no member is let in
+// for nothing.
+func TestAMemberWithNoRoleIsAdmittedInFull(t *testing.T) {
 	moved, other := handoverZones(t)
-	c := handoverBridge(arrivalC)
+	c, a := handoverBridge(arrivalC), handoverBridge(arrivalA)
 
 	if ok, reason := c.IsPeerAuthorized(arrivalA, string(moved)); !ok {
 		t.Fatalf("C refuses A's message about %s: %s", moved, reason)
 	}
-	if !c.keyHandOverOnly(rfiMessage(t, arrivalA, moved, "sig0key")) {
-		t.Error("C does not act on A's request for the key of the zone that moved")
+	for _, subtype := range []string{"sig0key", "upstream"} {
+		if !c.keyHandOverOnly(rfiMessage(t, arrivalA, moved, subtype)) {
+			t.Errorf("C does not act on A's %s request about the zone it is a member of with no role", subtype)
+		}
 	}
-	if c.keyHandOverOnly(rfiMessage(t, arrivalA, moved, "upstream")) {
-		t.Error("C acts on another request from A about the zone it has no role in")
+	if ok, reason := a.IsPeerAuthorized(arrivalC, string(moved)); !ok {
+		t.Errorf("A refuses C's message about %s with no request out: %s", moved, reason)
 	}
 	if ok, _ := c.IsPeerAuthorized(arrivalA, string(other)); !ok || !c.keyHandOverOnly(rfiMessage(t, arrivalA, other, "upstream")) {
 		t.Error("C no longer takes A's messages about the zone in which both hold roles")
 	}
-
-	// A sender with no vote in the zone may not hold the key, and is let in
-	// for nothing.
-	d := handoverBridge(arrivalC)
-	if ok, _ := d.IsPeerAuthorized("stranger.agent.example.", string(moved)); ok {
-		t.Error("C lets in a sender that has no role in the zone")
+	if ok, _ := c.IsPeerAuthorized(handoverStranger, string(moved)); ok {
+		t.Error("C lets in a sender that is no member of the zone")
 	}
 }
 
-// The new leader, A, asked C for the key. C has no role in the zone, and its
-// answer was refused at A. A lets it in while its request is out, and only
-// the answer about the key gets through.
+// The new leader, A, asked an agent that is no member of the zone here for
+// the key. A lets its answer in while its request is out, and only the
+// answer about the key gets through.
 func TestTheNewLeaderLetsInTheAnswerToItsRequestOnly(t *testing.T) {
 	moved, _ := handoverZones(t)
 	a := handoverBridge(arrivalA)
 
-	if ok, _ := a.IsPeerAuthorized(arrivalC, string(moved)); ok {
-		t.Fatal("A lets C in about the zone with no request out: the test shows nothing")
+	if ok, _ := a.IsPeerAuthorized(handoverStranger, string(moved)); ok {
+		t.Fatal("A lets the stranger in about the zone with no request out: the test shows nothing")
 	}
-	done := a.keyAsks.start(arrivalC, string(moved))
-	if ok, reason := a.IsPeerAuthorized(arrivalC, string(moved)); !ok {
-		t.Fatalf("A refuses C's answer to its request for the key: %s", reason)
+	done := a.keyAsks.start(handoverStranger, string(moved))
+	if ok, reason := a.IsPeerAuthorized(handoverStranger, string(moved)); !ok {
+		t.Fatalf("A refuses the answer to its request for the key: %s", reason)
 	}
-	if !a.keyHandOverOnly(configMessage(t, arrivalC, moved, "sig0key")) {
-		t.Error("A does not act on C's answer about the key")
+	if !a.keyHandOverOnly(configMessage(t, handoverStranger, moved, "sig0key")) {
+		t.Error("A does not act on the answer about the key")
 	}
-	if a.keyHandOverOnly(configMessage(t, arrivalC, moved, "upstream")) {
-		t.Error("A acts on another answer from C about the zone C has no role in")
+	if a.keyHandOverOnly(configMessage(t, handoverStranger, moved, "upstream")) {
+		t.Error("A acts on another answer from an agent that is no member of the zone")
 	}
 	done()
-	if ok, _ := a.IsPeerAuthorized(arrivalC, string(moved)); ok {
-		t.Error("A still lets C in once its request is over")
+	if ok, _ := a.IsPeerAuthorized(handoverStranger, string(moved)); ok {
+		t.Error("A still lets the stranger in once its request is over")
 	}
 }
 
@@ -144,22 +149,23 @@ func TestAHandedOverKeyIsTakenOnlyWhenTheZonePublishesIt(t *testing.T) {
 
 // The check runs before the verb handlers: a message let in for the key
 // alone that is not about the key reaches no handler, which would have
-// acknowledged it as taken. The request for the key does.
+// acknowledged it as taken. The answer about the key does.
 func TestAMessageLetInForTheKeyAloneReachesNoHandlerUnlessItIsAboutTheKey(t *testing.T) {
 	moved, _ := handoverZones(t)
-	c := handoverBridge(arrivalC)
+	a := handoverBridge(arrivalA)
+	defer a.keyAsks.start(handoverStranger, string(moved))()
 	reached := func(msg *transport.IncomingMessage) bool {
 		ctx := &transport.MessageContext{Data: map[string]interface{}{}}
 		ctx.SetIncoming(msg)
 		handled := false
-		_ = c.keyHandOverGate(ctx, func(*transport.MessageContext) error { handled = true; return nil })
+		_ = a.keyHandOverGate(ctx, func(*transport.MessageContext) error { handled = true; return nil })
 		return handled
 	}
-	if !reached(rfiMessage(t, arrivalA, moved, "sig0key")) {
-		t.Error("A's request for the key does not reach C's handler")
+	if !reached(configMessage(t, handoverStranger, moved, "sig0key")) {
+		t.Error("the answer about the key does not reach A's handler")
 	}
-	if reached(rfiMessage(t, arrivalA, moved, "upstream")) {
-		t.Error("another request from A about the zone C has no role in reaches C's handler")
+	if reached(configMessage(t, handoverStranger, moved, "upstream")) {
+		t.Error("another answer from an agent that is no member reaches A's handler")
 	}
 	// A delivery confirmation reaches the transport's own handler, which
 	// settles the sender's queued message, only when it confirms the key
@@ -172,46 +178,44 @@ func TestAMessageLetInForTheKeyAloneReachesNoHandlerUnlessItIsAboutTheKey(t *tes
 		}
 		return &transport.IncomingMessage{TypeToken: "confirm", SenderID: sender, TransportSender: sender, Zone: string(moved), Payload: payload}
 	}
-	if reached(confirm(arrivalA, "other-distribution")) {
-		t.Error("a confirmation of another distribution reaches C's transport")
+	if reached(confirm(handoverStranger, "other-distribution")) {
+		t.Error("a confirmation of another distribution reaches A's transport")
 	}
-	c.keyAsks.expectConfirm(arrivalA, "key-answer")
-	if !reached(confirm(arrivalA, "key-answer")) {
-		t.Error("A's confirmation of C's answer about the key does not reach C's transport")
-	}
-	if reached(confirm(arrivalB, "key-answer")) {
-		t.Error("B's confirmation of the answer C sent to A reaches C's transport")
+	a.keyAsks.expectConfirm(handoverStranger, "key-request")
+	if !reached(confirm(handoverStranger, "key-request")) {
+		t.Error("the confirmation of A's request for the key does not reach A's transport")
 	}
 }
 
 // The gate's refusal is REFUSED on the wire and no handler error: the
 // router logs a handler error, and a message refused by the rule is no
-// failure of this agent's. The request for the key gets no rcode from the
+// failure of this agent's. The answer about the key gets no rcode from the
 // gate.
 func TestTheKeyGatesRefusalIsNoHandlerError(t *testing.T) {
 	moved, _ := handoverZones(t)
-	c := handoverBridge(arrivalC)
+	a := handoverBridge(arrivalA)
+	defer a.keyAsks.start(handoverStranger, string(moved))()
 	gate := func(msg *transport.IncomingMessage) (*transport.MessageContext, bool, error) {
 		ctx := &transport.MessageContext{Data: map[string]interface{}{}}
 		ctx.SetIncoming(msg)
 		handled := false
-		err := c.keyHandOverGate(ctx, func(*transport.MessageContext) error { handled = true; return nil })
+		err := a.keyHandOverGate(ctx, func(*transport.MessageContext) error { handled = true; return nil })
 		return ctx, handled, err
 	}
 	rcode := func(ctx *transport.MessageContext) (int, bool) {
 		rc, ok := ctx.Data["response_rcode"].(int)
 		return rc, ok
 	}
-	ctx, handled, err := gate(rfiMessage(t, arrivalA, moved, "upstream"))
+	ctx, handled, err := gate(configMessage(t, handoverStranger, moved, "upstream"))
 	if err != nil {
 		t.Errorf("the refusal is a handler error: %v", err)
 	}
 	if rc, _ := rcode(ctx); rc != dns.RcodeRefused || handled {
-		t.Errorf("another request from A: rcode %d, handled %v; want REFUSED and no handler", rc, handled)
+		t.Errorf("another answer: rcode %d, handled %v; want REFUSED and no handler", rc, handled)
 	}
-	ctx, handled, err = gate(rfiMessage(t, arrivalA, moved, "sig0key"))
+	ctx, handled, err = gate(configMessage(t, handoverStranger, moved, "sig0key"))
 	if _, set := rcode(ctx); err != nil || set || !handled {
-		t.Errorf("the request for the key: err %v, rcode set %v, handled %v", err, set, handled)
+		t.Errorf("the answer about the key: err %v, rcode set %v, handled %v", err, set, handled)
 	}
 }
 
@@ -219,19 +223,20 @@ func TestTheKeyGatesRefusalIsNoHandlerError(t *testing.T) {
 // as a sync, whose records and operations are applied. Such a message, sent
 // as an RFI with the key's markers, passed the check for the key alone and
 // reached the update path. Only a payload that says rfi itself, and carries
-// nothing to apply, is the request for the key.
+// nothing to apply, is let through as the request for the key.
 func TestARequestForTheKeyThatCarriesAnUpdateIsRefused(t *testing.T) {
 	moved, _ := handoverZones(t)
-	c := handoverBridge(arrivalC)
+	a := handoverBridge(arrivalA)
+	defer a.keyAsks.start(handoverStranger, string(moved))()
 	send := func(p *DnsSyncPayload) bool {
 		payload, err := json.Marshal(p)
 		if err != nil {
 			t.Fatalf("payload: %v", err)
 		}
-		return c.keyHandOverOnly(&transport.IncomingMessage{TypeToken: "rfi", SenderID: arrivalA, TransportSender: arrivalA, Zone: string(moved), Payload: payload})
+		return a.keyHandOverOnly(&transport.IncomingMessage{TypeToken: "rfi", SenderID: handoverStranger, TransportSender: handoverStranger, Zone: string(moved), Payload: payload})
 	}
 	key := func() *DnsSyncPayload {
-		return &DnsSyncPayload{MessageType: "rfi", OriginatorID: arrivalA, Zone: string(moved), RfiType: "CONFIG", RfiSubtype: "sig0key"}
+		return &DnsSyncPayload{MessageType: "rfi", OriginatorID: handoverStranger, Zone: string(moved), RfiType: "CONFIG", RfiSubtype: "sig0key"}
 	}
 	if !send(key()) {
 		t.Fatal("the request for the key is refused")

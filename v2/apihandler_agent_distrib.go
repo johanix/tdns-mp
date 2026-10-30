@@ -717,7 +717,7 @@ func listPeerSharedZones(conf *Config) []interface{} {
 	return data
 }
 
-// listAgentsForZone returns peer agents that are participants in a specific zone
+// listAgentsForZone returns peer agents that are members of a specific zone
 func listAgentsForZone(conf *Config, zoneName string) []string {
 	agents := make([]string, 0)
 	mp := conf.MpConfig()
@@ -726,7 +726,7 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 		return agents
 	}
 
-	members := participantFQDNSet(instructionsFor(ZoneName(zoneName)))
+	members := participantFQDNSet(zoneName, instructionsFor(ZoneName(zoneName)))
 	conf.InternalMp.AgentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
 		identity := agent.ID
 

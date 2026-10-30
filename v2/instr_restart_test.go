@@ -46,7 +46,7 @@ func (r *thawRig) restart() {
 // leadGroup has the election records name leader as the leader of the
 // zone's group under in.
 func (r *thawRig) leadGroup(in *Instructions, leader string) {
-	m := zoneMakeUp(in)
+	m := zoneMakeUp(r.zone, in)
 	r.lem.mu.Lock()
 	defer r.lem.mu.Unlock()
 	r.lem.groupElections[ComputeGroupHash(m.voting, m.auditors, m.noRole)] = &LeaderElection{Leader: AgentId(leader), LeaderExpiry: time.Now().Add(time.Hour)}
@@ -245,7 +245,7 @@ func TestTheAuditorTakesItsRecordOrTheLeadersWord(t *testing.T) {
 	}
 	r.noRecord(r.n)
 	gst := NewGossipStateTable(roleN)
-	m := zoneMakeUp(r.n)
+	m := zoneMakeUp(r.zone, r.n)
 	gst.Elections[ComputeGroupHash(m.voting, m.auditors, m.noRole)] = &GroupElectionState{Leader: roleB, Term: 1, LeaderExpiry: time.Now().Add(time.Hour)}
 	r.conf.InternalMp.AgentRegistry.GossipStateTable = gst
 	r.hear(roleN, tells(r.n, r.n), true)
@@ -705,8 +705,12 @@ func TestAGroupElectionReachesAZoneNotLoadedYet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the zone's agents before its first load: %v", err)
 	}
-	if len(zad.Agents) != 1 || zad.Agents[0].ID != AgentId(roleB) {
+	// b votes, and n is a member with no role (plan S15)
+	if len(zad.Agents) != 2 || zad.Agents[0].ID != AgentId(roleB) || zad.Agents[1].ID != AgentId(roleN) {
 		t.Errorf("the zone's agents: %v", zad.Agents)
+	}
+	if zad.Standing[AgentId(roleN)] != standingNameNoRole {
+		t.Errorf("the zone's standings: %v", zad.Standing)
 	}
 }
 
