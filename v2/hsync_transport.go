@@ -1294,7 +1294,7 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 			case tm.msgQs.KeystateSignal <- sigMsg:
 				lgTransport.Info("routed KEYSTATE signal", "signal", payload.Signal, "sender", senderID, "zone", payload.Zone, "keyTag", payload.KeyTag)
 			default:
-				lgTransport.Warn("KeystateSignal channel full, dropping", "signal", payload.Signal, "sender", senderID)
+				lgTransport.Warn("KeystateSignal channel full, dropping", "zone", payload.Zone, "signal", payload.Signal, "sender", senderID, "keyTag", payload.KeyTag, "handover", payload.Acting.String())
 			}
 		} else {
 			lgTransport.Debug("non-inventory KEYSTATE, no KeystateSignal channel, routing to Msg queue", "signal", payload.Signal, "sender", senderID)
@@ -1545,7 +1545,7 @@ func (tm *MPTransportBridge) routeStatusUpdateMessage(msg *transport.IncomingMes
 	case tm.msgQs.StatusUpdate <- statusMsg:
 		lgTransport.Info("routed STATUS-UPDATE to handler", "sender", senderID, "zone", payload.Zone, "subtype", payload.SubType)
 	default:
-		lgTransport.Warn("StatusUpdate channel full, dropping status-update", "sender", senderID)
+		lgTransport.Warn("StatusUpdate channel full, dropping status-update", "zone", payload.Zone, "subtype", payload.SubType, "sender", senderID)
 	}
 }
 
