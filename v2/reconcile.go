@@ -587,13 +587,16 @@ func (conf *Config) reconcileView(in reconcileInputs, told map[string]toldStamp,
 			v.adopt = &c
 		}
 	}
-	if v.adopt != nil {
-		return v
-	}
+	// a leader that holds no step's sets takes none until every other
+	// voting member under V is heard: one not heard may tell a further step
 	if !in.hasStep && len(unheard) > 0 {
+		v.adopt = nil
 		for _, id := range unheard {
 			v.waits = append(v.waits, id+" (not heard)")
 		}
+		return v
+	}
+	if v.adopt != nil {
 		return v
 	}
 
@@ -663,8 +666,16 @@ func (conf *Config) stepWaits(in reconcileInputs, told map[string]toldStamp, vot
 	local := dns.Fqdn(mp.Identity)
 	timeout, noRole := leavingTimeoutFor(mp), noRoleTimeoutFor(mp)
 	holds := func(st toldStamp) bool {
-		return st.Known && st.Active == in.active.Serial && st.ActiveDigest == in.active.Digest && st.StepHeld &&
-			st.Step != nil && st.Step.Number == in.step.Number && st.Step.Digest == in.step.Digest
+		if !st.Known || st.Active != in.active.Serial || st.ActiveDigest != in.active.Digest {
+			return false
+		}
+		// one at rest at V, done with the transition or at rest since it
+		// first knew V, holds V's lists in its parts: past every step, and it
+		// takes no step any more
+		if !st.Reconciling {
+			return true
+		}
+		return st.StepHeld && st.Step != nil && st.Step.Number == in.step.Number && st.Step.Digest == in.step.Digest
 	}
 	if !conf.holdsStep(in.name, in.active.SerialDigest, in.step.InstrStep) {
 		v.waits = append(v.waits, local+" (its combiner and signer)")

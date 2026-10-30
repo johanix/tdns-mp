@@ -169,6 +169,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 		case <-trackingEvictTicker.C:
 			zdr.evictStaleTracking(1 * time.Hour)
+			conf.csyncsLookAgain(ctx, zdr)
 
 		case <-ownReadTicker.C:
 			owner.tick(ctx)
