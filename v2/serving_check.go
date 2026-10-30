@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"slices"
 	"time"
 
@@ -41,12 +42,14 @@ func imrServingLookup(ctx context.Context, zone, ns string) (*core.RRset, error)
 		if err != nil || resp == nil || resp.RRset == nil {
 			continue
 		}
+		// with the port: AuthDNSQuery adds it only to an address that
+		// does not end in ":53", which an IPv6 address can
 		for _, rr := range resp.RRset.RRs {
 			switch a := rr.(type) {
 			case *dns.A:
-				addrs = append(addrs, a.A.String())
+				addrs = append(addrs, net.JoinHostPort(a.A.String(), "53"))
 			case *dns.AAAA:
-				addrs = append(addrs, a.AAAA.String())
+				addrs = append(addrs, net.JoinHostPort(a.AAAA.String(), "53"))
 			}
 		}
 	}
