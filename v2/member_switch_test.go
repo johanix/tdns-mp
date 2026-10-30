@@ -334,14 +334,14 @@ func TestAMemberWithNoRoleMayNotEdit(t *testing.T) {
 	mpzd := instrTestZone(t, "noedits.s15.example.",
 		`3600 IN HSYNC3 ON alpha `+acAlpha+` .`, `3600 IN HSYNC3 ON delta `+s15Delta+` .`,
 		`3600 IN HSYNCPARAM `+numberedText(`serial="7" servers="alpha"`))
-	mpzd.populateMPdata(&MultiProviderConf{Role: "agent", Identity: s15Delta}, Roles{Servers: []Provider{{Label: "alpha", Identity: acAlpha}}})
+	mpzd.populateMPdata(&MultiProviderConf{Role: "agent", Identity: s15Delta}, mpzd.roles())
 	if mpzd.MP.MPdata == nil || mpzd.MP.MPdata.OurLabel != "delta" {
 		t.Fatalf("the member with no role's provider data: %+v", mpzd.MP.MPdata)
 	}
 	if !mpzd.MPOptions[OptMPDisallowEdits] || mpzd.MPOptions[tdns.OptAllowEdits] {
 		t.Errorf("a member with no role in an unsigned zone: disallow %v, allow %v", mpzd.MPOptions[OptMPDisallowEdits], mpzd.MPOptions[tdns.OptAllowEdits])
 	}
-	mpzd.populateMPdata(&MultiProviderConf{Role: "agent", Identity: acAlpha}, Roles{Servers: []Provider{{Label: "alpha", Identity: acAlpha}}})
+	mpzd.populateMPdata(&MultiProviderConf{Role: "agent", Identity: acAlpha}, mpzd.roles())
 	if mpzd.MPOptions[OptMPDisallowEdits] || !mpzd.MPOptions[tdns.OptAllowEdits] {
 		t.Errorf("the server in an unsigned zone: disallow %v, allow %v", mpzd.MPOptions[OptMPDisallowEdits], mpzd.MPOptions[tdns.OptAllowEdits])
 	}
