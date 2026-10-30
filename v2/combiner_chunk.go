@@ -1338,9 +1338,14 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 							_, gone, dropped, derr := mpzd.ReplaceCombinerDataByRRtype(req.SenderID, zonename, rrtype, nil)
 							if derr != nil {
 								lgCombiner.Error("removing the sender's own contribution failed", "zone", zonename, "sender", req.SenderID, "rrtype", op.RRtype, "err", derr)
-							} else if dropped && policy.canApply(rrtype) {
+							} else if dropped {
+								// told to the sender whether or not this
+								// combiner serves the type: the records are
+								// reported applied above too
 								removedRecords = append(removedRecords, gone...)
-								dataChanged = true
+								if policy.canApply(rrtype) {
+									dataChanged = true
+								}
 							}
 							for _, rr := range parsedRRs {
 								appliedRecords = append(appliedRecords, rr.String())
