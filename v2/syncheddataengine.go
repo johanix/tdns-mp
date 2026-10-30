@@ -1747,8 +1747,9 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 		// The leader's publish instruction goes to the combiner
 		// whether or not its KEY changed the repo: a member may
 		// hold the KEY from before the instruction came with it
-		// (#206)
-		if err == nil && !change && synchedDataUpdate.Update != nil && synchedDataUpdate.Update.Publish != nil {
+		// (#206). So does the leader's withdrawal: the combiner may hold
+		// what this agent no longer does (plan S16).
+		if err == nil && !change && synchedDataUpdate.Update != nil && (synchedDataUpdate.Update.Publish != nil || synchedDataUpdate.Withdraw != nil) {
 			change = true
 		}
 		if err != nil {

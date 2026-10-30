@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
+	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -349,6 +350,28 @@ func TestTheCombinerTakesTheFlagFromItsOwnAgentOnly(t *testing.T) {
 	}
 }
 
+// On a zone whose edits wait for manual approval, the leader's withdrawal
+// from the combiner's own agent is applied at once, not kept for approval.
+func TestAWithdrawalIsNotKeptForManualApproval(t *testing.T) {
+	mpzd, hdb := withdrawnAtCombiner(t, "manual.combiner.withdraw.example.", "ns1")
+	mpzd.Options[OptMPManualApproval] = true
+	conf := &Config{Config: &tdns.Config{}}
+	conf.Config.Internal.KeyDB = hdb.KeyDB
+	conf.SetMpConfig(&MultiProviderConf{Role: "combiner", Identity: csyncCombinerID, Agents: []*PeerConf{{Identity: csyncOurAgent}}})
+	msgQs := &MsgQs{Msg: make(chan *AgentMsgPostPlus, 4)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); CombinerMsgHandler(ctx, conf, msgQs, nil, nil) }()
+	t.Cleanup(func() { cancel(); <-done })
+	msgQs.Msg <- &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: AgentMsgNotify, OriginatorID: goneOrigin, DeliveredBy: csyncOurAgent,
+		Zone: ZoneName(mpzd.ZoneName), DistributionID: nextDistributionID(), Withdraw: &Withdraw{Provider: goneOrigin, RRtype: "NS"},
+		Operations: []core.RROperation{{Operation: "replace", RRtype: "NS"}}}}
+	waitUntil(t, "the withdrawal was not applied", func() bool { return len(combinerHolds(mpzd, goneOrigin)) == 0 })
+	if edits, _ := ListPendingEdits(hdb, mpzd.ZoneName); len(edits) != 0 {
+		t.Errorf("the withdrawal is kept for approval: %+v", edits)
+	}
+}
+
 const goneOrigin = "agent.gone.example."
 
 // withdrawnAtCombiner is a combiner's zone where goneOrigin, which has no
@@ -411,12 +434,22 @@ func TestTheConfirmationOfAWithdrawalGoesToTheLeader(t *testing.T) {
 	if prc == nil || prc.OriginatingSender != roleB {
 		t.Errorf("the withdrawal's final confirmation goes to %+v, want the leader %s", prc, roleB)
 	}
-	// nothing held: confirmed at once, to the leader
+	// nothing held here: it goes to the combiner all the same, which may
+	// hold what this agent does not, and its word to the leader
 	r2 := newReceiveRig(t, "noop.confirm.withdraw.example.")
 	r2.leads(roleB)
 	r2.withdrawal(roleB, roleN, "d2", r2.n, time.Now())
-	if a := r2.answered("d2"); len(a) != 1 || a[0].OriginatingSender != roleB || a[0].Status != "ok" {
-		t.Errorf("the answer to a withdrawal of what is not held: %d answers, want a success to %s", len(a), roleB)
+	if a := r2.answered("d2"); len(a) != 0 || r2.sent()[freezeCombiner] != 1 {
+		t.Errorf("a withdrawal of what is not held here: answered %d at once, queued %v, want it handed to the combiner", len(a), r2.sent())
+	}
+	prc = nil
+	for _, p := range r2.zdr.PendingRemoteConfirms {
+		if p.OriginatingDistID == "d2" {
+			prc = p
+		}
+	}
+	if prc == nil || prc.OriginatingSender != roleB {
+		t.Errorf("the final confirmation of a withdrawal of what is not held goes to %+v, want %s", prc, roleB)
 	}
 }
 
