@@ -90,6 +90,7 @@ type keyRound struct {
 	next    time.Time
 	out     bool // a round is out
 	decided bool // the round's decision has started
+	recheck bool // a check or an ask came while the round was out: the next asks at once
 	asked   []AgentId
 	answers map[AgentId]keyReply
 	// serial is this agent's active serial when the round went out (known
@@ -169,17 +170,24 @@ func (t *catchUpTracker) keyRestart(zone ZoneName) {
 	zone = ZoneName(dns.Fqdn(string(zone)))
 	if r := t.keyWanted[zone]; r != nil {
 		t.keyGen++
-		r.gen, r.out, r.decided, r.rounds, r.next = t.keyGen, false, false, 0, time.Now()
+		r.gen, r.out, r.decided, r.rounds, r.next, r.recheck = t.keyGen, false, false, 0, time.Now(), false
 	}
 	t.keyCheckLocked(zone)
 }
 
-// keyAskNowLocked: a zone that became caught up gets its next round at once.
+// keyAskNowLocked: a zone that became caught up gets its next round at once,
+// or, while a round is out, as soon as that ends (keyRoundEnded).
 func (t *catchUpTracker) keyAskNowLocked(zone ZoneName) {
-	if r := t.keyWanted[zone]; r != nil && !r.out {
-		r.next = time.Now()
-		t.wakeKeysLocked()
+	r := t.keyWanted[zone]
+	if r == nil {
+		return
 	}
+	if r.out {
+		r.recheck = true
+		return
+	}
+	r.next = time.Now()
+	t.wakeKeysLocked()
 }
 
 func (t *catchUpTracker) wakeKeysLocked() {
@@ -246,6 +254,10 @@ func (t *catchUpTracker) keyPass(ctx context.Context) {
 			// operation, a changed apex KEY): the next round asks at once
 			r.next = time.Now()
 			due = append(due, zone)
+		} else if wants && r != nil && r.out {
+			// the round that is out may have been answered before the
+			// key came: the next asks as soon as it ends (keyRoundEnded)
+			r.recheck = true
 		} else if !wants && r != nil {
 			delete(t.keyWanted, zone)
 		}
@@ -512,9 +524,16 @@ func (t *catchUpTracker) keyRoundEnded(zone ZoneName, gen uint64, done bool) {
 		delay = keyRoundDelays[r.rounds]
 	}
 	r.rounds++
+	if r.recheck {
+		// a check came while the round was out (keyPass)
+		delay, r.recheck = 0, false
+	}
 	r.out, r.next = false, time.Now().Add(delay)
 	if t.keyLogs.due("again " + string(zone)) {
 		lgAgent.Warn("no SIG(0) key yet, asking again", "zone", zone, "answers", answersLine(r.answers), "next", delay)
+	}
+	if delay == 0 {
+		t.wakeKeysLocked()
 	}
 }
 
