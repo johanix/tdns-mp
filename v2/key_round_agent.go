@@ -305,7 +305,7 @@ func (conf *Config) decideZoneKeyLocked(ctx context.Context, zone ZoneName, answ
 		}
 		unpublished = true // a key taken counts as unpublished until it is
 		if err := conf.publishZoneKey(ctx, zone, tk, false, 0); err != nil {
-			if !errors.Is(err, errLeadMoved) {
+			if !errors.Is(err, errLeadMoved) && !errors.Is(err, errHeldDuringTransition) {
 				lgAgent.Error("the SIG(0) key taken could not be published; the sync with the parent waits", "zone", zone, "err", err)
 			}
 			return true, false
@@ -343,6 +343,12 @@ func (conf *Config) decideZoneKeyLocked(ctx context.Context, zone ZoneName, answ
 			return false, false // deciding that no key exists waits for the catch-up
 		}
 	}
+	// and for the transition's end: nothing new starts while the zone is
+	// frozen (plan S6)
+	if held, why := conf.syncHeld(string(zone), syncOther); held {
+		lgAgent.Info("deciding that the zone has no SIG(0) key waits for the transition", "zone", zone, "phase", why)
+		return false, false
+	}
 	// a key is made only for a parent known to take UPDATE
 	if uses, known := conf.zoneKeyUse(ctx, zone); !known {
 		return false, false
@@ -359,7 +365,7 @@ func (conf *Config) decideZoneKeyLocked(ctx context.Context, zone ZoneName, answ
 	if err := conf.publishZoneKey(ctx, zone, tk, made, madeKeyid); err != nil {
 		if made && errors.Is(err, errLeadMoved) {
 			unpublished = false // the key is gone
-		} else if !errors.Is(err, errLeadMoved) {
+		} else if !errors.Is(err, errLeadMoved) && !errors.Is(err, errHeldDuringTransition) {
 			lgAgent.Error("the SIG(0) key made could not be published; the sync with the parent waits", "zone", zone, "err", err)
 		}
 		return true, false

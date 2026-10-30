@@ -256,12 +256,10 @@ func zoneMemberRole(zone ZoneName, identity string) (label string, isSigner, kno
 	if !exists || !zd.Ready {
 		return "", false, false
 	}
-	// Resolve the labels the way the zone view does (hsync3IdentitiesByLabel):
+	// Resolve the label the way the zone view does (hsync3IdentitiesByLabel):
 	// ON records of the active instructions, identities compared as names.
-	// An identity may hold several labels, one agent serving as two
-	// providers: it signs if any of them is a signer, and the label recorded
-	// is the first in sorted order, not whichever a walk over the map meets
-	// first.
+	// An identity is under one label: under two, the copy has no reading
+	// (#306).
 	want := dns.Fqdn(identity)
 	var labels []string
 	for lbl, id := range zd.hsync3IdentitiesByLabel() {
@@ -275,8 +273,7 @@ func zoneMemberRole(zone ZoneName, identity string) (label string, isSigner, kno
 	slices.Sort(labels)
 	label = labels[0]
 	// A member is a signer only when listed under signers=; a servers=
-	// member serves the zone without signing it. Without an HSYNCPARAM the
-	// zone declares no roles at all.
+	// member serves the zone without signing it.
 	in := zd.instructions()
 	if in == nil || !in.HasParam {
 		return label, false, false

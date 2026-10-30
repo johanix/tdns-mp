@@ -436,7 +436,7 @@ func (conf *Config) refuseCsyncNotFromLeader(u *SynchedDataUpdate, msgQs *MsgQs)
 		return ""
 	}
 	csync := dns.TypeToString[dns.TypeCSYNC]
-	if !slices.ContainsFunc(u.Update.Operations, func(op core.RROperation) bool { return strings.EqualFold(op.RRtype, csync) }) {
+	if !slices.ContainsFunc(u.Update.Operations, func(op core.RROperation) bool { return strings.EqualFold(op.RRtype, csync) }) { // not-a-name: an RR type
 		return ""
 	}
 	sender := u.DeliveredBy
@@ -445,7 +445,7 @@ func (conf *Config) refuseCsyncNotFromLeader(u *SynchedDataUpdate, msgQs *MsgQs)
 	if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
 		leader, known = lem.ZoneLeader(u.Zone)
 	}
-	same := func(a, b AgentId) bool { return dns.CanonicalName(string(a)) == dns.CanonicalName(string(b)) }
+	same := func(a, b AgentId) bool { return sameName(string(a), string(b)) }
 	if known && same(sender, leader) && same(u.AgentId, leader) {
 		return ""
 	}
@@ -464,7 +464,7 @@ func (conf *Config) refuseCsyncNotFromLeader(u *SynchedDataUpdate, msgQs *MsgQs)
 	var kept []core.RROperation
 	var refused []RejectedItemInfo
 	for _, op := range u.Update.Operations {
-		if !strings.EqualFold(op.RRtype, csync) {
+		if !strings.EqualFold(op.RRtype, csync) { // not-a-name: an RR type
 			kept = append(kept, op)
 			continue
 		}

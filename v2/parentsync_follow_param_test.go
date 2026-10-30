@@ -43,7 +43,7 @@ func servedParentSync(t *testing.T, mpzd *MPZoneData, parentsync *uint8, gone bo
 			roles = append(roles, &core.HSYNCPARAMParentSync{Value: *parentsync})
 		}
 		hdr := dns.RR_Header{Name: zone, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600}
-		apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr, Data: &core.HSYNCPARAM{Value: roles}}}})
+		apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr, Data: numbered(&core.HSYNCPARAM{Value: roles})}}})
 	}
 	mpzd.Data.Set(zone, apex)
 	mpzd.InstallInitialSnapshot() // the analysis reads the zone as it is served
@@ -64,7 +64,7 @@ func namedInTheZone(t *testing.T, mpzd *MPZoneData, identity string) {
 		Data: &core.HSYNC3{State: 1, Label: label, Identity: dns.Fqdn(identity), Upstream: "."}}
 	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: []dns.RR{h3}})
 	hp := &dns.PrivateRR{Hdr: dns.RR_Header{Name: zone, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
-		Data: &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: []string{label}}}}}
+		Data: numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: []string{label}}}})}
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{hp}})
 	mpzd.Data.Set(zone, apex)
 	mpzd.InstallInitialSnapshot()
@@ -115,7 +115,8 @@ func TestTheDelegationSyncFollowsHSYNCPARAM(t *testing.T) {
 		{"the agents again", &parentSyncAgent, false, true},
 		{"no parentsync key: the owner's", nil, false, false},
 		{"the agents once more", &parentSyncAgent, false, true},
-		{"no HSYNCPARAM", nil, true, false},
+		// an owner error (#308): the zone holds at its last reading
+		{"no HSYNCPARAM", nil, true, true},
 	}
 	for _, s := range steps {
 		servedParentSync(t, r.mpzd, s.parentsync, s.gone)
@@ -643,7 +644,7 @@ func noLongerParticipates(t *testing.T, optionOn bool) {
 			Data: &core.HSYNC3{State: 1, Label: shortLabel(id), Identity: id, Upstream: "."}})
 	}
 	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: h3})
-	hp, err := dns.NewRR(z + ` 3600 IN HSYNCPARAM servers="eu,as" parentsync="agent"`)
+	hp, err := dns.NewRR(z + ` 3600 IN HSYNCPARAM servers="eu,as" parentsync="agent" serial="2"`)
 	if err != nil {
 		t.Fatalf("HSYNCPARAM: %v", err)
 	}

@@ -119,7 +119,7 @@ auditor is not asked.`,
 			if rfitype == "CONFIG" && rfisubtype == "" {
 				log.Fatalf("Error: CONFIG RFI requires --subtype (upstream, downstream, sig0key)")
 			}
-			rfisubtype = strings.ToLower(rfisubtype)
+			rfisubtype = strings.ToLower(rfisubtype) // not-a-name: an RFI subtype
 
 			req := AgentMgmtPost{
 				Command:     "send-rfi",
@@ -646,7 +646,7 @@ func injectHelloPost(to string, count int, interval time.Duration, mechanism str
 		Data: map[string]interface{}{
 			"count":     strconv.Itoa(count),
 			"interval":  interval.String(),
-			"mechanism": strings.ToLower(mechanism),
+			"mechanism": strings.ToLower(mechanism), // not-a-name: a transport mechanism
 		},
 	}
 }

@@ -47,6 +47,15 @@ type KeystateInventoryMsg struct {
 	Inventory []KeyInventoryItem
 	Owned     bool     // the signer's own state machine runs the zone's keys (S3)
 	Resend    []uint16 // keys the signer sends again: distributed even unchanged (#256)
+	// The signer's marks (plan S11): the hand-over it holds (nil: none),
+	// that it does not sign the zone, rolloverUnderWay at the signer, and,
+	// for each key waiting in mpdist or mpremove, the other signers whose
+	// "applied" is still missing.
+	Acting     *ActingHandover
+	NotSigning bool
+	Rollover   bool
+	WaitsOn    map[uint16][]string
+	Hold       bool // the signer holds the zone's key machine (plan S6)
 	// seq: the order the agent's transport received it in; 0 for one that
 	// was not counted. An inventory older than the zone's recorded one is
 	// not recorded (noteKeyInventory): an RFI's answer can reach the engine
@@ -67,6 +76,8 @@ type KeystateSignalMsg struct {
 	// ForeignSpoken: Signal "foreign", the providers whose word the agent
 	// holds, one that listed no keys included; nil from an older agent
 	ForeignSpoken []string
+	// Acting: Signal "acting", the hand-over (plan S11), with the hold (S6)
+	Acting *ActingHandover
 }
 
 type EditsResponseMsg struct {

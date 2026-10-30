@@ -4,21 +4,19 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
-
-	"github.com/miekg/dns"
 )
 
 // keystateInventorySeq counts the KEYSTATE inventories the agent's
 // transport receives (KeystateInventoryMsg.seq).
 var keystateInventorySeq atomic.Uint64
 
-// inventoryLocks is a lock per zone (dns.CanonicalName), held while an
+// inventoryLocks is a lock per zone (canonicalName), held while an
 // inventory of the zone is recorded (noteKeyInventory). Taken by nothing
 // else, and first: it cannot reverse the order of the locks taken under it.
 var inventoryLocks sync.Map
 
 func inventoryLock(zone string) *sync.Mutex {
-	m, _ := inventoryLocks.LoadOrStore(dns.CanonicalName(zone), &sync.Mutex{})
+	m, _ := inventoryLocks.LoadOrStore(canonicalName(zone), &sync.Mutex{})
 	return m.(*sync.Mutex)
 }
 
@@ -60,7 +58,7 @@ func (q *MsgQs) offerKeystateInventory(msg *KeystateInventoryMsg) (waits, replac
 		default:
 		}
 	}
-	zone := dns.CanonicalName(msg.Zone)
+	zone := canonicalName(msg.Zone)
 	if old := o.waiting[zone]; old != nil {
 		newer := *msg
 		newer.Resend = unionKeyTags(old.Resend, msg.Resend)

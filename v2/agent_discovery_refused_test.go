@@ -15,6 +15,7 @@ package tdnsmp
 import (
 	"context"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -79,8 +80,15 @@ func newRefusedHelloScenarioWith(t *testing.T, authorize bool, cfg hsync.Config)
 			}
 		}
 	}
+	// Each engine makes its discoveries one at a time: the harness retry
+	// starts one every 50 ms while a peer is NEEDED, also while the one
+	// MarkNeeded started is still running, and two discoveries through a
+	// cache that holds nothing yet both ask the server (#304).
 	for _, pe := range []*peerEnv{s.alice, s.bob} {
-		s.engines[pe] = startHarnessEngine(t, env, pe, cfg, held)
+		serial := func(deps *hsync.Deps) {
+			deps.Transport = serialDiscovery{TransportBridge: deps.Transport, mu: &sync.Mutex{}}
+		}
+		s.engines[pe] = startHarnessEngine(t, env, pe, cfg, held, serial)
 	}
 	return s
 }
@@ -124,6 +132,17 @@ func refusedInARow(pe *peerEnv, peer string) int {
 		return r.inARow
 	}
 	return 0
+}
+
+// lookedUpAt is when pe last booked a lookup of peer past the cache.
+func lookedUpAt(pe *peerEnv, peer string) time.Time {
+	tm := pe.Bridge
+	tm.refusedHellosMu.Lock()
+	defer tm.refusedHellosMu.Unlock()
+	if r := tm.refusedHellos[peer]; r != nil {
+		return r.rediscovered
+	}
+	return time.Time{}
 }
 
 // waitForRefusals waits until peer has refused n of pe's hellos in a row.
@@ -243,27 +262,36 @@ func TestAFewRefusedHellosStartNoLookup(t *testing.T) {
 }
 
 // When the interval has passed and the peer still refuses, it is looked up
-// again. Here the older record is still served at the first lookup and
-// replaced before the second, which finds the current key.
+// again. Here Bob's JWK record still holds the older key at its second
+// lookup, the first after his refusals, and his current key from the third
+// on: the one made once the interval has passed.
 func TestAPeerThatStillRefusesIsLookedUpAgainAfterTheInterval(t *testing.T) {
 	const interval = 500 * time.Millisecond
 	s := newRefusedHelloScenario(t, true)
 	s.alice.Bridge.rediscoveryInterval = interval
 	s.publishBob(newHarnessKey(t))
+	// The first lookup after the refusals, the second of Bob's JWK record,
+	// returns the older key again; the zone serves his current key from the
+	// next one on. As it answers that lookup it notes when Alice booked it:
+	// the interval runs from there, and the booking is before the server
+	// counts the lookup. The zone does both, not this goroutine, which a
+	// loaded machine may hold until after the next lookup (#304).
+	booked := make(chan time.Time, 1)
+	s.zone.setAfter("dns."+s.bob.Identity, core.TypeJWK, 2, dnsDiscoveryRecords(s.bob.Identity, s.bobListens, s.bobKey),
+		func() { booked <- lookedUpAt(s.alice, s.bob.Identity) })
 	s.discovers(t, s.alice, s.bob)
 	s.discovers(t, s.bob, s.alice)
 	s.release()
 
-	// The first lookup after the refusals returns the older key again.
-	deadline := time.Now().Add(5 * time.Second)
-	for s.bobJWKLookups() < 2 {
-		if time.Now().After(deadline) {
-			t.Fatal("Alice did not look Bob up again after his refusals")
-		}
-		time.Sleep(5 * time.Millisecond)
+	var first time.Time
+	select {
+	case first = <-booked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Alice did not look Bob up again after his refusals")
 	}
-	first := time.Now()
-	s.publishBob(s.bobKey)
+	if first.IsZero() {
+		t.Fatal("Alice looked Bob up again with no lookup on her books")
+	}
 
 	waitForDNSState(t, s.alice, s.bob.Identity, transport.PeerStateOperational, 10*time.Second)
 	if waited := time.Since(first); waited < interval*9/10 {

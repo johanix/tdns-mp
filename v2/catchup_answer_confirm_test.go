@@ -16,9 +16,7 @@ import (
 func TestAConfirmationOfACatchUpAnswerIsNotALossOfTracking(t *testing.T) {
 	const zone, asker = "answered.confirm.example.", "agent.asker.example."
 	var buf lockedBuffer
-	saved := lgEngine
-	lgEngine = slog.New(slog.NewTextHandler(&buf, nil))
-	t.Cleanup(func() { lgEngine = saved })
+	logTo(t, lgEngine, slog.NewTextHandler(&buf, nil))
 
 	zdr, err := NewZoneDataRepo()
 	if err != nil {
