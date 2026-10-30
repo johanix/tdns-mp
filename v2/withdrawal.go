@@ -232,6 +232,16 @@ func (conf *Config) sendWithdrawal(zdr *ZoneDataRepo, zone ZoneName, provider Ag
 	if err := tm.EnqueueForZoneAgents(zone, zu, distID); err != nil {
 		errs = append(errs, err)
 	}
+	if len(errs) > 0 {
+		// not sent to every recipient: nothing is left pending removal, so
+		// the plan's next call sends it again, to all
+		for i := range tracked.Tracked {
+			if tr := &tracked.Tracked[i]; tr.DistributionID == distID {
+				tr.State, tr.Confirmations, tr.ExpectedRecipients = RRStateAccepted, nil, nil
+			}
+		}
+		lgEngine.Warn("a withdrawal could not be sent to every recipient; it is sent again at the plan's next call", "zone", zone, "provider", provider, "rrtype", w.RRtype, "err", errors.Join(errs...))
+	}
 	return distID, errors.Join(errs...)
 }
 

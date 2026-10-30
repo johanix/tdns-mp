@@ -95,4 +95,17 @@ func TestTransportBoundary_AWithdrawalReachesTheRecipientsCombiner(t *testing.T)
 	if c := r.answered(t, distID); c.Status != "SUCCESS" || !slices.Contains(c.RemovedRecords, rec) {
 		t.Errorf("the leader's final confirmation: %+v, want a success that names %s as removed", *c, rec)
 	}
+
+	// only a sync is a withdrawal: an RFI that carries the field keeps its
+	// authenticated sender, and the field is dropped
+	rfi, err := json.Marshal(DnsSyncPayload{MessageType: "rfi", RfiType: "SYNC", OriginatorID: peer, YourIdentity: r.us.Identity, Zone: zone,
+		Time: time.Now().Format(time.RFC3339Nano), Withdraw: &Withdraw{Provider: gone, RRtype: "NS"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.us.Bridge.routeIncomingMessage(&transport.IncomingMessage{TypeToken: "rfi", SenderID: peer, TransportSender: peer,
+		Mechanism: transport.MechanismDNS, Zone: zone, Payload: rfi, ReceivedAt: time.Now(), SourceAddr: "127.0.0.1:0"})
+	if amp, ok := recvMsgWithin(t, r.us.MsgQs.Msg, 10*time.Second); !ok || amp.OriginatorID != AgentId(peer) || amp.Withdraw != nil {
+		t.Errorf("an RFI with the withdraw field, as routed: %+v", amp)
+	}
 }
