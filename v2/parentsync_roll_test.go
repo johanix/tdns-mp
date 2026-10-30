@@ -364,7 +364,7 @@ func TestAMemberKeepsTheLeadersKEYAndNoOther(t *testing.T) {
 	keyOf("agent.earlier.example.", string(zone)+" 3600 IN KEY 256 3 15 yXLRWnJ7mgKYUMxkKMTQ9wjCzX4jUQyqzzhJAo+AkIk=")
 	var purged []AgentId
 	saved := purgeKEYsAtCombiner
-	purgeKEYsAtCombiner = func(_ ZoneName, origins []AgentId) { purged = append(purged, origins...) }
+	purgeKEYsAtCombiner = func(_ *MPTransportBridge, _ ZoneName, origins []AgentId) { purged = append(purged, origins...) }
 	t.Cleanup(func() { purgeKEYsAtCombiner = saved })
 
 	(&Config{}).dropOtherKEYs(zdr, zone, "agent.leader.example.")
@@ -378,6 +378,12 @@ func TestAMemberKeepsTheLeadersKEYAndNoOther(t *testing.T) {
 	}
 	if !slices.Equal(purged, []AgentId{"agent.earlier.example."}) {
 		t.Errorf("the combiner is asked to drop the KEYs of %v", purged)
+	}
+	// the drop at the combiner is S16's flagged removal in the origin's name
+	zu := keyPurge(zone, "agent.earlier.example.")
+	if zu.Withdraw == nil || zu.AgentId != "agent.earlier.example." || len(zu.Operations) != 1 ||
+		zu.Operations[0].Operation != "replace" || zu.Operations[0].RRtype != "KEY" || len(zu.Operations[0].Records) != 0 {
+		t.Errorf("the combiner's drop: %+v", zu)
 	}
 }
 
