@@ -95,7 +95,11 @@ type InstrStamp struct {
 	// rollover under way misses, by its signer's inventory (plan S11).
 	WaitsOn []string `json:"waits_on,omitempty"`
 	Hold    bool     `json:"hold,omitempty"` // its signer has confirmed the hold since it held the serial agreed on
-	Thaw    *Thaw    `json:"thaw,omitempty"`
+	// CaughtUp: the sender has caught up in the zone (plan S18a), so that
+	// every agent's status shows whether a newcomer has, before the owner
+	// gives it a role (design 5.1).
+	CaughtUp bool  `json:"caught_up,omitempty"`
+	Thaw     *Thaw `json:"thaw,omitempty"`
 	// The reconciliation (plan S12): a transition to its active serial is
 	// under way at the sender (Reconciling; without it the transition is
 	// done there); the step it holds, if it holds one, and whether both its

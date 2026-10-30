@@ -574,9 +574,10 @@ func (conf *Config) thaw(v thawView) {
 // activate makes the thaw's target the zone's active serial, written before
 // it is told (Activate), and runs what follows from it: the zone moves to
 // its group under the new serial (onActiveChanged), the parts are handed V
-// with the sets they hold, step 0 (onSetsChanged), and every voting member
-// this agent never asked is asked (askUnasked). The reconciliation follows
-// (reconcileTurn).
+// with the sets they hold, step 0 (onSetsChanged), a provider put in a
+// list it was not in is asked for its state and sends what it contributes
+// again (enteredLists), and every voting member this agent never asked is
+// asked (askUnasked). The reconciliation follows (reconcileTurn).
 func (conf *Config) activate(zone string, th Thaw, by string) error {
 	s := conf.InternalMp.Instructions
 	before := s.activeReading(zone)
@@ -590,8 +591,12 @@ func (conf *Config) activate(zone string, th Thaw, by string) error {
 	b.zone(canonicalName(zone)).thawed = &thawMark{to: th.To.Serial, by: by, at: time.Now()}
 	b.mu.Unlock()
 	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil {
-		mpzd.onActiveChanged(conf.InternalMp.MPTransport, before, s.activeReading(zone))
+		after := s.activeReading(zone)
+		mpzd.onActiveChanged(conf.InternalMp.MPTransport, before, after)
 		conf.onSetsChanged(mpzd, true)
+		// a provider put in a list it was not in is asked for its state,
+		// and sends what it contributes again (plan S18a)
+		conf.enteredLists(zone, before, after)
 		// with the provider data the new serial gives: a member never
 		// asked is asked now (plan S15)
 		conf.InternalMp.CatchUp.askUnasked(ZoneName(zone))

@@ -71,6 +71,9 @@ type stepRunner struct {
 	// servers serve the zone from its upstream. It is asked at every
 	// agent, of every step; nil for nothing more.
 	holds func(conf *Config, zone string, step InstrStep) bool
+	// status is what the step held waits for, as this agent's status shows
+	// it (S18a: a newcomer's nameservers); "" for nothing. Nil for none.
+	status func(conf *Config, zone string, step heldStep, now time.Time) string
 }
 
 // stepRunners are the runners registered, in the order they were.
@@ -918,6 +921,14 @@ func (conf *Config) reconcileLine(zone string, now time.Time) string {
 		}
 	} else if in.hasStep && in.step.Number == 0 {
 		line += ", waiting for the leader's first step"
+	}
+	for _, r := range stepRunners {
+		if r.status == nil || !in.hasStep {
+			continue
+		}
+		if s := r.status(conf, in.name, in.step, now); s != "" {
+			line += ", " + s
+		}
 	}
 	if in.newer != nil {
 		line += fmt.Sprintf("; %d held, waits until done", in.newer.Serial)
