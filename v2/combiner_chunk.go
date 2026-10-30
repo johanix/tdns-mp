@@ -1328,11 +1328,19 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 							// the sender's REPLACE leaves it none of its own:
 							// a record it held before does not stay published
 							// beside the local one (tdns-mp #211, S14's fleet)
+							mpzd.Lock()
+							prior := slices.Clone(mpzd.MP.AgentContributions[req.SenderID][zonename][rrtype].RRs)
+							mpzd.Unlock()
 							_, gone, dropped, derr := mpzd.ReplaceCombinerDataByRRtype(req.SenderID, zonename, rrtype, nil)
 							if derr != nil {
 								// refused as a failed REPLACE is, so that
-								// the sender sends it again
+								// the sender sends it again; its records go
+								// back, as the store still holds them, for
+								// the retry to remove again
 								lgCombiner.Error("removing the sender's own contribution failed", "zone", zonename, "sender", req.SenderID, "rrtype", op.RRtype, "err", derr)
+								if len(prior) > 0 {
+									mpzd.ReplaceCombinerDataByRRtype(req.SenderID, zonename, rrtype, prior)
+								}
 								rejectedItems = append(rejectedItems, RejectedItem{
 									Record: fmt.Sprintf("(replace %s)", op.RRtype),
 									Reason: fmt.Sprintf("replace failed: %v", derr),

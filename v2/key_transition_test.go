@@ -650,25 +650,52 @@ func TestAKEYReplaceTheLocalAgentHoldsLeavesThePeerNoOlderKEY(t *testing.T) {
 
 // When the peer's own KEY cannot be removed for good (the store fails),
 // its REPLACE is refused as a failed REPLACE is, so that the peer sends it
-// again: it is not told its records were applied.
+// again: it is not told its records were applied. Its records stay, as the
+// store still holds them, so that the retry removes them for good.
 func TestAKEYReplaceWhoseRemovalFailsIsRefused(t *testing.T) {
 	const zone = "keydedupfail.acting.example."
 	_, mpzd := actingCombiner(t, zone, actRecords(`serial="5" servers="alpha,beta" signers="alpha,beta" parentsync="agent"`)...)
 	pub, second := testSig0Key(t, newMPTestKeyDB(t), zone).key, testSig0Key(t, newMPTestKeyDB(t), zone).key
+	var failed bool
+	var stored []dns.RR // the peer's KEY as the store last took it
 	mpzd.Lock()
 	mpzd.MP.AgentContributions = map[string]map[string]map[uint16]core.RRset{
 		actUs:    {zone: {dns.TypeKEY: core.RRset{Name: zone, RRtype: dns.TypeKEY, RRs: []dns.RR{pub}}}},
 		actOther: {zone: {dns.TypeKEY: core.RRset{Name: zone, RRtype: dns.TypeKEY, RRs: []dns.RR{pub, second}}}},
 	}
-	mpzd.MP.PersistContributions = func(string, string, map[string]map[uint16]core.RRset) error { return errors.New("the store is full") }
+	mpzd.MP.PersistContributions = func(_, sender string, c map[string]map[uint16]core.RRset) error {
+		if !failed {
+			failed = true
+			return errors.New("the store is full")
+		}
+		if sender == actOther {
+			stored = slices.Clone(c[zone][dns.TypeKEY].RRs)
+		}
+		return nil
+	}
 	mpzd.Unlock()
-	req := &CombinerSyncRequest{SenderID: actOther, Zone: zone, DistributionID: nextDistributionID(), Timestamp: time.Now(),
-		Operations: []core.RROperation{{Operation: "replace", RRtype: "KEY", Records: []string{pub.String()}}}}
-	resp := mpzd.combinerProcessOperations(req, zone, nil, map[string]bool{actUs: true}, mpzd.getEditPolicy())
+	replace := func() *CombinerSyncResponse {
+		req := &CombinerSyncRequest{SenderID: actOther, Zone: zone, DistributionID: nextDistributionID(), Timestamp: time.Now(),
+			Operations: []core.RROperation{{Operation: "replace", RRtype: "KEY", Records: []string{pub.String()}}}}
+		return mpzd.combinerProcessOperations(req, zone, nil, map[string]bool{actUs: true}, mpzd.getEditPolicy())
+	}
+	resp := replace()
 	if len(resp.RejectedItems) != 1 || !strings.Contains(resp.RejectedItems[0].Reason, "replace failed") {
 		t.Errorf("a REPLACE whose removal failed: %s %+v", resp.Status, resp.RejectedItems)
 	}
 	if slices.Contains(resp.AppliedRecords, pub.String()) {
 		t.Errorf("a REPLACE whose removal failed is told applied: %+v", resp.AppliedRecords)
+	}
+	mpzd.Lock()
+	kept := len(mpzd.MP.AgentContributions[actOther][zone][dns.TypeKEY].RRs)
+	mpzd.Unlock()
+	if kept != 2 {
+		t.Fatalf("after the failed removal the peer holds %d KEYs, want its 2 back", kept)
+	}
+	if resp := replace(); len(resp.RejectedItems) != 0 || !slices.Contains(resp.RemovedRecords, second.String()) {
+		t.Errorf("the retry: %s %+v, removed %v", resp.Status, resp.RejectedItems, resp.RemovedRecords)
+	}
+	if len(stored) != 0 {
+		t.Errorf("after the retry the store holds the peer's KEYs %v", stored)
 	}
 }
