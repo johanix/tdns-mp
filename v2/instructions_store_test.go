@@ -253,6 +253,37 @@ func TestBothRecordsDroppedWithTwoProvidersIsAnOwnerError(t *testing.T) {
 	}
 }
 
+// With no active serial known, both records dropped cannot be judged: the
+// serial the zone holds newest may list one provider while the active one,
+// not known yet, lists two (design 7). It is an owner error, whatever the
+// newest lists, and the serials are kept (S9). A copy with records above
+// the newest held ends it.
+func TestBothRecordsDroppedWithNoActiveSerialKnownIsAnOwnerError(t *testing.T) {
+	one := readOf(t, instrBase[0], `3600 IN HSYNCPARAM serial="8" servers="alpha" signers="alpha"`)
+	for _, c := range []struct {
+		name   string
+		held   []*Instructions
+		newest uint32
+	}{
+		{"the newest lists two providers", []*Instructions{at(t, 7, "alpha,beta")}, 7},
+		{"the newest lists one provider", []*Instructions{at(t, 7, "alpha,beta"), one}, 8},
+	} {
+		s := newStore(t)
+		for _, in := range c.held {
+			s.Note(storeZone, in, nil)
+		}
+		s.Note(storeZone, nil, nil)
+		st := status(t, s, storeZone)
+		if st.Phase != PhaseOwnerError || st.OwnerError != "HSYNC3 and HSYNCPARAM dropped while the active serial is not known" || st.Active != nil || st.Newest == nil || st.Newest.Serial != c.newest {
+			t.Errorf("%s: phase %s error %q active %s newest %s", c.name, st.Phase, st.OwnerError, serialOf(st.Active), serialOf(st.Newest))
+		}
+		s.Note(storeZone, at(t, 9, "alpha,beta"), nil)
+		if st := status(t, s, storeZone); st.OwnerError != "" || st.Phase != PhaseNotKnown || st.Newest.Serial != 9 {
+			t.Errorf("%s, then serial 9: phase %s error %q newest %s", c.name, st.Phase, st.OwnerError, serialOf(st.Newest))
+		}
+	}
+}
+
 func TestTheEndOfMultiProviderServiceEndsTheSerials(t *testing.T) {
 	_, hdb := storeDB(t)
 	s := loadStore(t, hdb)
