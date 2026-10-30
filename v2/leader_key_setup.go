@@ -179,7 +179,7 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 	held := *zk.held
 	keyRR := held.key
 	lgAgent.Info("publishing KEY to combiner with PublishInstruction", "zone", zone, "keyid", held.keyid)
-	if _, _, err := sendZoneKEY(tm, zone, keyRR, ""); err != nil {
+	if _, _, _, err := sendZoneKEY(tm, zone, keyRR, ""); err != nil {
 		return err
 	}
 	conf.InternalMp.keyPolls.published(zone)
@@ -195,9 +195,9 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 // sendZoneKEY sends the leader's KEY, as its replace with the publish
 // instruction, to its combiner and to the zone's other agents, under one
 // distribution (distID, or a new one), and returns it with the agents it
-// went to. The error is the combiner's: an agent the KEY could not be
-// queued for is logged.
-func sendZoneKEY(tm *MPTransportBridge, zone ZoneName, keyRR *dns.KEY, distID string) (string, []AgentId, error) {
+// went to. err is the combiner's; agentsErr names the agents the KEY could
+// not be queued for, which is logged.
+func sendZoneKEY(tm *MPTransportBridge, zone ZoneName, keyRR *dns.KEY, distID string) (_ string, _ []AgentId, agentsErr, err error) {
 	zu := &ZoneUpdate{
 		Zone: zone,
 		Operations: []core.RROperation{{
@@ -210,10 +210,10 @@ func sendZoneKEY(tm *MPTransportBridge, zone ZoneName, keyRR *dns.KEY, distID st
 			Locations: publishLocations(zone),
 		},
 	}
-	distID, err := tm.EnqueueForCombiner(zone, zu, distID)
+	distID, err = tm.EnqueueForCombiner(zone, zu, distID)
 	if err != nil {
 		lgAgent.Error("failed to publish KEY to combiner", "zone", zone, "err", err)
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	lgAgent.Info("KEY + PublishInstruction sent to combiner", "zone", zone, "distID", distID)
 
@@ -225,10 +225,10 @@ func sendZoneKEY(tm *MPTransportBridge, zone ZoneName, keyRR *dns.KEY, distID st
 		Publish:    zu.Publish,
 	}
 	agents, _ := tm.getAllAgentsForZone(zone)
-	if err := tm.EnqueueForZoneAgents(zone, agentUpdate, distID); err != nil {
-		lgAgent.Error("failed to enqueue KEY for remote agents", "zone", zone, "err", err)
+	if agentsErr = tm.EnqueueForZoneAgents(zone, agentUpdate, distID); agentsErr != nil {
+		lgAgent.Error("failed to enqueue KEY for remote agents", "zone", zone, "err", agentsErr)
 	}
-	return distID, agents, nil
+	return distID, agents, agentsErr, nil
 }
 
 // errHeldDuringTransition: the zone is frozen (plan S6); the KEY is

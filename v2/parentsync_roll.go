@@ -635,7 +635,12 @@ func (conf *Config) publishRolledKEY(zone ZoneName, newKey *sig0Row) error {
 	}
 	distID := transport.GenerateDistributionID()
 	tm.rollKEYs.expect(zone, distID, expected)
-	if _, _, err := sendZoneKEY(tm, zone, newKey.key, distID); err != nil {
+	// an agent the KEY is not queued for would never answer: the try fails
+	_, _, agentsErr, err := sendZoneKEY(tm, zone, newKey.key, distID)
+	if err == nil {
+		err = agentsErr
+	}
+	if err != nil {
 		tm.rollKEYs.forget(zone)
 		return fmt.Errorf("the new KEY could not be sent: %w", err)
 	}
