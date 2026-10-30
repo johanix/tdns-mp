@@ -1059,3 +1059,205 @@ func TestAPendingAgentHoldsItsSignerOnWhatItHolds(t *testing.T) {
 		t.Errorf("the signer while no step's sets are held: %v", h)
 	}
 }
+
+// The DNSKEY distribution's time-out for members with no role counts from
+// the first of its resends: the signer resends sooner than the time-out,
+// and each resend takes the one before it over (foldIntoResend). The
+// first one's time-out then ends the resend's wait, and a member that
+// timed out is not waited for again by a later resend (external review of
+// #327, F1).
+func TestADNSKEYNoRoleTimeOutCountsFromTheFirstOfItsResends(t *testing.T) {
+	r := newReconcileRig(t, "dnskeyresend.reconcile.example.", roleA)
+	tm := r.conf.InternalMp.MPTransport
+	tm.noRoleTimeout = time.Hour // the test ends the waits itself
+	zone := ZoneName(r.zone)
+	pending := func(id string) bool {
+		tm.dnskeyPropMu.Lock()
+		defer tm.dnskeyPropMu.Unlock()
+		_, ok := tm.pendingDnskeyPropagations[id]
+		return ok
+	}
+	tm.TrackDnskeyPropagation(t.Context(), zone, "d1", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.ProcessDnskeyConfirmation("d1", roleB, transport.ConfirmSuccess.String(), nil, nil)
+	tm.TrackDnskeyPropagation(t.Context(), zone, "d2", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.foldIntoResend(zone, "d2")
+	if !pending("d2") {
+		t.Fatal("the resend did not wait for n")
+	}
+	tm.dnskeyNoRoleTimedOut(t.Context(), "d1")
+	if pending("d2") {
+		t.Error("the first distribution's time-out did not end the resend's wait for n")
+	}
+
+	tm.TrackDnskeyPropagation(t.Context(), zone, "d3", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.dnskeyNoRoleTimedOut(t.Context(), "d3") // n times out; b, voting, is waited for
+	tm.TrackDnskeyPropagation(t.Context(), zone, "d4", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.foldIntoResend(zone, "d4")
+	tm.ProcessDnskeyConfirmation("d4", roleB, transport.ConfirmSuccess.String(), nil, nil)
+	if pending("d4") {
+		t.Error("the resend waited for n again, which had timed out")
+	}
+}
+
+// A leader goes on past a voting member already at rest at V: done with the
+// transition, its parts hold V's lists, and it tells no step any more, as
+// after a new leader took over from one that had just finished (external
+// review of #327, F2).
+func TestALeaderGoesOnPastAVoterAlreadyAtRestAtV(t *testing.T) {
+	r := newReconcileRig(t, "atrest.reconcile.example.", roleA)
+	r.agree()
+	r.thawNow()
+	done := r.own()
+	done.Reconciling, done.Step, done.StepHeld, done.Removals = false, nil, false, nil
+	for range 3 {
+		r.partsTake()
+		r.hear(roleB, done, true)
+		r.turn(time.Now())
+	}
+	if s := status(t, r.store, r.zone); s.Phase != PhaseSteady {
+		t.Errorf("the leader waits for b, at rest at 42: %+v, status %q", s, r.conf.thawLine(r.zone))
+	}
+}
+
+// A leader that holds no step's sets takes no step until every other voting
+// member under V is heard, though one heard tells a step: one not heard may
+// tell a further step (external review of #327, F3).
+func TestALeaderWithNoStepWaitsForEveryVoterBeforeItTakesOne(t *testing.T) {
+	r := newReconcileRig(t, "unheard.reconcile.example.", roleA)
+	r.n = freezeAt(t, 41, "n", "a,b,n", "")
+	r.v = freezeAt(t, 42, "v", "a,b,n", "")
+	if err := r.store.update(r.zone, func(z *zoneSerials) error {
+		z.Active.Reading, z.Active.SerialDigest = r.n, sd(r.n)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.holdUnjudged(r.v, time.Now())
+	if err := r.conf.activate(r.zone, Thaw{From: sd(r.n), To: sd(r.v)}, roleA); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.store.update(r.zone, func(z *zoneSerials) error {
+		z.From, z.Sets, z.Step, z.Taken, z.Pending = nil, nil, 0, nil, true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.stamps.kept = map[string]*memberStamp{} // a start: nothing heard
+	r.hear(roleB, r.leaderStep(0, rolesFor(r.n, r.n, 0), nil), true)
+	r.turn(time.Now())
+	if st, ok := r.step(); ok {
+		t.Fatalf("took b's step %d before n was heard", st.Number)
+	}
+	if line := r.conf.thawLine(r.zone); !strings.Contains(line, roleN+" (not heard)") {
+		t.Errorf("the status: %q", line)
+	}
+}
+
+// The auditor's zone page shows the transition as the agent's status does:
+// the step, or when the last one was done (external review of #327, F4).
+func TestTheAuditorsZonePageShowsTheTransition(t *testing.T) {
+	r := newReconcileRig(t, "auditorpage.reconcile.example.", roleA)
+	r.agree()
+	r.thawNow()
+	for range 2 {
+		r.partsTake()
+		r.holdsToo(roleB)
+		r.turn(time.Now())
+	}
+	if line := r.conf.instructionsLine(r.zone); !strings.Contains(line, "at 42, done since") {
+		t.Errorf("the auditor's line: %q, want the transition done", line)
+	}
+}
+
+// A CSYNC's look at its time-out for members with no role, made, lets the
+// next one be armed and asks the data engine for the progress that arms
+// it; a look for a CSYNC made since leaves the newer one alone (external
+// review of #327, N1).
+func TestAMadeCSYNCLookLetsTheNextBeArmed(t *testing.T) {
+	r := newReconcileRig(t, "csynclook.reconcile.example.", roleA)
+	q := make(chan *SynchedDataCmd, 4)
+	r.conf.InternalMp.MsgQs = &MsgQs{SynchedDataCmd: q}
+	c := &r.conf.InternalMp.delegationSyncChains
+	cur := &delegationCsync{record: "csync", made: time.Now(), awaited: []string{roleN}, noRoleAt: true}
+	c.mu.Lock()
+	if c.csyncs == nil {
+		c.csyncs = map[string]*delegationCsync{}
+	}
+	c.csyncs[r.zone] = cur
+	c.mu.Unlock()
+	r.conf.csyncLooked(t.Context(), ZoneName(r.zone), cur)
+	c.mu.Lock()
+	armed := cur.noRoleAt
+	c.mu.Unlock()
+	if armed {
+		t.Error("the look made, the CSYNC still counts one as set: no next one is armed")
+	}
+	select {
+	case cmd := <-q:
+		if cmd.Cmd != "csync-progress" {
+			t.Errorf("asked %q, want the CSYNC's progress", cmd.Cmd)
+		}
+	default:
+		t.Error("the look made asks the data engine for nothing")
+	}
+	newer := &delegationCsync{record: "csync2", made: time.Now(), noRoleAt: true}
+	c.mu.Lock()
+	c.csyncs[r.zone] = newer
+	c.mu.Unlock()
+	r.conf.csyncLooked(t.Context(), ZoneName(r.zone), cur)
+	if !newer.noRoleAt {
+		t.Error("a look for an older CSYNC cleared the newer one's")
+	}
+}
+
+// With no engine ctx, a CSYNC look that finds the data engine's queue full
+// schedules no retry, which would outlive the engine; the engine's next
+// round looks instead (external review of #327, F5).
+func TestACSYNCLookWithNoEngineSchedulesNoRetry(t *testing.T) {
+	r := newReconcileRig(t, "nilctx.reconcile.example.", roleA)
+	q := make(chan *SynchedDataCmd, 1)
+	q <- &SynchedDataCmd{Cmd: "a full queue"}
+	r.conf.InternalMp.MsgQs = &MsgQs{SynchedDataCmd: q}
+	r.conf.askCsyncProgress(nil, ZoneName(r.zone))
+	done := make(chan struct{})
+	go func() { r.conf.waitDelegationSyncTimers(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Error("a retry with no engine to end it was scheduled")
+	}
+}
+
+// "Done" with a newer serial held goes from reconciling straight to
+// agreeing on it, frozen throughout: the owed list is not released and the
+// signer stays held until that serial's transition is done (item 7, as
+// decided; external review of #327, F6).
+func TestDoneWithAWaitingSerialKeepsTheOwedList(t *testing.T) {
+	logs := captureLog(t)
+	r := newReconcileRig(t, "keptowed.reconcile.example.", roleA)
+	r.agree()
+	r.thawNow()
+	r.store.Note(r.zone, freezeAt(t, 43, "w", "a,b", ""), nil)
+	for len(r.conf.InternalMp.MsgQs.SynchedDataCmd) > 0 {
+		<-r.conf.InternalMp.MsgQs.SynchedDataCmd
+	}
+	for range 2 {
+		r.partsTake()
+		r.holdsToo(roleB)
+		r.turn(time.Now())
+	}
+	if !strings.Contains(logs.String(), `msg="transition done"`) {
+		t.Fatalf("not done: %q", r.conf.thawLine(r.zone))
+	}
+	if len(r.conf.zoneFrozen(r.zone)) == 0 {
+		t.Error("the zone is not frozen at done with 43 waiting")
+	}
+	for len(r.conf.InternalMp.MsgQs.SynchedDataCmd) > 0 {
+		if cmd := <-r.conf.InternalMp.MsgQs.SynchedDataCmd; cmd.Cmd == "instr-done" {
+			t.Error("the owed list was released at done with 43 waiting")
+		}
+	}
+	if h := r.wantedBy(r.signer); h == nil || !h.Sets.Hold {
+		t.Errorf("the signer's hold is let go at done with 43 waiting: %v", h)
+	}
+}
