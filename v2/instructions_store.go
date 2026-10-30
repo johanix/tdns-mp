@@ -74,10 +74,12 @@ type zoneSerials struct {
 	LastFrom *heldSerial `json:"last_from,omitempty"`
 	// OwnerError holds the zone (design 3.6) until a copy above ErrorAt is
 	// noted; ErrorAt nil: nothing was held when it was noted. Conflict is
-	// the digests seen at ErrorAt for "one serial, two digests".
-	OwnerError string   `json:"owner_error,omitempty"`
-	ErrorAt    *uint32  `json:"error_at,omitempty"`
-	Conflict   []string `json:"conflict,omitempty"`
+	// the digests seen at ErrorAt for "one serial, two digests": the last
+	// maxConflictDigests of them, and ConflictMore counts those dropped.
+	OwnerError   string   `json:"owner_error,omitempty"`
+	ErrorAt      *uint32  `json:"error_at,omitempty"`
+	Conflict     []string `json:"conflict,omitempty"`
+	ConflictMore int      `json:"conflict_more,omitempty"`
 	// Step and Sets are the reconciliation's step and the sets the parts
 	// hold, each provider by label and identity (S3 and S12 fill them).
 	Step int             `json:"step,omitempty"`
@@ -433,6 +435,68 @@ func (z *zoneSerials) ownerError(zone, msg string) {
 	}
 }
 
+// maxConflictDigests is how many digests a conflict mark keeps for its
+// serial: the last ones seen. The owner error needs two. An owner who edits
+// in place at one serial again and again would otherwise grow the list, on
+// disk and in the status, without end (#307).
+const maxConflictDigests = 4
+
+// addConflictDigests adds live, the digests seen now, to a conflict mark:
+// its digests, oldest first, and the count of those dropped. A digest the
+// mark holds is not added again. Beyond maxConflictDigests the oldest digest
+// that is not live is dropped and counted. A live digest is left out only
+// when every digest kept is live, and then the count is at least the number
+// of live digests left out. So seeing the same digests again changes
+// nothing, and a digest dropped and seen again counts again. With more than
+// maxConflictDigests live at once, the count is a lower bound.
+func addConflictDigests(conflict []string, dropped int, live []string) ([]string, int) {
+	out := slices.Clone(conflict)
+	var added []string
+	for _, d := range live {
+		if !slices.Contains(out, d) {
+			out = append(out, d)
+			added = append(added, d)
+		}
+	}
+	for len(out) > maxConflictDigests {
+		if i := slices.IndexFunc(out, func(d string) bool { return !slices.Contains(live, d) }); i >= 0 {
+			out = slices.Delete(out, i, i+1)
+			dropped++
+			continue
+		}
+		if len(added) == 0 { // a mark kept with more than the cap
+			out = slices.Delete(out, 0, 1)
+			dropped++
+			continue
+		}
+		i := slices.Index(out, added[0])
+		out = slices.Delete(out, i, i+1)
+		added = added[1:]
+	}
+	leftOut := 0
+	for _, d := range live {
+		if !slices.Contains(out, d) {
+			leftOut++
+		}
+	}
+	return out, max(dropped, leftOut)
+}
+
+// conflictText is a conflict mark as the owner error says it: how many
+// digests, and the ones kept, with "… and N more" for those dropped.
+func conflictText(conflict []string, dropped int) string {
+	n := len(conflict) + dropped
+	count := fmt.Sprintf("%d digests", n)
+	if n == 2 {
+		count = "two digests"
+	}
+	list := strings.Join(conflict, ", ")
+	if dropped > 0 {
+		list += fmt.Sprintf(", … and %d more", dropped)
+	}
+	return fmt.Sprintf("%s (%s)", count, list)
+}
+
 // Note classifies a copy of the zone's instructions, at its first load and
 // at every refresh (plan S2): its reading, or the error that it has none
 // (readErr), or neither for a copy with neither record.
@@ -473,21 +537,19 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 		cp := SerialDigest{Serial: in.Serial, Digest: in.Digest()}
 		z.Copy, z.CopyError = cp, ""
 		if h := z.held(in.Serial); h != nil {
-			if h.Digest != cp.Digest {
-				// an edit without a raised serial
-				if z.ErrorAt == nil || *z.ErrorAt != in.Serial {
-					z.Conflict = []string{h.Digest}
+			// The mark at this serial, if there is one: a conflict, not
+			// another owner error.
+			marked := z.ErrorAt != nil && *z.ErrorAt == in.Serial && len(z.Conflict) > 0
+			// An edit without a raised serial, or one back to a digest the
+			// mark has dropped (the one held among them).
+			if h.Digest != cp.Digest || marked && !slices.Contains(z.Conflict, cp.Digest) {
+				if !marked {
+					z.Conflict, z.ConflictMore = []string{h.Digest}, 0
 				}
-				if !slices.Contains(z.Conflict, cp.Digest) {
-					z.Conflict = append(z.Conflict, cp.Digest)
-				}
+				z.Conflict, z.ConflictMore = addConflictDigests(z.Conflict, z.ConflictMore, []string{cp.Digest})
 				at := in.Serial
 				z.ErrorAt = &at
-				digests := fmt.Sprintf("%d digests", len(z.Conflict))
-				if len(z.Conflict) == 2 {
-					digests = "two digests"
-				}
-				z.ownerError(zone, fmt.Sprintf("serial %d with %s (%s)", in.Serial, digests, strings.Join(z.Conflict, ", ")))
+				z.ownerError(zone, fmt.Sprintf("serial %d with %s", in.Serial, conflictText(z.Conflict, z.ConflictMore)))
 			}
 			return nil
 		}
@@ -501,7 +563,7 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 		// A newer serial. An owner error ends at a serial above the one it
 		// was noted at.
 		if z.OwnerError != "" && (z.ErrorAt == nil || CompareSerial(in.Serial, *z.ErrorAt) > 0) {
-			z.OwnerError, z.ErrorAt, z.Conflict = "", nil, nil
+			z.OwnerError, z.ErrorAt, z.Conflict, z.ConflictMore = "", nil, nil, 0
 		}
 		h := heldSerial{SerialDigest: cp, Reading: in, Since: time.Now()}
 		// With no active serial known the copy is held, unjudged, until the

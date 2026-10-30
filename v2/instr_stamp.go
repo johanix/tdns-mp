@@ -738,24 +738,19 @@ func (s *InstructionStore) noteToldConflict(zone string, serial uint32, digests 
 			return errToldUnchanged
 		}
 		var conflict []string
+		dropped := 0
 		if z.ErrorAt != nil && *z.ErrorAt == serial {
-			conflict = slices.Clone(z.Conflict)
+			conflict, dropped = slices.Clone(z.Conflict), z.ConflictMore
 		}
-		for _, d := range digests {
-			if !slices.Contains(conflict, d) {
-				conflict = append(conflict, d)
-			}
-		}
-		count := fmt.Sprintf("%d digests", len(conflict))
-		if len(conflict) == 2 {
-			count = "two digests"
-		}
-		msg := fmt.Sprintf("serial %d told with %s (%s)", serial, count, strings.Join(conflict, ", "))
-		if z.OwnerError == msg && slices.Equal(z.Conflict, conflict) {
+		// Every digest told is live: telling the same ones again changes
+		// nothing, and none of them is dropped while another can be.
+		conflict, dropped = addConflictDigests(conflict, dropped, digests)
+		msg := fmt.Sprintf("serial %d told with %s", serial, conflictText(conflict, dropped))
+		if z.OwnerError == msg && slices.Equal(z.Conflict, conflict) && z.ConflictMore == dropped {
 			return errToldUnchanged
 		}
 		at := serial
-		z.ErrorAt, z.Conflict = &at, conflict
+		z.ErrorAt, z.Conflict, z.ConflictMore = &at, conflict, dropped
 		z.ownerError(zone, msg)
 		changed = true
 		return nil
