@@ -97,11 +97,10 @@ func (tm *MPTransportBridge) isAuthorizedPeer(senderID string) bool {
 	return false
 }
 
-// isInHSYNC checks whether senderID and our own identity are both participants
-// (HSYNCPARAM role-holders) in the specified zone. Membership is derived, not raw
-// HSYNC3 co-presence: an identity listed in HSYNC3 but granted no role is NOT
-// authorized — this is the admission boundary where role-less/OFF identities are
-// rejected.
+// isInHSYNC checks whether senderID and our own identity are both members of
+// the specified zone (zoneParticipants): an ON HSYNC3 record, with a role or
+// without (plan S15), or a removal under way. This is the admission
+// boundary where an OFF record, or no record, is rejected.
 func (tm *MPTransportBridge) isInHSYNC(senderID string, zone string) (bool, string) {
 	if zone == "" {
 		return false, "empty zone name"
@@ -121,15 +120,15 @@ func (tm *MPTransportBridge) isInHSYNC(senderID string, zone string) (bool, stri
 	if err != nil || apex == nil {
 		return false, fmt.Sprintf("zone %q apex unavailable", zone)
 	}
-	members := participantFQDNSet(activeOr(zd.ZoneName, apex))
+	members := participantFQDNSet(zd.ZoneName, activeOr(zd.ZoneName, apex))
 	if !members.has(tm.LocalID) {
-		return false, fmt.Sprintf("our identity %q is not a participant in zone %s", tm.LocalID, zone)
+		return false, fmt.Sprintf("our identity %q is not a member of zone %s", tm.LocalID, zone)
 	}
 	if !members.has(senderID) {
-		return false, fmt.Sprintf("sender %q is not a participant in zone %s", senderID, zone)
+		return false, fmt.Sprintf("sender %q is not a member of zone %s", senderID, zone)
 	}
 
-	lgAgent.Debug("both identities are participants", "local", tm.LocalID, "sender", senderID, "zone", zone)
+	lgAgent.Debug("both identities are members", "local", tm.LocalID, "sender", senderID, "zone", zone)
 	return true, ""
 }
 
@@ -151,49 +150,39 @@ func (tm *MPTransportBridge) isInHSYNCAnyZone(senderID string) (bool, string) {
 		if err != nil || apex == nil {
 			continue
 		}
-		members := participantFQDNSet(activeOr(zd.ZoneName, apex))
-		// Both our identity and the sender must be participants in this zone.
+		members := participantFQDNSet(zd.ZoneName, activeOr(zd.ZoneName, apex))
+		// Both our identity and the sender must be members of this zone.
 		if members.has(tm.LocalID) && members.has(senderID) {
-			lgAgent.Debug("both identities are participants (any-zone check)",
+			lgAgent.Debug("both identities are members (any-zone check)",
 				"local", tm.LocalID, "sender", senderID, "zone", zoneName)
 			return true, zoneName
 		}
 	}
 
-	// Not a shared participant in any zone
+	// Not a shared member of any zone
 	return false, ""
 }
 
-// --- The hand-over of a zone's SIG(0) key by a provider without a role ---
+// --- The answer to a request for a zone's SIG(0) key from a non-member ---
 //
-// The owner takes the role of the provider that leads a zone's group and
-// keeps its HSYNC3 record for now. That provider holds the zone's SIG(0) key,
-// and the leader that takes the zone up next asks it for the key
-// (roleLessKeyHolders). isInHSYNC admits a message about a zone only between
-// two of its role holders, so the request was refused at the holder, which
-// has no role now, and the answer at the asker, from a sender with no role.
-// The key never moved, and the zone's delegation sync waited for good.
+// PR #217 let a provider that the zone lists with no role hand over the
+// zone's SIG(0) key, which it may hold from when it led the zone's group:
+// the request at the holder and the answer at the asker, between a voting
+// member and a provider with no role, which admission refused then. From
+// the switch (plan S15) such a provider is a member, and admission lets
+// both in. What admission still refuses is the answer of an agent this
+// agent asked that is no member under the active serial: a voting member
+// under the zone's other serial (transitionVoters, plan S14), with no
+// record under the active one.
 //
-// keyHandOverAdmits lets those two messages in, and keyHandOverOnly lets
-// nothing else through that came in that way. Membership for a provider
-// without a role, in general, is the owner-instruction transitions design's
-// (its switch); this is the key's hand-over alone.
+// keyHandOverAdmits lets that answer in, and keyHandOverOnly lets nothing
+// else through that came in that way.
 
 // keyHandOverAdmits: a message about zone from senderID that isInHSYNC
-// refuses is let in for the zone's SIG(0) key alone. Either this agent is
-// still listed in the zone's HSYNC3 without a role, and the sender is a
-// voting member, who may ask for the key (mayHoldZoneSig0Key). Or this agent
-// has asked the sender for the zone's key, and the answer is due (keyAsks).
+// refuses is let in for the zone's SIG(0) key alone, when this agent has
+// asked the sender for the zone's key and the answer is due (keyAsks).
 func (tm *MPTransportBridge) keyHandOverAdmits(senderID, zone string) bool {
-	z := ZoneName(dns.Fqdn(zone))
-	if tm.keyAsks.open(senderID, string(z)) {
-		return true
-	}
-	if !zoneListsAgent(z, AgentId(tm.LocalID)) || !mayHoldZoneSig0Key(z, AgentId(senderID)) {
-		return false
-	}
-	participants, _ := participantsOf(instructionsFor(z))
-	return !isAmong(participants, AgentId(tm.LocalID))
+	return tm.keyAsks.open(senderID, dns.Fqdn(zone))
 }
 
 // admittedForKeyOnly: the message came in through keyHandOverAdmits alone.
@@ -226,9 +215,10 @@ func (tm *MPTransportBridge) keyHandOverGate(ctx *transport.MessageContext, next
 }
 
 // keyHandOverOnly: a message that came in for the zone's SIG(0) key alone
-// (admittedForKeyOnly) is the request for the key, its answer, or the
-// delivery confirmation of either. Anything else that came in that way is
-// not acted on.
+// (admittedForKeyOnly) is the answer to this agent's request for the key, or
+// the delivery confirmation of the request or of an answer. Anything else
+// that came in that way, a request among them, is not acted on: only an
+// agent this agent asked is let in that way (plan S15).
 func (tm *MPTransportBridge) keyHandOverOnly(msg *transport.IncomingMessage) bool {
 	// The sender is the one admission judged: the transport's, never the
 	// author the payload names.
@@ -243,14 +233,6 @@ func (tm *MPTransportBridge) keyHandOverOnly(msg *transport.IncomingMessage) boo
 		// sent the key exchange with, to this sender (expectConfirm).
 		var p transport.DnsConfirmPayload
 		if err := json.Unmarshal(msg.Payload, &p); err == nil && tm.keyAsks.confirmExpected(sender, p.DistributionID) {
-			return true
-		}
-	case "rfi":
-		// Routed by the payload's MessageType, which defaults to a sync
-		// (routeSyncMessage): the payload must say rfi itself, and carry
-		// nothing an update would apply.
-		if p, err := ParseSyncPayload(msg.Payload); err == nil && p.MessageType == string(AgentMsgRfi) &&
-			p.RfiType == "CONFIG" && p.RfiSubtype == "sig0key" && len(p.GetRecords()) == 0 && len(p.GetOperations()) == 0 {
 			return true
 		}
 	case "config":

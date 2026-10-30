@@ -248,7 +248,18 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 	// the agent's clock: the clock here need not agree with it.
 	lease := s.LeaderExpiry.Sub(s.LastChecked).Truncate(time.Second)
 	leader := termSafe(string(s.Leader))
+	if s.NoVote {
+		// A member that does not vote learns the leader from gossip
+		// (plan S15).
+		fmt.Fprintf(w, "  this agent:     does not vote in the zone (%s)\n", termSafe(s.Standing))
+		if s.Leader == "" || lease <= 0 {
+			fmt.Fprintln(w, "  leader:         not known yet")
+		} else {
+			fmt.Fprintf(w, "  leader:         %s, term %d, learned from gossip\n", leader, s.ElectionTerm)
+		}
+	}
 	switch {
+	case s.NoVote:
 	case s.Leader == "":
 		fmt.Fprintln(w, "  leader:         none")
 	case lease <= 0:
@@ -261,7 +272,7 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 	fmt.Fprintf(w, "  election term:  %d\n", s.ElectionTerm)
 	if c := s.CatchUp; c != nil {
 		if c.NotVoting {
-			fmt.Fprintln(w, "  catch-up:       none: this agent does not vote in the zone, and asks nothing")
+			fmt.Fprintln(w, "  catch-up:       none: this agent asks nothing in the zone (an auditor, or no member)")
 		} else if c.CaughtUp {
 			fmt.Fprintln(w, "  catch-up:       caught up")
 		} else {

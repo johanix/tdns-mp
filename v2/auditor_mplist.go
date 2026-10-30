@@ -75,6 +75,11 @@ func MPZoneInfoFromMPZoneData(mpzd *MPZoneData) MPZoneInfo {
 	info.Servers = slices.Clone(in.Servers)
 	info.Signers = slices.Clone(in.Signers)
 	info.Auditors = slices.Clone(in.Auditors)
+	for _, r := range in.Records {
+		if zoneStanding(in, r.Identity) == standingNoRole {
+			info.NoRole = append(info.NoRole, r.Label)
+		}
+	}
 	info.Suffix = in.Suffix
 	return info
 }

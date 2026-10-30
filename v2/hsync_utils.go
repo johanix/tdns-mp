@@ -584,9 +584,9 @@ func requestConfigWith(ar *AgentRegistry, agent *Agent, zone string, subtype str
 	answer, cancel := msgQs.configWaiters.register(rfiWaitKey(string(agent.ID), zone, subtype, nonce))
 	defer cancel()
 	// The answer to a request for the zone's SIG(0) key is let in from a
-	// peer that has no role in the zone (keyHandOverAdmits): the leader of
-	// the group the zone left, whose role the owner may have taken.
-	// Its delivery confirmation is let in by its distribution id alone.
+	// peer that is no member of the zone here (keyHandOverAdmits): a voting
+	// member under the zone's other serial (plan S14, S15). Its delivery
+	// confirmation is let in by its distribution id alone.
 	var distributionID string
 	if subtype == "sig0key" && ar.MPTransport != nil {
 		defer ar.MPTransport.keyAsks.start(string(agent.ID), zone)()
@@ -998,15 +998,19 @@ func (mpzd *MPZoneData) instructions() *Instructions {
 	return activeOr(mpzd.ZoneName, apex)
 }
 
-// roles are the sets mpzd's decisions read: the zone's current step's, for
-// the zone as served here and for a copy wrapped for analysis alike; where
-// the store keeps no enforced record, the copy's.
+// roles are the sets mpzd's decisions read: the zone's current step's, as
+// the store keeps them (plan S12), for the zone as served here and for a
+// copy wrapped for analysis alike; with no step's sets kept, rolesFor of
+// the store's serials; where the store keeps no enforced record, the
+// copy's.
 func (mpzd *MPZoneData) roles() Roles {
 	if handed, ok := actingHeld.Load().roles(mpzd.ZoneName); ok {
 		return handed // a combiner's or a signer's, as instructions
 	}
 	var r Roles
-	if from, to, step := instrStore.Load().transition(mpzd.ZoneName); to != nil {
+	if sets, ok := instrStore.Load().stepSets(mpzd.ZoneName); ok {
+		r = sets
+	} else if from, to, step := instrStore.Load().transition(mpzd.ZoneName); to != nil {
 		r = rolesFor(from, to, step)
 	} else {
 		in := mpzd.instructions()
@@ -1152,8 +1156,8 @@ func (mpzd *MPZoneData) populateMPdata(mp *MultiProviderConf, signing signingSet
 	// Non-signer servers in signed zones get disallow-edits but MPdata is
 	// still populated (allows persistence without editing — sep-1 behavior).
 	switch {
-	case weAreAuditor:
-		// Auditors never edit
+	case weAreAuditor, !weAreServer && !weShouldSign:
+		// Auditors never edit, nor does a member with no role (plan S15)
 		mpzd.MPOptions[OptMPDisallowEdits] = true
 		mpzd.MPOptions[tdns.OptAllowEdits] = false
 	case zoneSigned && !weShouldSign:
@@ -1776,7 +1780,8 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 // through them PR #186's callbacks). Then, at the agent, membership step 8's
 // one check of the zone's election, after the groups are recomputed: called
 // before it, a zone reduced to one provider would still find its old group
-// (#149).
+// (#149). An agent whose own standing becomes "no role" says so once
+// (plan S15).
 func (mpzd *MPZoneData) onActiveChanged(tm *MPTransportBridge, from, to *Instructions) {
 	lg.Info("the zone's active instructions changed", "zone", mpzd.ZoneName, "from", instructionsName(from), "to", instructionsName(to))
 	if tm == nil || tm.agentRegistry == nil {
@@ -1787,6 +1792,11 @@ func (mpzd *MPZoneData) onActiveChanged(tm *MPTransportBridge, from, to *Instruc
 	diff := hsync.HsyncDiff{Entered: entered, Left: left}
 	switch tdns.Globals.App.Type {
 	case AppTypeMPAgent:
+		if ar.LocalAgent != nil {
+			if self := ar.LocalAgent.Identity; zoneStanding(to, self) == standingNoRole && zoneStanding(from, self) != standingNoRole {
+				lg.Info("an HSYNC3 record and no role: member, no vote, no edits", "zone", mpzd.ZoneName)
+			}
+		}
 		if ar.HsyncEngine != nil {
 			_ = ar.HsyncEngine.ApplyHsyncDiff(hsync.ZoneName(mpzd.ZoneName), diff)
 		}
@@ -1822,10 +1832,10 @@ func (mpzd *MPZoneData) onActiveChanged(tm *MPTransportBridge, from, to *Instruc
 // provider that enters either list: a provider put back, design 5.1), and
 // whether the active instructions changed.
 func catchUpReasons(a *ZoneRefreshAnalysis, from, to *Instructions, self AgentId, changed bool) {
-	pBefore, before := participantsOf(from)
-	pAfter, after := participantsOf(to)
-	a.StandingBefore = standingIn(from, pBefore, before, string(self))
-	a.StandingAfter = standingIn(to, pAfter, after, string(self))
+	_, before, aBefore := participantsOf(from)
+	_, after, aAfter := participantsOf(to)
+	a.StandingBefore = standingIn(from, before, aBefore, string(self))
+	a.StandingAfter = standingIn(to, after, aAfter, string(self))
 	a.HsyncChanged = changed
 	a.NewVoters = nil
 	newVoter := func(id string) {

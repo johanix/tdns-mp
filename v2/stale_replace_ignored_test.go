@@ -230,7 +230,7 @@ func TestAKeyAPartialNamesAsIgnoredIsAnswered(t *testing.T) {
 	}
 	tm.dnskeyPropMu.Unlock()
 	d := nextDistributionID()
-	tm.TrackDnskeyPropagation(ZoneName(z), d, []uint16{key.KeyTag()}, nil, []AgentId{peer})
+	tm.TrackDnskeyPropagation(t.Context(), ZoneName(z), d, []uint16{key.KeyTag()}, nil, []AgentId{peer})
 
 	tm.ChunkHandler.OnConfirmationReceived(confirmIn(d, string(peer), transport.ConfirmPartial, z,
 		[]string{rec}, nil, nil, []string{key.String()}, false, ""))
@@ -252,7 +252,7 @@ func TestAnAnswersPartialThatNamesTheKeyAsIgnoredIsAnswered(t *testing.T) {
 	_, rec := csyncOp(zone, 1000)
 	snd := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	d, an := nextDistributionID(), nextDistributionID()
-	snd.TrackDnskeyPropagation(ZoneName(zone), d, []uint16{key.KeyTag()}, nil, []AgentId{asker})
+	snd.TrackDnskeyPropagation(t.Context(), ZoneName(zone), d, []uint16{key.KeyTag()}, nil, []AgentId{asker})
 	snd.noteCatchUpAnswer(an, ZoneName(zone), asker, map[uint16]bool{key.KeyTag(): true})
 
 	snd.processDnskeyConfirmation(an, string(asker), transport.ConfirmPartial.String(), []string{rec}, []string{key.String()}, nil, false, nil)

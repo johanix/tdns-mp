@@ -56,11 +56,17 @@ type SynchedDataUpdate struct {
 	// It passes a freeze (plan S6): a rollover under way, or an emergency
 	// one, as the signer starts no other.
 	Inventory bool
+	// Step: a step of the reconciliation sends this update, as its own
+	// distribution (plan S12). It passes a freeze.
+	Step bool
 	// replay: an owed change the release hands the engine again (plan S6);
 	// owed: this agent's owed changes, which a delete is checked against
 	// with the data (EvaluateUpdate).
 	replay bool
 	owed   []keptEntry
+	// leaderJudged: the kept list released this update, which is judged
+	// now and not kept again for the zone's leader (plan S15).
+	leaderJudged bool
 	// CatchUp: the update is the answer to a request for the zone's state
 	// (the membership design, 5.4).
 	CatchUp  *CatchUp `json:"catch_up,omitempty"`
@@ -382,6 +388,9 @@ type ZoneAgentData struct {
 	Agents        []*Agent
 	MyUpstream    AgentId
 	MyDownstreams []AgentId
+	// Standing is each agent's standing in the zone, as zone mplist's This
+	// column names it (standingName, plan S15).
+	Standing map[AgentId]string
 }
 
 // ZoneAgentInfo is ZoneAgentData as the management API reports it.
@@ -390,6 +399,7 @@ type ZoneAgentInfo struct {
 	Agents        []*AgentInfo
 	MyUpstream    AgentId
 	MyDownstreams []AgentId
+	Standing      map[AgentId]string
 }
 
 // --- From zone_utils.go ---

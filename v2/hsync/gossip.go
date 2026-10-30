@@ -4,6 +4,7 @@
 package hsync
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -95,6 +96,38 @@ type InstrStamp struct {
 	WaitsOn []string `json:"waits_on,omitempty"`
 	Hold    bool     `json:"hold,omitempty"` // its signer has confirmed the hold since it held the serial agreed on
 	Thaw    *Thaw    `json:"thaw,omitempty"`
+	// The reconciliation (plan S12): a transition to its active serial is
+	// under way at the sender (Reconciling; without it the transition is
+	// done there); the step it holds, if it holds one, and whether both its
+	// parts hold that step (StepHeld); and the removals under way it holds.
+	Reconciling bool           `json:"reconciling,omitempty"`
+	Step        *InstrStep     `json:"step,omitempty"`
+	StepHeld    bool           `json:"step_held,omitempty"`
+	Removals    []InstrRemoval `json:"removals,omitempty"`
+}
+
+// InstrStep is a step of the reconciliation as an agent holds it (plan
+// S12): its number, how many steps the leader plans, what it does, the
+// sets per purpose the parts act by at it, as tdns-mp's Roles in JSON, with
+// their digest, and the steps taken so far, by key. Step 0 is the sets held
+// at the thaw.
+type InstrStep struct {
+	Number int             `json:"n"`
+	Of     int             `json:"of,omitempty"`
+	What   string          `json:"what,omitempty"`
+	Sets   json.RawMessage `json:"sets"`
+	Digest string          `json:"digest"`
+	Taken  []string        `json:"taken,omitempty"`
+}
+
+// InstrRemoval is a removal under way as an agent holds it (plan S12,
+// S17b): the leaving provider's label and identity, its nameserver names,
+// and the step this agent holds.
+type InstrRemoval struct {
+	Label    string   `json:"label"`
+	Identity string   `json:"identity"`
+	NSNames  []string `json:"ns_names,omitempty"`
+	Step     int      `json:"step"`
 }
 
 // MsgStamp is the stamp a message or a confirmation carries (plan S5b): its

@@ -49,6 +49,12 @@ type keptUpdate struct {
 	Time        time.Time                `json:"time,omitzero"`
 	Instr       *MsgStamp                `json:"instr,omitempty"`
 	CatchUp     *CatchUp                 `json:"catch_up,omitempty"`
+	// ForLeader: kept until this agent knows the zone's leader, a CSYNC or
+	// a KEY (plan S15); Leader is the leader known then, at an agent that
+	// does not vote, and LeaseUntil its lease (kept_for_leader.go).
+	ForLeader  bool      `json:"for_leader,omitempty"`
+	Leader     AgentId   `json:"leader,omitempty"`
+	LeaseUntil time.Time `json:"lease_until,omitzero"`
 }
 
 // keptEntry is one entry of a list: its place, the sender's distribution

@@ -218,7 +218,7 @@ func TestHSYNC3WithoutHSYNCPARAMIsAnOwnerError(t *testing.T) {
 	if err != nil || param == nil || !param.HasParam {
 		t.Fatalf("HSYNC3 with an HSYNCPARAM of no roles: reading %v, error %v", param, err)
 	}
-	if _, voting := participantsOf(param); len(voting) != 0 {
+	if _, voting, _ := participantsOf(param); len(voting) != 0 {
 		t.Errorf("voting %v, want nobody", voting)
 	}
 }

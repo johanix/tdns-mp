@@ -529,7 +529,7 @@ func TestParentSyncStatusShowsTheCatchUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	wantLines(t, "status, not voting", out, "  catch-up:       none: this agent does not vote in the zone, and asks nothing")
+	wantLines(t, "status, not voting", out, "  catch-up:       none: this agent asks nothing in the zone (an auditor, or no member)")
 
 	// the leader's sync is held, and the DS set is unknown
 	report.CatchUp = &tdnsmp.CatchUpStatus{WaitingFor: "agent.bravo.example."}
@@ -615,7 +615,7 @@ func TestTheAgentShowsAndForgetsTheZonesSerials(t *testing.T) {
 	if out, err := forget("-z", zone); err == nil || !strings.Contains(err.Error(), "not steady") {
 		t.Errorf("forget with no active serial known: %v, %q; want refused", err, out)
 	}
-	if err := store.Know(zone, tdnsmp.SerialDigest{Serial: 7, Digest: seven.Digest()}, nil); err != nil {
+	if err := store.Know(zone, tdnsmp.SerialDigest{Serial: 7, Digest: seven.Digest()}, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	out, _ = status("status", "-z", zone)
@@ -657,4 +657,22 @@ func TestThePerMemberInstructionsArePrinted(t *testing.T) {
 		"  41      41      yes       no    15:04:02  agent.bravo.example. (lags) (owner error: serial 41 told with two digests (a, b))",
 		"  -       43      no        no    15:04:02  agent.delta.example. (tells 43, which no other member holds) (another digest at 42) (payload encryption off)")
 	wantNoControls(t, "status", out)
+}
+
+// A member that does not vote says so, and names the leader it learned
+// from gossip, or that none is known yet (plan S15).
+func TestTheStatusOfAMemberThatDoesNotVote(t *testing.T) {
+	checked := time.Date(2026, 10, 30, 3, 0, 0, 0, time.UTC)
+	var b bytes.Buffer
+	printParentSyncStatus(&b, tdnsmp.ParentSyncStatus{Zone: "z.example.", Standing: "member, no role", NoVote: true,
+		Leader: "agent.alpha.example.", ElectionTerm: 7, LeaderExpiry: checked.Add(time.Hour), LastChecked: checked})
+	wantLines(t, "status, leader known", b.String(),
+		"  this agent:     does not vote in the zone (member, no role)",
+		"  leader:         agent.alpha.example., term 7, learned from gossip")
+	b.Reset()
+	printParentSyncStatus(&b, tdnsmp.ParentSyncStatus{Zone: "z.example.", Standing: "member, no role", NoVote: true, LastChecked: checked})
+	wantLines(t, "status, no leader", b.String(), "  leader:         not known yet")
+	if strings.Count(b.String(), "leader:") != 1 {
+		t.Errorf("the leader is shown twice:\n%s", b.String())
+	}
 }

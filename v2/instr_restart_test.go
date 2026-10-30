@@ -46,7 +46,7 @@ func (r *thawRig) restart() {
 // leadGroup has the election records name leader as the leader of the
 // zone's group under in.
 func (r *thawRig) leadGroup(in *Instructions, leader string) {
-	m := zoneMakeUp(in)
+	m := zoneMakeUp(r.zone, in)
 	r.lem.mu.Lock()
 	defer r.lem.mu.Unlock()
 	r.lem.groupElections[ComputeGroupHash(m.voting, m.auditors, m.noRole)] = &LeaderElection{Leader: AgentId(leader), LeaderExpiry: time.Now().Add(time.Hour)}
@@ -245,7 +245,7 @@ func TestTheAuditorTakesItsRecordOrTheLeadersWord(t *testing.T) {
 	}
 	r.noRecord(r.n)
 	gst := NewGossipStateTable(roleN)
-	m := zoneMakeUp(r.n)
+	m := zoneMakeUp(r.zone, r.n)
 	gst.Elections[ComputeGroupHash(m.voting, m.auditors, m.noRole)] = &GroupElectionState{Leader: roleB, Term: 1, LeaderExpiry: time.Now().Add(time.Hour)}
 	r.conf.InternalMp.AgentRegistry.GossipStateTable = gst
 	r.hear(roleN, tells(r.n, r.n), true)
@@ -636,7 +636,7 @@ func TestACatchUpAnswerIsKeptWhileTheActiveSerialIsUnknown(t *testing.T) {
 		t.Fatalf("the request: %+v, want its answer arrived and not handled", e)
 	}
 	r.cmds()
-	r.conf.know(r.zone, sd(r.n), nil, roleB, knownFromLeader)
+	r.conf.know(r.zone, sd(r.n), nil, false, roleB, knownFromLeader)
 	if got := r.cmds(); !slices.Contains(got, "instr-activated") {
 		t.Fatalf("knowing the serial asked the data engine for %v, want instr-activated", got)
 	}
@@ -705,8 +705,12 @@ func TestAGroupElectionReachesAZoneNotLoadedYet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the zone's agents before its first load: %v", err)
 	}
-	if len(zad.Agents) != 1 || zad.Agents[0].ID != AgentId(roleB) {
+	// b votes, and n is a member with no role (plan S15)
+	if len(zad.Agents) != 2 || zad.Agents[0].ID != AgentId(roleB) || zad.Agents[1].ID != AgentId(roleN) {
 		t.Errorf("the zone's agents: %v", zad.Agents)
+	}
+	if zad.Standing[AgentId(roleN)] != standingNameNoRole {
+		t.Errorf("the zone's standings: %v", zad.Standing)
 	}
 }
 
@@ -746,4 +750,35 @@ func TestTheSignerIsHeldOnWhatItHoldsWhileTheActiveSerialIsNotKnown(t *testing.T
 		t.Fatal("not known")
 	}
 	waitUntil(t, "the hold let go once the serial is known", func() bool { h := newest(); return h != nil && !h.Sets.Hold })
+}
+
+// A newcomer with no role knows its active serial by the leader's word:
+// the provider data that serial gives is made, and the voting members it
+// never asked are asked, with join (plan S15). Its refresh had found no
+// provider data, and asked nothing.
+func TestKnowingTheActiveSerialAsksTheVotingMembersNeverAsked(t *testing.T) {
+	r := newReceiveRig(t, "newcomer.know.example.")
+	tr := newCatchUpTracker(roleA, nil, time.Hour)
+	tr.operational = func(AgentId) bool { return true }
+	r.conf.InternalMp.CatchUp = tr
+	if err := r.store.Forget(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	newcomer := freezeAt(t, 41, "n", "b", "") // a's record, and no role
+	r.store.Note(r.zone, newcomer, nil)
+	mpzd, _ := Zones.Get(r.zone)
+	mpzd.Options[tdns.OptMultiProvider] = true
+	mpzd.Lock()
+	mpzd.MP.MPdata = nil // as the refresh left it
+	mpzd.Unlock()
+	if got := tr.AskZone(ZoneName(r.zone), catchUpJoin); got != nil {
+		t.Fatalf("asked %v with no provider data", got)
+	}
+	r.conf.know(r.zone, sd(newcomer), nil, false, roleB, knownFromLeader)
+	tr.mu.Lock()
+	e := tr.peers[ZoneName(r.zone)][roleB]
+	tr.mu.Unlock()
+	if e == nil || e.Reason != catchUpJoin || !e.outstanding() {
+		t.Errorf("b after the serial is known: %+v, want asked with join", e)
+	}
 }

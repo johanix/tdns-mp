@@ -60,6 +60,10 @@ type stampTable struct {
 	// agent came to hold the serial it agrees on (holdConfirmed, plan S6); nil on
 	// the auditor, which has no signer.
 	hold func(zone string) bool
+	// stepHeld: this agent holds the zone's step at its active serial, its
+	// combiner and its signer included (holdsStep, plan S12); nil on the
+	// auditor, which has no parts.
+	stepHeld func(zone string, sd SerialDigest, step InstrStep) bool
 	// fetch asks a refresh of the zone's own copy, the zone named in any
 	// case: the zone's name here ("" when this agent has no such zone), and
 	// whether the refresh was queued. Nil: none.
@@ -151,12 +155,15 @@ func (t *stampTable) entryFor(peer string) *GossipMessage {
 }
 
 // ownStamp is what this agent tells of zone: the serials its store keeps,
-// with its provider's rollover flag, whom a rollover under way waits on, and
-// its signer's hold.
+// with its provider's rollover flag, whom a rollover under way waits on,
+// its signer's hold, and whether its parts hold the step it holds.
 func (t *stampTable) ownStamp(zone string) (InstrStamp, bool) {
 	st, ok := t.store.stampOf(zone)
 	if !ok {
 		return st, false
+	}
+	if st.Step != nil && t.stepHeld != nil {
+		st.StepHeld = t.stepHeld(zone, SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}, *st.Step)
 	}
 	if t.rollover != nil {
 		st.Rollover = t.rollover(zone)
@@ -646,7 +653,7 @@ func (s *InstructionStore) ownView(zone string) (ownView, bool) {
 		if h == nil {
 			continue
 		}
-		_, voting := participantsOf(h.Reading)
+		_, voting, _ := participantsOf(h.Reading)
 		for _, id := range voting {
 			v.voting[canonicalName(id)] = true
 		}
@@ -654,10 +661,10 @@ func (s *InstructionStore) ownView(zone string) (ownView, bool) {
 	return v, true
 }
 
-// sharedWith is every zone the two agents share, both with a role under
-// this agent's active or newest serial, and every zone with a removal under
-// way of peer's (plan S5a): more than rule 4's zones with something to do,
-// which S22 brings it to. Sorted.
+// sharedWith is every zone the two agents share, both members under this
+// agent's active or newest serial, with a role or without (plan S15), and
+// every zone with a removal under way of peer's (plan S5a): more than rule
+// 4's zones with something to do, which S22 brings it to. Sorted.
 func (s *InstructionStore) sharedWith(local, peer string) []string {
 	if s == nil {
 		return nil
@@ -674,14 +681,16 @@ func (s *InstructionStore) sharedWith(local, peer string) []string {
 	return out
 }
 
-// shares: local and peer both have a role under the active or the newest
-// serial, or peer's removal is under way.
+// shares: local and peer are both members under the active or the newest
+// serial, or peer's removal is under way. Called with the store's lock held:
+// the removals are the zone's own.
 func (z *zoneSerials) shares(local, peer string) bool {
 	for _, h := range []*heldSerial{z.Active, z.highest()} {
 		if h == nil {
 			continue
 		}
-		if set := participantFQDNSet(h.Reading); set.has(local) && set.has(peer) {
+		members, _, _ := participantsOf(h.Reading)
+		if set := memberSetOf(members); set.has(local) && set.has(peer) {
 			return true
 		}
 	}
@@ -689,7 +698,8 @@ func (z *zoneSerials) shares(local, peer string) bool {
 }
 
 // stampOf is what this agent tells of zone (rule 4), from the serials it
-// keeps; the rollover flag is the caller's.
+// keeps, its reconciliation's step and removals included (plan S12); the
+// rollover flag and whether its parts hold the step are the caller's.
 func (s *InstructionStore) stampOf(zone string) (InstrStamp, bool) {
 	if s == nil {
 		return InstrStamp{}, false
@@ -718,6 +728,7 @@ func (s *InstructionStore) stampOf(zone string) (InstrStamp, bool) {
 		th := *z.LastThaw
 		st.Thaw = &th
 	}
+	z.stampStepLocked(&st)
 	return st, true
 }
 
@@ -798,7 +809,9 @@ func (s *InstructionStore) RaiseEpoch(now time.Time) (uint64, error) {
 
 // wireStamps gives the agent's or the auditor's bridge its stamp table: the
 // epoch raised for this start, the provider's nameserver names, whether
-// payload encryption is on; on the agent its key rollovers and the fetch.
+// payload encryption is on; on the agent its key rollovers, its parts'
+// hold of a step and the fetch. The bridge takes the time-out for members
+// with no role too (plan S12).
 func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, crypto, agent bool) error {
 	epoch, err := conf.InternalMp.Instructions.RaiseEpoch(time.Now())
 	if err != nil {
@@ -809,12 +822,14 @@ func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, cry
 	if agent {
 		t.rollover, t.waitsOn = tm.rolloverAt, waitsOnAt
 		t.hold = conf.holdConfirmed
+		t.stepHeld = conf.holdsStep
 		t.fetch = conf.fetchZone
 		if !crypto {
 			lgGossip.Warn("payload encryption is off: no transition of a zone this agent votes for is thawed")
 		}
 	}
 	tm.stamps = t
+	tm.noRoleTimeout = noRoleTimeoutFor(mp)
 	return nil
 }
 

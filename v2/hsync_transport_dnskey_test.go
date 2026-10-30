@@ -22,7 +22,7 @@ func TestProcessDnskeyConfirmationReadsWhatTheAnswerSaysAboutOurKeys(t *testing.
 	theirs := testDnskeyRR(t, "z.example.", 257)
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	track := func(dist string) {
-		tm.TrackDnskeyPropagation("z.example.", dist, []uint16{ours.KeyTag()}, nil, []AgentId{"a1", "a2"})
+		tm.TrackDnskeyPropagation(t.Context(), "z.example.", dist, []uint16{ours.KeyTag()}, nil, []AgentId{"a1", "a2"})
 	}
 	waiting := func(dist, step string) {
 		t.Helper()
@@ -91,7 +91,7 @@ func TestProcessDnskeyConfirmationReadsWhatTheAnswerSaysAboutOurKeys(t *testing.
 
 	// a removal: the record shows up among the removed ones, and the
 	// tracker knows the key was removed (its answer goes out as "removed")
-	tm.TrackDnskeyPropagation("z.example.", "d5", []uint16{ours.KeyTag()}, []uint16{ours.KeyTag()}, []AgentId{"a1", "a2"})
+	tm.TrackDnskeyPropagation(t.Context(), "z.example.", "d5", []uint16{ours.KeyTag()}, []uint16{ours.KeyTag()}, []AgentId{"a1", "a2"})
 	if p := tm.pendingDnskeyPropagations["d5"]; !p.Removed[ours.KeyTag()] {
 		t.Errorf("the removed key is not marked removed in the tracker: %+v", p)
 	}
@@ -117,7 +117,7 @@ func TestProcessDnskeyConfirmationKeepsResultsPerKey(t *testing.T) {
 	a := testDnskeyRR(t, "z.example.", 257)
 	b := testDnskeyRR(t, "z.example.", 256)
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-	tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{a.KeyTag(), b.KeyTag()}, nil, []AgentId{"a1"})
+	tm.TrackDnskeyPropagation(t.Context(), "z.example.", "d1", []uint16{a.KeyTag(), b.KeyTag()}, nil, []AgentId{"a1"})
 	// a partial that applied a and says nothing of b: a1 has not answered
 	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPartial.String(), []string{a.String()}, nil)
 	p := tm.pendingDnskeyPropagations["d1"]
@@ -139,7 +139,7 @@ func TestProcessDnskeyConfirmationKeepsResultsPerKey(t *testing.T) {
 		t.Errorf("final results: %v, want a applied, b rejected", p.Results["a1"])
 	}
 	// a whole rejection rejects every key it did not apply
-	tm.TrackDnskeyPropagation("z.example.", "d2", []uint16{a.KeyTag(), b.KeyTag()}, nil, []AgentId{"a1"})
+	tm.TrackDnskeyPropagation(t.Context(), "z.example.", "d2", []uint16{a.KeyTag(), b.KeyTag()}, nil, []AgentId{"a1"})
 	tm.ProcessDnskeyConfirmation("d2", "a1", transport.ConfirmFailed.String(), nil, []RejectedItemInfo{{Record: a.String(), Reason: "policy"}})
 	if p := tm.pendingDnskeyPropagations["d2"]; p != nil {
 		t.Errorf("a whole rejection left the propagation pending: %+v", p.Results)
@@ -153,7 +153,7 @@ func TestProcessDnskeyConfirmationKeepsResultsPerKey(t *testing.T) {
 func TestProcessDnskeyConfirmationTakesIgnoredAsAnswered(t *testing.T) {
 	ours := testDnskeyRR(t, "z.example.", 256)
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-	tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{ours.KeyTag()}, nil, []AgentId{"a1", "a2"})
+	tm.TrackDnskeyPropagation(t.Context(), "z.example.", "d1", []uint16{ours.KeyTag()}, nil, []AgentId{"a1", "a2"})
 	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPending.String(), nil, nil)
 	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmIgnored.String(), nil, nil)
 	p := tm.pendingDnskeyPropagations["d1"]
@@ -179,7 +179,7 @@ func TestProcessDnskeyConfirmationSuccessCoversKeysAlreadyThere(t *testing.T) {
 	ksk, zsk, standby, retired := testDnskeyRR(t, "z.example.", 257), testDnskeyRR(t, "z.example.", 256), testDnskeyRR(t, "z.example.", 256), testDnskeyRR(t, "z.example.", 256)
 	tags := []uint16{ksk.KeyTag(), zsk.KeyTag(), standby.KeyTag(), retired.KeyTag()}
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-	tm.TrackDnskeyPropagation("z.example.", "d1", tags, nil, []AgentId{"a1", "a2"})
+	tm.TrackDnskeyPropagation(t.Context(), "z.example.", "d1", tags, nil, []AgentId{"a1", "a2"})
 	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmSuccess.String(), []string{standby.String()}, nil)
 	p := tm.pendingDnskeyPropagations["d1"]
 	if p == nil || !p.ExpectedAgents["a1"] {
@@ -216,7 +216,7 @@ func TestDnskeyPropagationOutcomeKnowsWhoSigns(t *testing.T) {
 	kt := ours.KeyTag()
 	run := func(signing map[AgentId]bool, a1, a2 string) *PendingDnskeyPropagation {
 		tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-		tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{kt}, nil, []AgentId{"a1", "a2"})
+		tm.TrackDnskeyPropagation(t.Context(), "z.example.", "d1", []uint16{kt}, nil, []AgentId{"a1", "a2"})
 		p := tm.pendingDnskeyPropagations["d1"]
 		p.Signing = signing
 		tm.ProcessDnskeyConfirmation("d1", "a1", a1, nil, nil)
@@ -302,7 +302,7 @@ func providersTestZone(t *testing.T, name string, labels, signers []string) *MPZ
 func TestSigningAgentsAreAskedAgainWhileUnknown(t *testing.T) {
 	ours := testDnskeyRR(t, "late.track.example.", 256)
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-	tm.TrackDnskeyPropagation("late.track.example.", "d1", []uint16{ours.KeyTag()}, nil, []AgentId{"agent.p2.example.", "agent.p3.example."})
+	tm.TrackDnskeyPropagation(t.Context(), "late.track.example.", "d1", []uint16{ours.KeyTag()}, nil, []AgentId{"agent.p2.example.", "agent.p3.example."})
 	p := tm.pendingDnskeyPropagations["d1"]
 	if p.Signing != nil {
 		t.Fatalf("the zone is not here yet, and who signs is %v, want unknown", p.Signing)
@@ -330,7 +330,7 @@ func TestAnAuditorsSuccessCompletesPropagation(t *testing.T) {
 	kt := ours.KeyTag()
 	track := func() *MPTransportBridge {
 		tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-		tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{kt}, nil, []AgentId{"p2", "p3", "aud"})
+		tm.TrackDnskeyPropagation(t.Context(), "z.example.", "d1", []uint16{kt}, nil, []AgentId{"p2", "p3", "aud"})
 		tm.ProcessDnskeyConfirmation("d1", "p2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
 		tm.ProcessDnskeyConfirmation("d1", "p3", transport.ConfirmIgnored.String(), nil, nil)
 		return tm

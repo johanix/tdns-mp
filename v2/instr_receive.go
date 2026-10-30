@@ -158,16 +158,21 @@ func (conf *Config) keepRemote(u *SynchedDataUpdate, active, made *SerialDigest,
 		respond(u, &AgentMsgResponse{Zone: u.Zone, AgentId: u.AgentId, Error: true, ErrorMsg: "the distribution could not be kept: " + err.Error()})
 		return
 	}
-	if u.CatchUp != nil {
-		// a catch-up answer kept is not handled yet: its request's answer
-		// time stops until the active serial is known (plan S9)
-		conf.InternalMp.CatchUp.Arrived(u.Zone, u.AgentId, u.CatchUp)
-	}
 	if added {
 		lgEngine.Info("a distribution made under newer instructions is kept", "zone", u.Zone, "peer", u.AgentId, "distrib", u.OriginatingDistID,
 			"made_under", activeName(made), "active", activeName(active))
 	} else {
 		lgEngine.Debug("a resend of a kept distribution is kept once", "zone", u.Zone, "peer", u.AgentId, "distrib", u.OriginatingDistID)
+	}
+	conf.tellKept(u, text, msgQs)
+}
+
+// tellKept tells the sender of u, which the kept list keeps, in a PENDING
+// with text, and whoever waits for the update's answer. A catch-up answer
+// kept is not handled yet: its request's answer time stops (plan S9).
+func (conf *Config) tellKept(u *SynchedDataUpdate, text string, msgQs *MsgQs) {
+	if u.CatchUp != nil {
+		conf.InternalMp.CatchUp.Arrived(u.Zone, u.AgentId, u.CatchUp)
 	}
 	if u.OriginatingDistID != "" && msgQs != nil && msgQs.OnRemoteConfirmationReady != nil {
 		msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
@@ -255,9 +260,11 @@ func (conf *Config) releaseActivated(ctx context.Context, zdr *ZoneDataRepo) {
 // active serial now (those made under it are taken, judged by the
 // instructions active now; those made under a lower one are refused; those
 // made under a higher one stay), and then what this agent sends again to
-// the peers that answered "not yet" (resendInStep). Run by the data engine,
-// which alone takes from the lists. A zone whose serials this agent no
-// longer keeps drops what it kept.
+// the peers that answered "not yet" (resendInStep). A CSYNC or a KEY that
+// waits for the zone's leader stays (leaderHolds), and every later one
+// waits behind it (plan S15). Run by the data engine, which alone takes
+// from the lists. A zone whose serials this agent no longer keeps drops
+// what it kept.
 func (conf *Config) instrActivated(ctx context.Context, zdr *ZoneDataRepo, zone ZoneName) {
 	k := conf.InternalMp.Kept
 	if entries := k.entries(string(zone), listKept); len(entries) > 0 {
@@ -265,9 +272,21 @@ func (conf *Config) instrActivated(ctx context.Context, zdr *ZoneDataRepo, zone 
 		if !kept {
 			lgEngine.Info("the zone's serials are gone: the distributions it kept are dropped", "zone", zone, "kept", len(entries))
 		}
+		blocked, now := false, time.Now()
 		for _, e := range entries {
 			if kept && receiptOf(active, madeUnder(e.Update.Instr)) == receiptKeep {
 				continue // made under a higher serial: it waits on
+			}
+			if kept && carriesLeaderOnly(e.Update.Operations, e.Update.Publish) {
+				if holds, leader, until := conf.leaderHolds(zone, e.Update, now); blocked || holds {
+					if !e.Update.ForLeader {
+						if err := k.markForLeader(string(zone), e.Seq, leader, until); err != nil {
+							lgEngine.Error("a kept CSYNC or KEY could not be noted as waiting for the zone's leader", "zone", zone, "err", err)
+						}
+					}
+					blocked = true
+					continue // waits for the zone's leader
+				}
 			}
 			if kept {
 				conf.releaseKept(ctx, zdr, zone, e)
@@ -291,6 +310,7 @@ func (conf *Config) releaseKept(ctx context.Context, zdr *ZoneDataRepo, zone Zon
 		lgEngine.Error("a kept distribution cannot be read; it is dropped", "zone", zone, "distrib", e.Distribution, "err", err)
 		return
 	}
+	u.leaderJudged = true // released: judged now, not kept again for the leader (plan S15)
 	sender := u.DeliveredBy
 	if sender == "" {
 		sender = u.AgentId
