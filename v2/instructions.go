@@ -629,6 +629,33 @@ func identities(set []Provider) []string {
 	return out
 }
 
+// labelsOf are the providers' labels, in the set's order.
+func labelsOf(set []Provider) []string {
+	var out []string
+	for _, p := range set {
+		out = append(out, strings.TrimSuffix(p.Label, "."))
+	}
+	return out
+}
+
+// setsLine is the zone's sets per purpose as this agent acts by them, for
+// `agent parentsync status` (plan S13): the step's, at rest the active
+// serial's lists. "" for a zone with no instructions.
+func (mpzd *MPZoneData) setsLine() string {
+	if mpzd == nil || mpzd.instructions() == nil {
+		return ""
+	}
+	r := mpzd.roles()
+	part := func(name string, set []Provider) string {
+		if len(set) == 0 {
+			return name + " none"
+		}
+		return name + " " + strings.Join(labelsOf(set), ",")
+	}
+	return strings.Join([]string{part("servers", r.Servers), part("key signers", r.KeySigners), part("DS signers", r.DSSigners),
+		part("key confirmers", r.KeyConfirmers), part("signing", r.Signing)}, "; ")
+}
+
 // participantsOf is the reading's three sets, by identity (plan S15): the
 // members, every ON record with a role or without; the voting members, in
 // servers= or signers=; and the auditors, in auditors= and in neither of

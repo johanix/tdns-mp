@@ -60,8 +60,7 @@ func newSignerRig(t *testing.T, zone string, records ...string) *signerRig {
 	conf.Config.Internal.KeyDB = kdb
 	r := &signerRig{conf: conf, kdb: kdb, mpzd: signerZoneWith(t, zone, kdb, records...)}
 	r.mpzd.EnsureMP()
-	apex, _ := r.mpzd.OwnerForAnalysis(zone)
-	r.mpzd.populateMPdata(mp, nextSigningSet(apex, nil))
+	r.mpzd.populateMPdata(mp, r.mpzd.roles())
 	r.owner = NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })
 	r.e = NewKeyLifecycleEngine(conf, r.owner)
 	r.e.wire.push = func(*Config, string, []uint16) {}
@@ -459,7 +458,7 @@ func TestAHandOverThatChangesTheConfirmersCallsSignersChanged(t *testing.T) {
 	const zone = "joiner.signer.example."
 	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)...)
 	r.hand(handoverFor(t, zone, sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)...), sigUs)
-	r.e.tickOwned(map[string]keyPause{})
+	r.e.tickOwned()
 	l := r.e.driver(zone)
 	if l == nil || len(l.InFlight()) == 0 {
 		t.Fatal("no distribution in flight after the first tick: the test does not tell")
@@ -533,7 +532,7 @@ func TestTheInventoryCarriesWhatTheSignerHolds(t *testing.T) {
 func TestTheInventoryNamesTheMissingConfirmers(t *testing.T) {
 	const zone = "waits.signer.example."
 	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2,p3" signers="us,p2,p3"`)...)
-	r.e.tickOwned(map[string]keyPause{})
+	r.e.tickOwned()
 	l := r.e.driver(zone)
 	inflight := l.InFlight()
 	if len(inflight) == 0 {
@@ -570,7 +569,7 @@ func TestTheInventoryCarriesTheRolloverPredicate(t *testing.T) {
 	if m := r.conf.inventoryMarksOf(zone, items()); m.rollover {
 		t.Fatal("a rollover under way with no key at all")
 	}
-	r.e.tickOwned(map[string]keyPause{})
+	r.e.tickOwned()
 	if m := r.conf.inventoryMarksOf(zone, items()); !m.rollover || m.notSigning {
 		t.Errorf("keys in mpdist: rollover %v, not signing %v; want a rollover under way at a signer", m.rollover, m.notSigning)
 	}
@@ -617,16 +616,12 @@ func TestASignersFirstLoadWithNothingHandedAndNoReadingIsProvisional(t *testing.
 }
 
 // A signer handed nothing whose copy carries a serial waits for its agent,
-// and meanwhile signs by the signing set it last signed by: a copy that
-// drops the other signer changes neither its multi-signer mode nor its
+// and meanwhile acts by the sets it last acted by, its first load's: a copy
+// that drops the other signer changes neither its multi-signer mode nor its
 // foreign rows.
 func TestASignerWithNothingHandedAndASerialKeepsItsForeignRows(t *testing.T) {
 	const zone = "waiting.signer.example."
 	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)...)
-	if err := saveSigningSet(r.kdb, zone, signingSet{"us": sigUs, "p2": "agent.p2.example."}); err != nil {
-		t.Fatal(err)
-	}
-	r.mpzd.MP.MPdata.Signing = nil // a start: the set is the keystore's
 	kt := r.foreignKey(t, 256)
 	if line := signerActingLine(zone); line != "waiting for its agent's hand-over" {
 		t.Errorf("the status says %q", line)
@@ -638,15 +633,41 @@ func TestASignerWithNothingHandedAndASerialKeepsItsForeignRows(t *testing.T) {
 	}
 }
 
+// A signer's first load computes its data from its copy, though it waits
+// for its agent's hand-over: what the config parse leaves is the zone's
+// options alone (main_init.go), no data it acted by. So inline-signing is
+// on before the first publish, and the zone's DNSSEC policy binds as the
+// zone loads. Switched on only at the hand-over, the signer found no policy
+// bound and signed nothing (the smoke stage at 211-demo cacec84).
+func TestASignersFirstLoadSwitchesInlineSigningOnBeforeItsHandOver(t *testing.T) {
+	const zone = "firstload.signer.example."
+	records := sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)
+	r := newSignerRig(t, zone, records...)
+	r.mpzd.MP.MPdata = &MPdata{Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}} // as the parse leaves it
+	if line := signerActingLine(zone); line != "waiting for its agent's hand-over" {
+		t.Fatalf("the status says %q, want the signer waiting for its agent", line)
+	}
+	incoming := incomingCopy(t, zone, records...)
+	r.mpzd.MPPreRefresh(incoming, nil, nil, r.conf.MpConfig())
+	if d := r.mpzd.MP.MPdata; d == nil || !d.WeAreSigner {
+		t.Fatalf("after its first load the signer's data is %+v, want it a signer, as its copy says", d)
+	}
+	if !incoming.Options[tdns.OptInlineSigning] {
+		t.Error("inline-signing is not on in the copy the first load publishes")
+	}
+	if !r.e.wire.IsSigner(zone) {
+		t.Error("the key machine does not take the zone for one this provider signs")
+	}
+}
+
 // A signer handed nothing whose copy drops it altogether, its HSYNC3
-// record included, still waits: its key machine runs by the signing set it
-// last signed by, with the label its identity has there (rule 5).
+// record included, still waits: its key machine runs by the sets it last
+// acted by, with the label its identity has there (rule 5).
 func TestASignerThatWaitsKeepsItsRolesWhenItsCopyDropsIt(t *testing.T) {
 	const zone = "dropped.waiting.signer.example."
-	r := newSignerRig(t, zone, `3600 IN HSYNC3 ON p2 agent.p2.example. .`, `3600 IN HSYNCPARAM serial="6" servers="p2" signers="p2"`)
-	if err := saveSigningSet(r.kdb, zone, signingSet{"us": sigUs, "p2": "agent.p2.example."}); err != nil {
-		t.Fatal(err)
-	}
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)...)
+	incoming := incomingCopy(t, zone, `3600 IN HSYNC3 ON p2 agent.p2.example. .`, `3600 IN HSYNCPARAM serial="6" servers="p2" signers="p2"`)
+	r.mpzd.MPPreRefresh(incoming, nil, nil, r.conf.MpConfig())
 	if !r.e.wire.IsSigner(zone) || !slices.Equal(r.e.wire.OtherSigners(zone), []string{"p2"}) {
 		t.Errorf("waiting, the signer took its copy's roles: signs %v, expects confirmations from %v", r.e.wire.IsSigner(zone), r.e.wire.OtherSigners(zone))
 	}
