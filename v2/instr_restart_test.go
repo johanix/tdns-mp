@@ -636,7 +636,7 @@ func TestACatchUpAnswerIsKeptWhileTheActiveSerialIsUnknown(t *testing.T) {
 		t.Fatalf("the request: %+v, want its answer arrived and not handled", e)
 	}
 	r.cmds()
-	r.conf.know(r.zone, sd(r.n), nil, roleB, knownFromLeader)
+	r.conf.know(r.zone, sd(r.n), nil, false, roleB, knownFromLeader)
 	if got := r.cmds(); !slices.Contains(got, "instr-activated") {
 		t.Fatalf("knowing the serial asked the data engine for %v, want instr-activated", got)
 	}

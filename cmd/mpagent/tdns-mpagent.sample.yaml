@@ -83,6 +83,7 @@ multi-provider:
    # A change of the owner's instructions, in seconds; the default.
    transitions:
       leaving-timeout:        3600
+      no-role-timeout:        900
 
 service:
    name:           TDNS-MPAGENT
