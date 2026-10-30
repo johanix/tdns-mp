@@ -1461,9 +1461,10 @@ func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID str
 		Nonce:      nonce,
 		Timestamp:  time.Now(),
 	}
-	// The answer about the zone's SIG(0) key may go to a peer that lets this
-	// agent in for the key alone (keyHandOverAdmits): its delivery
-	// confirmation is let in by its distribution id.
+	// The answer about the zone's SIG(0) key may go to a peer that is no
+	// member of the zone here, which then lets this agent in for the key
+	// alone (keyHandOverAdmits): its delivery confirmation is let in by its
+	// distribution id.
 	if subtype == "sig0key" {
 		req.DistributionID = transport.GenerateDistributionID()
 		tm.keyAsks.expectConfirm(requesterID, req.DistributionID)

@@ -19,12 +19,10 @@ type HsyncDiff struct {
 }
 
 // participates reports whether id has standing in the zone that admission
-// lets in. Until the switch that standing is a role, as the zone's
-// participants have it: an ON record whose label HSYNCPARAM lists in
-// servers=, signers= or auditors=, or any ON record in a zone with no
-// HSYNCPARAM (decision 31). ReconcileZone and ApplyHsyncDiff's gate ask it
-// of the local identity, so an agent reads alike in both. Identities are
-// compared as canonical names: the auditor's engine is built before its
+// lets in: it is a member, as the zone's participants have it, an ON record
+// with a role or without (plan S15). ReconcileZone and ApplyHsyncDiff's gate
+// ask it of the local identity, so an agent reads alike in both. Identities
+// are compared as canonical names: the auditor's engine is built before its
 // identity gets its trailing dot.
 func participates(zv ZoneView, id PeerID) bool {
 	if zv == nil || id == "" {
@@ -57,10 +55,10 @@ func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 	updated := make(map[PeerID]bool)
 	affected := make(map[PeerID]bool)
 
-	// Membership is role-derived: an identity that entered with no role must
-	// not register a member. The participant set comes from
-	// the zone view; if the view is unavailable (members==nil) adds fail closed
-	// (skipped) — the periodic ReconcileZone remains authoritative.
+	// Membership is the zone view's: every ON record, with a role or without
+	// (plan S15); an OFF record registers no member. If the view is
+	// unavailable (members==nil) adds fail closed (skipped) — the periodic
+	// ReconcileZone remains authoritative.
 	var members map[PeerID]struct{}
 	var zv ZoneView
 	if e.deps.Zones != nil {
@@ -107,7 +105,7 @@ func (e *Engine) ApplyHsyncDiff(zone ZoneName, diff HsyncDiff) error {
 			continue // zone view unavailable — fail closed
 		}
 		if _, isMember := members[id]; !isMember {
-			continue // an ON record without a role — not a member
+			continue // not a member: an OFF record
 		}
 		updated[id] = true
 		affected[id] = true

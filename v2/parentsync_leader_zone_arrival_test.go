@@ -531,10 +531,12 @@ func TestARefreshThatMovesAZoneHasItsNewLeaderSyncIt(t *testing.T) {
 		}
 	})
 
-	// The owner's edit: c keeps its HSYNC3 record and loses its role, and the
-	// zone syncs with its parent through its agents.
+	// The owner's edit: c loses its role and its HSYNC3 record, and the zone
+	// syncs with its parent through its agents. (A provider whose record
+	// stays is a member with no role, and the zone is in a group of its own:
+	// plan S15.)
 	refreshWith(t, mover, zoneEdit{
-		listed:     []string{arrivalA, arrivalB, arrivalC},
+		listed:     []string{arrivalA, arrivalB},
 		serving:    []string{arrivalA, arrivalB},
 		parentsync: true,
 	})
@@ -577,12 +579,15 @@ func TestAnAuditorsRecomputeTellsNobody(t *testing.T) {
 	pgm.RecomputeGroups()
 	inGroup(t, pgm, zone, arrivalA, arrivalB, arrivalC)
 
-	// c loses its role: the zone moves to the group of a and b.
+	// c loses its role and keeps its record: the zone moves to a group of
+	// its own, of a and b and c as a member with no role (plan S15).
 	refreshWith(t, zone, zoneEdit{
 		listed:  []string{arrivalA, arrivalB, arrivalC},
 		serving: []string{arrivalA, arrivalB},
 	})
-	inGroup(t, pgm, zone, arrivalA, arrivalB)
+	if pg := pgm.GetGroupForZone(ZoneName(zone.ZoneName)); pg == nil || pg.GroupHash != ComputeGroupHash([]string{arrivalA, arrivalB}, nil, []string{arrivalC}) {
+		t.Fatalf("the auditor has %s in group %+v, want that of a and b with c as a member with no role", zone.ZoneName, pg)
+	}
 
 	if pgm.onZoneJoinedGroup != nil {
 		t.Errorf("the auditor's group manager reports the zones that move to somebody")

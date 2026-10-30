@@ -124,7 +124,7 @@ func (conf *Config) restartView(zone string, now time.Time) (restartView, bool) 
 	}
 	local := dns.Fqdn(mp.Identity)
 	v := restartView{zone: name}
-	_, voters := participantsOf(newest.Reading)
+	_, voters, _ := participantsOf(newest.Reading)
 	var t *stampTable
 	if tm := conf.InternalMp.MPTransport; tm != nil {
 		t = tm.stamps
@@ -228,7 +228,7 @@ func (conf *Config) leadersWord(v *restartView, newest *heldSerial, told map[str
 			}
 			continue
 		}
-		if !conf.leadsUnder(reading, id) {
+		if !conf.leadsUnder(v.zone, reading, id) {
 			continue
 		}
 		v.take, v.by, v.from, v.reconciling = &sd, id, knownFromLeader, st.Reconciling
@@ -243,15 +243,15 @@ func (conf *Config) leadersWord(v *restartView, newest *heldSerial, told map[str
 // leadsUnder: id leads the zone's group under the instructions in, by the
 // election records this agent holds; a zone with one voting member is led
 // by it.
-func (conf *Config) leadsUnder(in *Instructions, id string) bool {
-	_, voters := participantsOf(in)
+func (conf *Config) leadsUnder(zone string, in *Instructions, id string) bool {
+	_, voters, _ := participantsOf(in)
 	if !isAmong(voters, AgentId(id)) {
 		return false
 	}
 	if len(voters) == 1 {
 		return true
 	}
-	m := zoneMakeUp(in)
+	m := zoneMakeUp(zone, in)
 	leader, ok := conf.groupLeader(ComputeGroupHash(m.voting, m.auditors, m.noRole))
 	return ok && core.EqualNames(leader, id)
 }

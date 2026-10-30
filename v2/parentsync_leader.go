@@ -2343,6 +2343,11 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	// The same test as IsLeader: a lead that no longer counts is not shown
 	// as this agent's.
 	status.IsLeader = status.Leader == lem.localID && time.Now().Before(status.LeaderExpiry) && votesInZone(zone, lem.localID)
+	// This agent's standing (plan S15): one that does not vote learns the
+	// leader from gossip, and the status says so.
+	if status.Standing = zoneStandingName(string(zone), string(lem.localID)); status.Standing != "" {
+		status.NoVote = !votesInZone(zone, lem.localID)
+	}
 
 	// The zone's catch-up (catchup.go), which needs neither the zone's data
 	// nor the keystore.

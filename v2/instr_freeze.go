@@ -103,7 +103,7 @@ func (s *InstructionStore) activeVoters(zone string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, z := s.zoneLocked(zone); z != nil && z.Active != nil {
-		_, voting := participantsOf(z.Active.Reading)
+		_, voting, _ := participantsOf(z.Active.Reading)
 		return voting
 	}
 	return nil
@@ -132,7 +132,7 @@ func (s *InstructionStore) transitionVoters(zone string) []string {
 		if h == nil {
 			continue
 		}
-		_, voting := participantsOf(h.Reading)
+		_, voting, _ := participantsOf(h.Reading)
 		for _, id := range voting {
 			if !isAmong(out, AgentId(id)) {
 				out = append(out, id)

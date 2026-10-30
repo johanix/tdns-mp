@@ -468,10 +468,12 @@ func (conf *Config) delegationCsyncAwaitedAfter(ctx context.Context, zone string
 // update that another agent sent, unless that agent is the one this agent
 // knows as the zone's delegation sync leader. The zone has one CSYNC, the
 // leader's, and one KEY, the group's, which the leader publishes (plan
-// S14); either from anybody else, or while no leader is known, is
-// rejected, and the sender is told so in a final confirmation. A publish
-// instruction from anybody else is dropped. The rest of the update is
-// processed as usual. Returned is the reason, empty if nothing was refused.
+// S14); either from anybody else is rejected, and the sender is told so in
+// a final confirmation. One that comes while no leader is known here is
+// kept until one is (keepForLeader, plan S15), and judged here then. A
+// publish instruction from anybody else is dropped. The rest of the update
+// is processed as usual. Returned is the reason, empty if nothing was
+// refused.
 //
 // The sender is the one the transport established, never the one the update
 // names: on the DNS mechanism the identity whose key opened the message. The

@@ -653,7 +653,7 @@ func (s *InstructionStore) ownView(zone string) (ownView, bool) {
 		if h == nil {
 			continue
 		}
-		_, voting := participantsOf(h.Reading)
+		_, voting, _ := participantsOf(h.Reading)
 		for _, id := range voting {
 			v.voting[canonicalName(id)] = true
 		}
@@ -661,10 +661,10 @@ func (s *InstructionStore) ownView(zone string) (ownView, bool) {
 	return v, true
 }
 
-// sharedWith is every zone the two agents share, both with a role under
-// this agent's active or newest serial, and every zone with a removal under
-// way of peer's (plan S5a): more than rule 4's zones with something to do,
-// which S22 brings it to. Sorted.
+// sharedWith is every zone the two agents share, both members under this
+// agent's active or newest serial, with a role or without (plan S15), and
+// every zone with a removal under way of peer's (plan S5a): more than rule
+// 4's zones with something to do, which S22 brings it to. Sorted.
 func (s *InstructionStore) sharedWith(local, peer string) []string {
 	if s == nil {
 		return nil
@@ -681,14 +681,16 @@ func (s *InstructionStore) sharedWith(local, peer string) []string {
 	return out
 }
 
-// shares: local and peer both have a role under the active or the newest
-// serial, or peer's removal is under way.
+// shares: local and peer are both members under the active or the newest
+// serial, or peer's removal is under way. Called with the store's lock held:
+// the removals are the zone's own.
 func (z *zoneSerials) shares(local, peer string) bool {
 	for _, h := range []*heldSerial{z.Active, z.highest()} {
 		if h == nil {
 			continue
 		}
-		if set := participantFQDNSet(h.Reading); set.has(local) && set.has(peer) {
+		members, _, _ := participantsOf(h.Reading)
+		if set := memberSetOf(members); set.has(local) && set.has(peer) {
 			return true
 		}
 	}

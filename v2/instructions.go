@@ -629,20 +629,40 @@ func identities(set []Provider) []string {
 	return out
 }
 
-// participantsOf is the zone's members that hold a role (servers, signers,
-// auditors), by identity, and the voting subset (servers and signers), each
-// sorted and de-duplicated. A label with no ON record names nobody.
-func participantsOf(in *Instructions) (participants, voting []string) {
+// participantsOf is the reading's three sets, by identity (plan S15): the
+// members, every ON record with a role or without; the voting members, in
+// servers= or signers=; and the auditors, in auditors= and in neither of
+// the others. Each is sorted and de-duplicated. A label with no ON record
+// names nobody, and an OFF record is no member. A provider whose removal is
+// under way is a member too, by the store (zoneParticipants).
+func participantsOf(in *Instructions) (members, voting, auditors []string) {
 	if in == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	voting = sortedUnique(append(identities(in.providers(in.Servers)), identities(in.providers(in.Signers))...))
-	participants = sortedUnique(append(slices.Clone(voting), identities(in.providers(in.Auditors))...))
-	if len(voting) == 0 {
-		voting = nil
+	for _, id := range sortedUnique(identities(in.providers(in.Auditors))) {
+		if !slices.Contains(voting, id) {
+			auditors = append(auditors, id)
+		}
 	}
-	if len(participants) == 0 {
-		participants = nil
+	for _, r := range in.Records {
+		members = append(members, r.Identity)
 	}
-	return participants, voting
+	return sortedUnique(members), voting, auditors
+}
+
+// zoneParticipants is participantsOf the zone's reading in, with every
+// provider whose removal is under way here among the members, under the
+// removal's stored identity, whatever its record says: it stays a member,
+// with no role, until its removal is done (design 3.3; plan S2, S17b).
+// Until S17b no removal exists. Not to be called with the store's lock held.
+func zoneParticipants(zone string, in *Instructions) (members, voting, auditors []string) {
+	members, voting, auditors = participantsOf(in)
+	if in == nil {
+		return members, voting, auditors
+	}
+	if ids := instrStore.Load().removalIdentities(zone); len(ids) > 0 {
+		members = sortedUnique(append(members, ids...))
+	}
+	return members, voting, auditors
 }

@@ -11,9 +11,14 @@ import (
 
 // MPZoneInfo carries multi-provider zone details for the mplist command.
 type MPZoneInfo struct {
-	Servers    []string          `json:"servers"`
-	Signers    []string          `json:"signers"`
-	Auditors   []string          `json:"auditors"`
+	Servers  []string `json:"servers"`
+	Signers  []string `json:"signers"`
+	Auditors []string `json:"auditors"`
+	// NoRole are the labels of the members with no role: ON records in
+	// none of the lists (plan S15). This is the answering agent's own
+	// standing, as standingName names it; only the agent fills it.
+	NoRole     []string          `json:"no_role,omitempty"`
+	This       string            `json:"this,omitempty"`
 	NSmgmt     string            `json:"nsmgmt"`
 	ParentSync string            `json:"parentsync"`
 	Suffix     string            `json:"suffix,omitempty"`

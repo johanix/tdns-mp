@@ -51,13 +51,13 @@ func (e *Engine) ReconcileZone(zone ZoneName) (added, removed int, err error) {
 }
 
 // expectedPeers returns the peers this agent expects in the zone: the zone's
-// participants other than itself, and none at all where it has no standing
-// (participates). Membership is HSYNCPARAM-derived (resolved by the host via
-// ZoneView.Participants); HSYNC3 alone is just an identity↔label mapping and
-// does not confer membership. An agent whose own record has left the zone,
-// or whose role was taken, sends no hellos there that would be refused, and
-// its comms with the zone's providers end (#178 step 7). With no local
-// identity (harnesses) there is nothing to test.
+// members other than itself, and none at all where it is no member
+// (participates). Membership is the host's (ZoneView.Participants): every ON
+// HSYNC3 record, with a role or without (plan S15). An agent whose own
+// record has left the zone or turned OFF sends no hellos there that would
+// be refused, and its comms with the zone's providers end (#178 step 7);
+// one whose role was taken and whose record stays is a member with no role.
+// With no local identity (harnesses) there is nothing to test.
 func (e *Engine) expectedPeers(zv ZoneView) map[PeerID]struct{} {
 	local := e.deps.LocalID
 	expected := make(map[PeerID]struct{})
