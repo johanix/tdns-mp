@@ -219,12 +219,10 @@ func TestTheKeyGatesRefusalIsNoHandlerError(t *testing.T) {
 	}
 }
 
-// An RFI is routed by its payload's MessageType, and one with none is taken
-// as a sync, whose records and operations are applied. Such a message, sent
-// as an RFI with the key's markers, passed the check for the key alone and
-// reached the update path. Only a payload that says rfi itself, and carries
-// nothing to apply, is let through as the request for the key.
-func TestARequestForTheKeyThatCarriesAnUpdateIsRefused(t *testing.T) {
+// Only an agent this agent asked is let in for the key alone, and only its
+// answer and confirmations get through: an RFI from it is refused, the
+// request for the key and one that carries an update alike (plan S15).
+func TestARequestFromAnAgentLetInForTheKeyAloneIsRefused(t *testing.T) {
 	moved, _ := handoverZones(t)
 	a := handoverBridge(arrivalA)
 	defer a.keyAsks.start(handoverStranger, string(moved))()
@@ -238,8 +236,8 @@ func TestARequestForTheKeyThatCarriesAnUpdateIsRefused(t *testing.T) {
 	key := func() *DnsSyncPayload {
 		return &DnsSyncPayload{MessageType: "rfi", OriginatorID: handoverStranger, Zone: string(moved), RfiType: "CONFIG", RfiSubtype: "sig0key"}
 	}
-	if !send(key()) {
-		t.Fatal("the request for the key is refused")
+	if send(key()) {
+		t.Error("a request for the key from an agent let in for the key alone is let through")
 	}
 	untyped := key()
 	untyped.MessageType = ""

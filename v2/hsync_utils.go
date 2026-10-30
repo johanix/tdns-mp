@@ -1156,8 +1156,8 @@ func (mpzd *MPZoneData) populateMPdata(mp *MultiProviderConf, signing signingSet
 	// Non-signer servers in signed zones get disallow-edits but MPdata is
 	// still populated (allows persistence without editing — sep-1 behavior).
 	switch {
-	case weAreAuditor:
-		// Auditors never edit
+	case weAreAuditor, !weAreServer && !weShouldSign:
+		// Auditors never edit, nor does a member with no role (plan S15)
 		mpzd.MPOptions[OptMPDisallowEdits] = true
 		mpzd.MPOptions[tdns.OptAllowEdits] = false
 	case zoneSigned && !weShouldSign:
