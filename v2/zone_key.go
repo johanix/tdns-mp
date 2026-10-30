@@ -146,20 +146,20 @@ func readZoneKey(kdb *tdns.KeyDB, zone ZoneName) (*zoneKey, error) {
 		return nil, err
 	}
 	z.active = active
+	// Between the roll's steps 3 and 5 the zone's key is the leader's new
+	// key, not active yet (plan S17a): from when its KEY is sent, whatever
+	// the leader's own copy still serves, and while the copy serves it
+	// before the phase is written
+	r, sent := rollingKey(kdb, zone)
 	switch {
 	case z.several():
+	case r != nil && (sent || len(z.published) == 1 && sameKey(r.key, z.published[0])):
+		z.held, z.rolling = r, true
 	case len(z.published) == 1:
 		for i := range active {
 			if sameKey(active[i].key, z.published[0]) {
 				z.held = &active[i]
 				break
-			}
-		}
-		// between the roll's steps 3 and 5 the zone publishes the leader's
-		// new key, which is not active yet (plan S17a)
-		if z.held == nil {
-			if r := rollingKey(kdb, zone); r != nil && sameKey(r.key, z.published[0]) {
-				z.held, z.rolling = r, true
 			}
 		}
 	case len(active) > 0:

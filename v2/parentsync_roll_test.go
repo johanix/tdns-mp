@@ -278,6 +278,25 @@ func TestTheNewKEYIsPublishedOnlyAfterTheParentHasTakenIt(t *testing.T) {
 	}
 }
 
+// From when the roll's KEY is sent, the leader's zone key is the new key,
+// though its own copy still serves the old KEY: what it hands over is the
+// new key, and its set-up does not publish the old KEY over the new one.
+func TestTheLeaderNamesTheNewKeyOnceItsKEYIsSent(t *testing.T) {
+	r := newRollRig(t, "roll.sent.example.")
+	k2 := r.start(t) // the copy still serves the old KEY
+	zk, err := readZoneKey(r.mpzd.KeyDB, r.zone)
+	if err != nil || zk.held == nil || zk.held.keyid != k2 || !zk.rolling {
+		t.Fatalf("the zone's key once the new KEY is sent: %+v (%v), want %d, rolling", zk, err, k2)
+	}
+	r.alog.Reset()
+	if err := r.conf.leaderKeySetup(r.ctx, r.zone, false); err != nil {
+		t.Errorf("the leader's set-up: %v", err)
+	}
+	if strings.Contains(r.alog.String(), "publishing KEY to combiner") {
+		t.Errorf("the set-up published a KEY during the roll:\n%s", r.alog)
+	}
+}
+
 // A recipient that keeps the new KEY and applies it not by its role
 // (IGNORED) has taken it; a refusal fails the try, and the KEY goes again.
 func TestARefusedKEYIsSentAgainAndAnIgnoredOneIsTaken(t *testing.T) {
@@ -285,10 +304,10 @@ func TestARefusedKEYIsSentAgainAndAnIgnoredOneIsTaken(t *testing.T) {
 	r.start(t)
 	tm := r.conf.InternalMp.MPTransport
 	st, _ := tm.rollKEYs.state(r.zone)
-	tm.rollKEYs.heard(st.distID, st.expected[0], "REJECTED", "not now", false)
+	tm.rollKEYs.heard(st.distID, st.expected[0], "PARTIAL", "not all", false)
 	r.pass(t, syncOther)
 	if ro := r.roll(t); ro == nil || ro.phase != rollPublished || ro.failures != 1 {
-		t.Fatalf("the roll after a refused KEY: %+v", ro)
+		t.Fatalf("the roll after a KEY taken in part: %+v", ro)
 	}
 	r.due(t)
 	r.pass(t, syncOther)

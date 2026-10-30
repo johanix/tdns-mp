@@ -147,15 +147,16 @@ func rollZones(kdb *tdns.KeyDB) []ZoneName {
 	return out
 }
 
-// rollingKey is the new key of the zone's roll between its steps 3 and 5,
-// kept published at the leader. Nil otherwise. A roll in "added" counts too:
-// its KEY may have gone out before the phase was written.
-func rollingKey(kdb *tdns.KeyDB, zone ZoneName) *sig0Row {
+// rollingKey is the new key of the zone's roll, kept published at the
+// leader, while the roll is "added" or "published"; sent: its KEY has gone
+// out ("published"). In "added" the KEY may have gone out before the phase
+// was written, which the zone's copy shows.
+func rollingKey(kdb *tdns.KeyDB, zone ZoneName) (key *sig0Row, sent bool) {
 	r, err := loadRoll(kdb, zone)
 	if err != nil || r == nil || (r.phase != rollAdded && r.phase != rollPublished) {
-		return nil
+		return nil, false
 	}
-	return sig0RowByID(kdb, zone, tdns.Sig0StatePublished, r.newKeyid)
+	return sig0RowByID(kdb, zone, tdns.Sig0StatePublished, r.newKeyid), r.phase == rollPublished
 }
 
 func sig0RowByID(kdb *tdns.KeyDB, zone ZoneName, state string, keyid uint16) *sig0Row {
@@ -606,9 +607,9 @@ func (conf *Config) publishRolledKEY(zone ZoneName, newKey *sig0Row) error {
 // rollMembers is step 4: once every recipient has confirmed the new KEY
 // (members with no role after the time-out), the new key is made active and
 // the old one retired at the leader, in one transaction. A recipient that
-// keeps the KEY and does not apply it by its role (IGNORED: a combiner that
-// signs nothing publishes no KEY) has taken it; FAILED and REJECTED have
-// not. A KEY booked in no earlier pass of this process (a restart), or
+// applied the KEY (SUCCESS), or keeps it and does not apply it by its role
+// (IGNORED: a combiner that signs nothing publishes no KEY), has taken it;
+// any other final word has not. A KEY booked in no earlier pass of this process (a restart), or
 // refused, is published again.
 func (conf *Config) rollMembers(kdb *tdns.KeyDB, r *sig0Roll) (string, error) {
 	zone := r.zone
@@ -630,7 +631,7 @@ func (conf *Config) rollMembers(kdb *tdns.KeyDB, r *sig0Roll) (string, error) {
 		switch {
 		case !heard:
 			awaited = append(awaited, rcpt)
-		case w.status == "FAILED" || w.status == "REJECTED":
+		case w.status != "SUCCESS" && w.status != "IGNORED":
 			tm.rollKEYs.forget(zone)
 			return "", fmt.Errorf("%s did not take the new KEY (%s: %s)", rcpt, w.status, w.message)
 		}
