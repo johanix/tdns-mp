@@ -5,10 +5,11 @@
  * active serial and its instructions, the serial it was thawed from until the
  * transition is done, every newer serial held, the last thaw, an owner error,
  * the step and its sets, and the removals under way. Kept on the agent and on
- * the auditor. Until the thaw enforces it (S7), the active serial follows the
- * copy, because the readers still read the copy: the store classifies each
- * copy and shows it, "not enforced". The judge's refusals (S4) are shown and
- * not enforced either.
+ * the auditor. From the thaw (S7) the active serial moves only by Activate:
+ * a newer copy is held, and agreed on, and a refused one is never made
+ * active. A record kept before that followed the copy, "not enforced", and
+ * counts as none: the copy noted next becomes the active serial, enforced
+ * (S9 replaces that with the restart rule).
  */
 package tdnsmp
 
@@ -67,6 +68,10 @@ type zoneSerials struct {
 	From      *heldSerial  `json:"from,omitempty"` // thawed from, until "done"
 	Held      []heldSerial `json:"held,omitempty"` // above Active, lowest first
 	LastThaw  *Thaw        `json:"last_thaw,omitempty"`
+	// LastFrom is the last thaw's from-serial, kept after "done" until the
+	// next thaw, so that a member behind the thaw can fetch it here (the
+	// instructions RFI, plan S7).
+	LastFrom *heldSerial `json:"last_from,omitempty"`
 	// OwnerError holds the zone (design 3.6) until a copy above ErrorAt is
 	// noted; ErrorAt nil: nothing was held when it was noted. Conflict is
 	// the digests seen at ErrorAt for "one serial, two digests".
@@ -77,8 +82,8 @@ type zoneSerials struct {
 	// hold, each provider by label and identity (S3 and S12 fill them).
 	Step int             `json:"step,omitempty"`
 	Sets json.RawMessage `json:"sets,omitempty"`
-	// Enforced: the active serial is the leader's (S7). Until then it
-	// follows the copy.
+	// Enforced: the active serial moves only by Activate (S7). A record
+	// kept before that followed the copy.
 	Enforced bool      `json:"enforced"`
 	Removals []Removal `json:"-"` // in MPZoneRemovals
 	Since    time.Time `json:"since"`
@@ -359,6 +364,10 @@ func (z *zoneSerials) clone() *zoneSerials {
 		f := *z.From
 		c.From = &f
 	}
+	if z.LastFrom != nil {
+		f := *z.LastFrom
+		c.LastFrom = &f
+	}
 	c.Held = slices.Clone(z.Held)
 	c.Conflict = slices.Clone(z.Conflict)
 	c.Removals = slices.Clone(z.Removals)
@@ -428,6 +437,10 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 				}
 				z.ownerError(zone, fmt.Sprintf("serial %d with %s (%s)", in.Serial, digests, strings.Join(z.Conflict, ", ")))
 			}
+			// a record kept before the thaw is enforced at its serial, an
+			// edit at that serial or not: the readers act by it, not by a
+			// copy the owner changed without raising the serial (plan S7)
+			z.Enforced = true
 			return nil
 		}
 		if top := z.highest(); top != nil && CompareSerial(in.Serial, top.Serial) <= 0 {
@@ -443,16 +456,18 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 			z.OwnerError, z.ErrorAt, z.Conflict = "", nil, nil
 		}
 		h := heldSerial{SerialDigest: cp, Reading: in, Since: time.Now()}
-		if z.Active != nil {
-			s.judge(zone, z.Active, &h)
-		}
 		if z.Active == nil || !z.Enforced {
-			// Not enforced: the active serial follows the copy, refused or
-			// not; its refusal is shown.
+			// The zone's first record, or one kept before the thaw enforced
+			// the active serial, which followed the copy and counts as none
+			// (plan section 4): the copy becomes the active serial, enforced.
+			// From here it moves only by Activate (S7). S9 replaces this with
+			// the restart rule.
 			z.Active = &h
 			z.dropAtOrBelow(in.Serial)
+			z.Enforced = true
 			return nil
 		}
+		s.judge(zone, z.Active, &h)
 		z.Held = append(z.Held, h)
 		return nil
 	})
@@ -503,6 +518,8 @@ func (s *InstructionStore) Activate(zone string, thaw Thaw) error {
 		f, t := *from, *to
 		t.Since, t.Refused = time.Now(), nil
 		z.From, z.Active = &f, &t
+		lf := f
+		z.LastFrom = &lf
 		z.dropAtOrBelow(t.Serial)
 		s.judged(zone, z)
 		z.Step, z.Removals = 0, nil
@@ -510,6 +527,75 @@ func (s *InstructionStore) Activate(zone string, thaw Thaw) error {
 		z.Enforced = true
 		return nil
 	})
+}
+
+var errHeldAlready = errors.New("the serial is held already")
+
+// Hold keeps a serial fetched from a member (the instructions RFI, plan S7):
+// a from-serial that a member behind the thaw lacks, or a serial agreed on
+// or made active that it does not hold. It is kept in order among the newer
+// serials held and judged against the active serial. One at or below the
+// active serial is not kept, nor one held already (errHeldAlready); one held
+// with another digest is refused: the owner errors between agents are the
+// stamps' (S5a).
+func (s *InstructionStore) Hold(zone string, in *Instructions) error {
+	if s == nil || in == nil {
+		return fmt.Errorf("zone %s: no serials kept", zone)
+	}
+	name := zone
+	s.mu.Lock()
+	if n, _ := s.zoneLocked(zone); n != "" {
+		name = n
+	}
+	s.mu.Unlock()
+	return s.update(name, func(z *zoneSerials) error {
+		if z.Active == nil || !z.Enforced {
+			return fmt.Errorf("zone %s: no enforced active serial", zone)
+		}
+		sd := SerialDigest{Serial: in.Serial, Digest: in.Digest()}
+		if h := z.held(sd.Serial); h != nil {
+			if h.Digest != sd.Digest {
+				return fmt.Errorf("zone %s: serial %d is held with digest %s, not %s", zone, sd.Serial, h.Digest, sd.Digest)
+			}
+			return errHeldAlready
+		}
+		if CompareSerial(sd.Serial, z.Active.Serial) <= 0 {
+			return fmt.Errorf("zone %s: serial %d is not above the active serial %d", zone, sd.Serial, z.Active.Serial)
+		}
+		h := heldSerial{SerialDigest: sd, Reading: in, Since: time.Now()}
+		s.judge(zone, z.Active, &h)
+		i := slices.IndexFunc(z.Held, func(o heldSerial) bool { return CompareSerial(o.Serial, sd.Serial) > 0 })
+		if i < 0 {
+			i = len(z.Held)
+		}
+		z.Held = slices.Insert(z.Held, i, h)
+		return nil
+	})
+}
+
+// readingAt is the instructions this agent holds at sd, the zone named in
+// any case: its active serial, a newer one, the serial it was thawed from,
+// or its last thaw's from-serial (the instructions RFI's answer, plan S7);
+// nil when it holds none with that digest.
+func (s *InstructionStore) readingAt(zone string, sd SerialDigest) *Instructions {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, z := s.zoneLocked(zone)
+	if z == nil {
+		return nil
+	}
+	if h := z.held(sd.Serial); h != nil && h.SerialDigest == sd {
+		return h.Reading
+	}
+	for _, h := range []*heldSerial{z.From, z.LastFrom} {
+		if h != nil && h.SerialDigest == sd {
+			return h.Reading
+		}
+	}
+	return nil
 }
 
 // Done ends the zone's transition, on the leader's first-hand stamp that
@@ -596,10 +682,9 @@ func (s *InstructionStore) Prune(keep func(zone string) bool) {
 }
 
 // activeReading is the zone's active instructions as the readers act by
-// them, or nil when the store keeps none for it or does not enforce them
-// yet. Until the thaw enforces the active serial (S7) the readers act by the
-// copy, whatever Note made of it (plan S2): an edit at the same serial or at
-// a lower one is acted on, as before, and its owner error is only shown.
+// them, or nil when the store keeps none for it or keeps a record from
+// before S7, which is not enforced: the readers act by the copy until Note
+// enforces it (plan S7).
 func (s *InstructionStore) activeReading(zone string) *Instructions {
 	if s == nil {
 		return nil
@@ -669,6 +754,9 @@ type InstructionsStatus struct {
 	OwnerError string        `json:"owner_error,omitempty"`
 	Enforced   bool          `json:"enforced"`
 	Removals   []Removal     `json:"removals,omitempty"`
+	// Thaw is what the agreement waits for, or the last thaw made active
+	// here (instr_thaw.go, plan S7); the agent's to fill.
+	Thaw string `json:"thaw,omitempty"`
 }
 
 // Status is the zone's kept serials, or nil when none are kept.
@@ -712,8 +800,9 @@ func (s *InstructionStore) Status(zone string) *InstructionsStatus {
 }
 
 // Line is the status in one line, as `agent parentsync status` prints it: a
-// refusal or an owner error first. Until S7 neither is enforced: the readers
-// act by the copy (activeReading).
+// refusal or an owner error first, and last what the thaw waits for, or the
+// last thaw. A record kept before S7 is not enforced: the readers act by the
+// copy (activeReading).
 func (st *InstructionsStatus) Line() string {
 	if st == nil {
 		return "none kept"
@@ -743,7 +832,10 @@ func (st *InstructionsStatus) Line() string {
 	if r := st.refusedLine(); r != "" {
 		line = r + "; " + line
 	}
-	if st.Phase != PhaseSteady && st.Phase != PhaseRefused {
+	switch {
+	case st.Thaw != "":
+		line += "; " + st.Thaw
+	case st.Phase != PhaseSteady && st.Phase != PhaseRefused:
 		line += "; " + st.Phase
 	}
 	if !st.Enforced {

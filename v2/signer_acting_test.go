@@ -223,17 +223,16 @@ func TestTheSignerSignsByTheHandedSerialNotItsCopy(t *testing.T) {
 	}
 }
 
-// Until S7 a copy newer than the hand-over is acted by: the agent takes the
-// zone from its signer, so at every edit the signer holds the new serial a
-// transfer before its agent hands it over.
-func TestASignersCopyNewerThanTheHandOverIsActedBy(t *testing.T) {
+// From S7 a copy newer than the hand-over is not acted by: its agent may
+// refuse that serial. The signer signs by the serial handed.
+func TestASignersCopyNewerThanTheHandOverIsNotActedBy(t *testing.T) {
 	const zone = "newer.signer.example."
 	r := newSignerRig(t, zone, sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)...)
 	r.hand(handoverFor(t, zone, sigRecords(`serial="5" servers="us,p2" signers="us"`)...), sigUs)
-	if !slices.Equal(r.e.wire.OtherSigners(zone), []string{"p2"}) {
-		t.Errorf("the other signers %v, want p2 by the newer copy", r.e.wire.OtherSigners(zone))
+	if others := r.e.wire.OtherSigners(zone); len(others) != 0 {
+		t.Errorf("the other signers %v, want none by the serial handed", others)
 	}
-	if line := signerActingLine(zone); !strings.HasPrefix(line, "by its own copy, serial 6, newer than the 5 its agent handed at ") {
+	if line := signerActingLine(zone); !strings.HasPrefix(line, "acting by 5, handed at ") {
 		t.Errorf("the status says %q", line)
 	}
 }
@@ -328,11 +327,22 @@ func TestAHandOverAndARefreshSetTheMultiProviderDataOneAtATime(t *testing.T) {
 	if weAreSigner() {
 		t.Error("the hand-over that leaves us out of the signers did not set it once the lock was free")
 	}
-	// a copy newer than the hand-over, which it acts by until S7
+	// a copy newer than the hand-over: the signer acts by the hand-over (S7),
+	// and the refresh sets the data anew by it
+	r.mpzd.Lock()
+	before := r.mpzd.MP.MPdata
+	r.mpzd.Unlock()
 	incoming := incomingCopy(t, zone, sigRecords(`serial="7" servers="us,p2" signers="us,p2"`)...)
 	held("a refresh", func() { r.mpzd.MPPreRefresh(incoming, nil, nil, r.conf.MpConfig()) })
-	if !weAreSigner() {
-		t.Error("the refresh by a serial that names us a signer did not set it once the lock was free")
+	r.mpzd.Lock()
+	after := r.mpzd.MP.MPdata
+	r.mpzd.Unlock()
+	if after == before {
+		t.Error("the refresh did not set the multi-provider data once the lock was free")
+	}
+	// by the hand-over: p2 signs, we do not (cubic on tdns-mp #311)
+	if after == nil || after.WeAreSigner || after.OtherSigners != 1 {
+		t.Errorf("the refresh by a newer copy that names us a signer set %+v over the hand-over", after)
 	}
 }
 

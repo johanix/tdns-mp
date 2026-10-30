@@ -22,8 +22,6 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
-	core "github.com/johanix/tdns/v2/core"
-	"github.com/miekg/dns"
 )
 
 // freezeReasons are why the zone is frozen: an owner error holds it (design
@@ -303,7 +301,7 @@ func (conf *Config) instrDone(ctx context.Context, zdr *ZoneDataRepo, zone ZoneN
 					select {
 					case a := <-answer:
 						if a.Error {
-							lgEngine.Warn("a kept change was released and did not go out in full; `agent peer resync --push` sends it again", "zone", zone, "err", a.ErrorMsg)
+							lgEngine.Warn("a kept change was released and was refused, or did not go out in full; if it was applied, `agent peer resync --push` sends it again", "zone", zone, "err", a.ErrorMsg)
 						}
 					default:
 					}
@@ -385,50 +383,19 @@ func (conf *Config) freezeLines(zone string) (frozen, kept string) {
 	return frozen, strings.Join(parts, ", ")
 }
 
-// agreementWaitsFor names whom the agreement on the zone's serial agreed on
-// waits for, as this agent sees it: itself while its signer has not
-// confirmed the hold, and every other voting member under the active
-// serial whose latest stamp does not tell the same active serial, the same
-// serial agreed on and its signer's hold. S7 counts the same tellings for
-// the thaw, and only fresh ones.
+// agreementWaitsFor names whom and what the agreement on the zone's serial
+// agreed on waits for, as this agent sees it: the thaw's view (plan S7),
+// this agent first when its signer has not confirmed the hold, then every
+// other voting member under the active serial whose latest stamp does not
+// tell what the thaw counts, then the leader's work at the parent.
 func (conf *Config) agreementWaitsFor(zone string) []string {
-	s := conf.InternalMp.Instructions
-	own, ok := s.stampOf(zone)
-	if !ok || own.AgreeingDigest == "" {
+	v, ok := conf.thawView(zone, time.Now())
+	if !ok {
 		return nil
 	}
-	local := dns.Fqdn(conf.MpConfig().Identity)
-	var told map[string]InstrStamp
-	if tm := conf.InternalMp.MPTransport; tm != nil && tm.stamps != nil {
-		told = tm.stamps.told(canonicalName(zone))
-	}
-	var out []string
-	if !conf.holdConfirmed(zone) {
-		out = append(out, local+" (no hold yet)")
-	}
-	voters := s.activeVoters(zone)
-	slices.Sort(voters)
-	for _, id := range voters {
-		if core.EqualNames(id, local) {
-			continue
-		}
-		var st InstrStamp
-		var heard bool
-		for who, t := range told {
-			if core.EqualNames(who, id) {
-				st, heard = t, true
-			}
-		}
-		switch {
-		case !heard:
-			out = append(out, id+" (not heard)")
-		case !st.Known || st.Active != own.Active || st.ActiveDigest != own.ActiveDigest:
-			out = append(out, fmt.Sprintf("%s (tells %d)", id, st.Active))
-		case st.Agreeing != own.Agreeing || st.AgreeingDigest != own.AgreeingDigest:
-			out = append(out, fmt.Sprintf("%s (agrees on %d)", id, st.Agreeing))
-		case !st.Hold:
-			out = append(out, id+" (no hold yet)")
-		}
+	out := slices.Clone(v.waits)
+	if v.parent != "" {
+		out = append(out, "the parent ("+v.parent+")")
 	}
 	return out
 }

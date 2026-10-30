@@ -305,10 +305,6 @@ func TestAnEditWithoutARaisedSerialIsAnOwnerError(t *testing.T) {
 	s.Note(storeZone, first, nil)
 	s.Note(storeZone, second, nil)
 	want := fmt.Sprintf("held: owner error: serial 42 with two digests (%s, %s)", first.Digest(), second.Digest())
-	if got := status(t, s, storeZone).Line(); got != want+"; not enforced" {
-		t.Errorf("before S7:\n got %q\nwant %q", got, want+"; not enforced")
-	}
-	enforced(t, s, storeZone)
 	if got := status(t, s, storeZone).Line(); got != want {
 		t.Errorf("from S7:\n got %q\nwant %q", got, want)
 	}
@@ -394,16 +390,17 @@ func TestARefusalIsShownInTheStatusMplistAndTheAuditor(t *testing.T) {
 	}
 }
 
-// Until S7 the active serial follows the copy, refused or not.
-func TestARefusalIsShownAndNotEnforced(t *testing.T) {
+// From S7 a refused serial is held and shown, and the active serial stays:
+// the zone is steady, not frozen (design 3.6).
+func TestARefusalIsShownAndEnforced(t *testing.T) {
 	from, to := jAt(t, 41, jServers3, jAlpha, jBeta, jCharlie), jAt(t, 42, jServers3, jAlpha, jBeta)
 	s := newStore(t)
 	s.Note(storeZone, from, nil)
 	s.Note(storeZone, to, nil)
 	st := status(t, s, storeZone)
-	want := fmt.Sprintf("42 refused: removes the record of agent.charlie.example., which has a role under 41; active 42 (%s), copy 42; not enforced", to.Digest())
-	if *st.Active != sd(to) || st.Phase != PhaseRefused || st.Line() != want {
-		t.Errorf("active %s phase %s status %q; want 42, refused,\n%q", serialOf(st.Active), st.Phase, st.Line(), want)
+	want := fmt.Sprintf("42 refused: removes the record of agent.charlie.example., which has a role under 41; active 41 (%s), newest 42 (%s), copy 42", from.Digest(), to.Digest())
+	if *st.Active != sd(from) || st.Phase != PhaseRefused || st.Line() != want || len(s.frozen(storeZone)) > 0 {
+		t.Errorf("active %s phase %s status %q frozen %v; want 41, refused,\n%q", serialOf(st.Active), st.Phase, st.Line(), s.frozen(storeZone), want)
 	}
 }
 

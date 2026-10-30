@@ -287,12 +287,14 @@ func wireAgentGossipCallbacks(conf *Config, ar *AgentRegistry) {
 			return
 		}
 		// The members come from zone data and carry the trailing dot; a
-		// configured identity need not (isAmong).
-		if !isAmong(pg.VotingMembers, lem.localID) {
+		// configured identity need not (isAmong). A leaving member excused
+		// and not heard is no voter (plan S7).
+		voters := withoutExcused(pg.VotingMembers, conf.gateExcused(groupHash))
+		if len(voters) == 0 || !isAmong(voters, lem.localID) {
 			return
 		}
-		initiator := pg.VotingMembers[0]
-		for _, m := range pg.VotingMembers[1:] {
+		initiator := voters[0]
+		for _, m := range voters[1:] {
 			if m < initiator {
 				initiator = m
 			}
@@ -312,11 +314,20 @@ func wireAgentGossipCallbacks(conf *Config, ar *AgentRegistry) {
 				"group", shortHash(groupHash), "leader", leader)
 			return
 		}
-		lem.StartGroupElection(groupHash, pg.VotingMembers, pg.Zones)
+		lem.StartGroupElection(groupHash, voters, pg.Zones)
 	})
+	// The gate of a group leaves out a leaving voting member that is
+	// excused and not heard (design 3.2, plan S7); its election does too
+	// (setUpLeaderElection).
+	ar.GossipStateTable.SetGateExcused(conf.gateExcused)
 	ar.GossipStateTable.SetOnGroupDegraded(func(groupHash string) {
 		if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
 			lem.InvalidateGroupLeader(groupHash)
+			// what the leader began for the parent stops with its lead
+			// (design 3.2): tdns's UPDATE retries outlived it by 75 s
+			if pg := ar.ProviderGroupManager.GetGroup(groupHash); pg != nil {
+				conf.cancelGroupParentWork(pg.Zones)
+			}
 		}
 	})
 	ar.GossipStateTable.SetOnElectionUpdate(func(groupHash string, state GroupElectionState) {
@@ -460,6 +471,9 @@ func buildHsyncEngineDeps(conf *Config) (hsync.Deps, hsync.Config) {
 					return
 				}
 				ar.GossipStateTable.RefreshLocalStates(ar, ar.ProviderGroupManager)
+				// every zone's thaw is asked at every beat round (plan S7),
+				// before the gate: an excusal comes with time
+				conf.thawRound()
 				// The groups are copied out, and checked with the manager's
 				// lock free. A group that has just become OPERATIONAL has its
 				// election called from in there, by a callback that reads the

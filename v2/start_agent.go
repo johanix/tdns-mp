@@ -111,6 +111,12 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// The hand-over to the combiner (plan S10) is in place before the first
 	// zone load, which hands the combiner what this agent acts by.
 	conf.startHandovers(ctx, conf.InternalMp.MPTransport)
+	// The zones' thaws (plan S7), asked after a member's telling and at
+	// every beat round.
+	tdns.StartEngine(&tdns.Globals.App, "Thaws", func() error {
+		conf.runThaws(ctx)
+		return nil
+	})
 
 	// The hsync engine is constructed before RefreshEngine starts (its Run
 	// starts further down, with the other agent engines): the first zone
@@ -274,6 +280,9 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 	if ar.ProviderGroupManager != nil {
 		lem.SetProviderGroupManager(ar.ProviderGroupManager)
 	}
+	// A group's election leaves out a leaving voting member that is excused
+	// and not heard, as its gate does (design 3.2, plan S7).
+	lem.SetGateExcused(conf.gateExcused)
 
 	// Attach OnFirstLoad callbacks to zone stubs.
 	delegationSyncQ := conf.Config.Internal.DelegationSyncQ

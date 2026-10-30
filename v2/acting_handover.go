@@ -143,7 +143,7 @@ func (mpzd *MPZoneData) actingSets() Roles {
 }
 
 // wantedHandover is what this agent wants its combiner to act by for the
-// zone: the instructions it acts by (until S7 its copy's, S3's rule), the
+// zone: the instructions it acts by (its active ones, S3's rule), the
 // store's newest serial, phase and step, and the step's sets, with the hold
 // while the zone is frozen (S6, folded in by S11). Until S13 the
 // sets of whose DNSKEYs and DS are published, and of who signs, are the

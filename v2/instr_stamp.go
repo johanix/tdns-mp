@@ -64,7 +64,10 @@ type stampTable struct {
 	// case: the zone's name here ("" when this agent has no such zone), and
 	// whether the refresh was queued. Nil: none.
 	fetch func(zone string) (name string, queued bool)
-	seq   atomic.Uint64
+	// onTold is asked of a zone after a member's first-hand stamp of it is
+	// kept: the thaw's turn (plan S7). Nil: none.
+	onTold func(zone string)
+	seq    atomic.Uint64
 
 	mu      sync.Mutex
 	kept    map[string]*memberStamp // by identity, folded (canonicalName)
@@ -75,8 +78,8 @@ type stampTable struct {
 
 // memberStamp is a member's latest stamp, as it was heard. Instr is keyed
 // by the zone's name, folded, and ZoneSeq is the sequence each zone's stamp
-// was told at: a message tells one zone, a beat every zone the two share.
-// Seq is the latest beat's.
+// was told at, ZoneHeard when: a message tells one zone, a beat every zone
+// the two share. Seq is the latest beat's.
 type memberStamp struct {
 	Identity    string
 	Epoch, Seq  uint64
@@ -87,6 +90,16 @@ type memberStamp struct {
 	Nameservers []string
 	Instr       map[string]InstrStamp
 	ZoneSeq     map[string]uint64
+	ZoneHeard   map[string]time.Time
+}
+
+// encrypted: the member tells payload encryption on, and its latest beat
+// came in the payload envelope, or over HTTPS, whose two ends each check the
+// other's certificate against its TLSA record (tdns-mp #242, #246). Either
+// way the telling is the member's own (design 3.7; plan S7 decides that an
+// HTTPS beat counts).
+func (m *memberStamp) encrypted() bool {
+	return m.Crypto && (m.Enveloped || m.Mechanism == transport.MechanismAPI)
 }
 
 type fetchMark struct {
@@ -199,6 +212,9 @@ func (t *stampTable) note(msg *GossipMessage, sender, mechanism string) {
 	for _, zone := range slices.Sorted(maps.Keys(m.Instr)) {
 		t.judgeTold(zone)
 		t.fetchIfNewer(zone, m)
+		if t.onTold != nil {
+			t.onTold(zone)
+		}
 	}
 }
 
@@ -212,8 +228,9 @@ func (t *stampTable) note(msg *GossipMessage, sender, mechanism string) {
 func (t *stampTable) keep(m *memberStamp) bool {
 	key := canonicalName(m.Identity)
 	m.ZoneSeq = make(map[string]uint64, len(m.Instr))
+	m.ZoneHeard = make(map[string]time.Time, len(m.Instr))
 	for zone := range m.Instr {
-		m.ZoneSeq[zone] = m.Seq
+		m.ZoneSeq[zone], m.ZoneHeard[zone] = m.Seq, m.Heard
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -227,9 +244,10 @@ func (t *stampTable) keep(m *memberStamp) bool {
 	}
 	for zone, seq := range old.ZoneSeq {
 		if _, told := m.Instr[zone]; seq > m.Seq {
-			m.Instr[zone], m.ZoneSeq[zone] = old.Instr[zone], seq
+			m.Instr[zone], m.ZoneSeq[zone], m.ZoneHeard[zone] = old.Instr[zone], seq, old.ZoneHeard[zone]
 		} else if !told {
 			delete(m.Instr, zone)
+			delete(m.ZoneHeard, zone)
 		}
 	}
 	t.kept[key] = m
@@ -248,8 +266,39 @@ func (t *stampTable) heard(identity string) *memberStamp {
 		return nil
 	}
 	c := *m
-	c.Instr, c.ZoneSeq = maps.Clone(m.Instr), maps.Clone(m.ZoneSeq)
+	c.Instr, c.ZoneSeq, c.ZoneHeard = maps.Clone(m.Instr), maps.Clone(m.ZoneSeq), maps.Clone(m.ZoneHeard)
 	return &c
+}
+
+// toldStamp is a member's latest first-hand stamp of one zone, as the thaw
+// reads it (plan S7): when it was heard, and whether the member's beats are
+// encrypted (memberStamp.encrypted).
+type toldStamp struct {
+	InstrStamp
+	identity  string
+	heard     time.Time
+	encrypted bool
+}
+
+// firstHand is what each member this agent has heard tells of zone (folded),
+// by its identity folded, with when each was heard.
+func (t *stampTable) firstHand(zone string) map[string]toldStamp {
+	out := map[string]toldStamp{}
+	if t == nil {
+		return out
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, m := range t.kept {
+		if st, ok := m.Instr[zone]; ok {
+			heard := m.ZoneHeard[zone]
+			if heard.IsZero() {
+				heard = m.Heard
+			}
+			out[canonicalName(m.Identity)] = toldStamp{InstrStamp: st, identity: m.Identity, heard: heard, encrypted: m.encrypted()}
+		}
+	}
+	return out
 }
 
 // told is what each member that this agent has heard tells of zone (folded),
@@ -749,6 +798,7 @@ func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, cry
 		return err
 	}
 	t := newStampTable(tm.LocalID, conf.InternalMp.Instructions, epoch, crypto, mp.Local.Nameservers)
+	t.onTold = conf.askThaw
 	if agent {
 		t.rollover, t.waitsOn = tm.rolloverAt, waitsOnAt
 		t.hold = conf.holdConfirmed

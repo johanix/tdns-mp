@@ -328,13 +328,13 @@ func instructionsFor(zone ZoneName) *Instructions {
 }
 
 // activeOr is instructionsFor for a caller that holds the served apex of
-// the zone already: the store's active reading; on the combiner, what its
-// agent handed it unless apex is newer (plan S10); or the reading of apex.
+// the zone already: the store's active reading; on the combiner and the
+// signer, what its agent handed it (plan S10, S11); or the reading of apex.
 func activeOr(zone string, apex *tdns.OwnerData) *Instructions {
 	if in := instrStore.Load().activeReading(dns.Fqdn(zone)); in != nil {
 		return in
 	}
-	if in := actingHeld.Load().reading(dns.Fqdn(zone), apex); in != nil {
+	if in := actingHeld.Load().reading(dns.Fqdn(zone)); in != nil {
 		return in
 	}
 	return readingOf(apex)
@@ -531,7 +531,7 @@ func rolesForZone(zone ZoneName) Roles {
 	var r Roles
 	if from, to, step := instrStore.Load().transition(name); to != nil {
 		r = rolesFor(from, to, step)
-	} else if handed, ok := actingHeld.Load().roles(name, zoneApex(zone)); ok {
+	} else if handed, ok := actingHeld.Load().roles(name); ok {
 		return handed
 	} else {
 		in := instructionsFor(zone)

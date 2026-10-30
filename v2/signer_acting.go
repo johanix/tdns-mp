@@ -10,12 +10,11 @@
  * KeySigners, and for a zone its key machine runs, the expected
  * confirmations by KeyConfirmers and the foreign rows' ds by DSSigners.
  * Then its inventory says what it holds. Every reader at the signer reads
- * the hand-over through the accessor S10 made (actingHeld), unless the
- * signer's copy is newer (actsBy, until S7). A signer handed nothing acts
- * by its own copy (rule 5): provisional for a copy with no reading (no
- * serial=, #308), which starts no multi-provider work; for one that reads,
- * it waits for its agent, and signs meanwhile by the signing set it last
- * signed by.
+ * the hand-over through the accessor S10 made (actingHeld), whatever its
+ * copy says (from S7). A signer handed nothing acts by its own copy (rule
+ * 5): provisional for a copy with no reading (no serial=, #308), which
+ * starts no multi-provider work; for one that reads, it waits for its
+ * agent, and signs meanwhile by the signing set it last signed by.
  */
 package tdnsmp
 
@@ -152,15 +151,13 @@ func (conf *Config) signerConfirmers(zone string) []string {
 // is served; and, for a zone its key machine runs, the distributions in
 // flight expecting KeyConfirmers when they changed from confirmers, and the
 // foreign rows' ds by DSSigners. Not before the zone's first load, which
-// reads what is held; nor while its copy is newer than the hand-over
-// (actsBy), when the copy is what it acts by.
+// reads what is held.
 func (mpzd *MPZoneData) actBySignerHandover(conf *Config, confirmers []string) {
 	if !mpzd.Ready {
 		return
 	}
 	mp := conf.MpConfig()
-	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	signing, ok := actingHeld.Load().signingSet(mpzd.ZoneName, apex)
+	signing, ok := actingHeld.Load().signingSet(mpzd.ZoneName)
 	if !ok {
 		return
 	}
@@ -243,9 +240,6 @@ func signerActingLine(zone string) string {
 	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
 	if held, ok := s.get(mpzd.ZoneName); ok {
 		h := held.handover
-		if _, acts := s.actsBy(mpzd.ZoneName, apex); !acts {
-			return fmt.Sprintf("by its own copy, serial %d, newer than the %d its agent handed at %s", readingOf(apex).Serial, h.Serial, held.since.Format(time.TimeOnly))
-		}
 		line := fmt.Sprintf("acting by %d, handed at %s", h.Serial, held.since.Format(time.TimeOnly))
 		if h.Step > 0 {
 			line = fmt.Sprintf("acting by %d, step %d, handed at %s", h.Serial, h.Step, held.since.Format(time.TimeOnly))
