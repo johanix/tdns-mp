@@ -5,15 +5,18 @@ package tdnsmp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -785,6 +788,107 @@ func TestTheAgentResendsUntilTheInventorySaysHeld(t *testing.T) {
 	age()
 	tr.tick()
 	signerSent(t, q, 1)
+}
+
+// A hand-over to the signer that no inventory since has said it holds goes
+// again after signerHandoverResend: the signer confirms nothing, and one its
+// full queue dropped was answered all the same (OS12M). The combiner, which
+// confirms, is handed again after handoverResend as before.
+func TestADroppedHandOverGoesToTheSignerAgainWithinHalfAMinute(t *testing.T) {
+	const zone = "dropped.signer.example."
+	inFlightFor := func(tr *handoverTracker, d time.Duration) {
+		tr.mu.Lock()
+		tr.zones[handoverKey(zone)].flightAt = time.Now().Add(-d)
+		tr.mu.Unlock()
+	}
+	tr, q := signerTracker(t)
+	tr.handOver(wantOf(zone, 6, "us"))
+	signerSent(t, q, 1) // answered, and dropped at the signer: no inventory follows
+
+	inFlightFor(tr, 29*time.Second)
+	tr.tick()
+	time.Sleep(50 * time.Millisecond)
+	if got := q.take(); len(got) != 0 {
+		t.Errorf("%d hand-overs went within 29s", len(got))
+	}
+	inFlightFor(tr, 31*time.Second)
+	tr.tick()
+	if m := handoverIn(t, signerSent(t, q, 1)); m.update.Acting.Serial != 6 {
+		t.Errorf("handed again serial %d, want 6", m.update.Acting.Serial)
+	}
+
+	// a send that fails, as to a signer that is down, goes again after the
+	// same 30s, not at the next tick; an inventory sends it at once
+	var tries atomic.Int32
+	tr.enqueue = func(ZoneName, *ZoneUpdate, string) (string, error) {
+		tries.Add(1)
+		return "", errors.New("the signer is down")
+	}
+	tr.again(zone)
+	failed := func() bool {
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		return tr.zones[handoverKey(zone)].flight == nil
+	}
+	for deadline := time.Now().Add(5 * time.Second); !failed(); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the failed send left the hand-over in flight")
+		}
+	}
+	inFlightFor(tr, 29*time.Second)
+	tr.tick()
+	time.Sleep(50 * time.Millisecond)
+	if n := tries.Load(); n != 1 {
+		t.Errorf("%d sends within 29s of a failed one, want it alone", n)
+	}
+	tr.enqueue = q.enqueue
+	tr.learned(zone, wantOf(zone, 5, "us"))
+	if m := handoverIn(t, signerSent(t, q, 1)); m.update.Acting.Serial != 6 {
+		t.Errorf("an inventory had serial %d handed, want 6", m.update.Acting.Serial)
+	}
+
+	tc, qc := newTestTracker()
+	tc.handOver(wantOf(zone, 6, "us"))
+	handoverIn(t, qc.take())
+	inFlightFor(tc, 31*time.Second)
+	tc.tick()
+	if got := qc.take(); len(got) != 0 {
+		t.Error("the combiner was handed the zone again after 31s")
+	}
+}
+
+// A burst of hand-overs, one to three a zone as a transition of 40 zones
+// sends, is all taken by the signer's queue, where ten were before (OS12M);
+// so is a burst of status updates, a zone each, by the agent's.
+func TestABurstOfHandOversIsAllTaken(t *testing.T) {
+	const burst = 121
+	signer := &MPTransportBridge{msgQs: NewMsgQs()}
+	agent := &MPTransportBridge{msgQs: NewMsgQs()}
+	for i := range burst {
+		zone := fmt.Sprintf("z%d.burst.example.", i/3)
+		msg, err := keystateAppMessage(&PeerKeystateRequest{SenderID: sigUs, Zone: zone, Signal: "acting", Acting: wantOf(zone, uint32(6+i%3), "us"), Timestamp: time.Now()}, "signer.us.example.")
+		if err != nil {
+			t.Fatal(err)
+		}
+		signer.routeKeystateMessage(&transport.IncomingMessage{TypeToken: "keystate", Zone: zone, Payload: msg.Payload})
+
+		su, err := statusUpdateAppMessage(&core.StatusUpdatePost{Zone: zone, SubType: "ksk-changed", Time: time.Now()}, "combiner.us.example.", sigUs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		agent.routeStatusUpdateMessage(&transport.IncomingMessage{TypeToken: "status-update", Zone: zone, Payload: su.Payload})
+	}
+	if got := len(signer.msgQs.KeystateSignal); got != burst {
+		t.Errorf("the signer's queue took %d of %d hand-overs", got, burst)
+	}
+	if got := len(agent.msgQs.StatusUpdate); got != burst {
+		t.Errorf("the agent's queue took %d of %d status updates", got, burst)
+	}
+	for len(signer.msgQs.KeystateSignal) > 0 {
+		if sig := <-signer.msgQs.KeystateSignal; sig.Signal != "acting" || sig.Acting == nil || !core.EqualNames(sig.Acting.Zone, sig.Zone) {
+			t.Fatalf("what reached the signer's handler: %+v", sig)
+		}
+	}
 }
 
 // A forget is told to the signer until an inventory says it holds a
