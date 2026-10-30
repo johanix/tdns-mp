@@ -1,6 +1,7 @@
 package tdnsmp
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -71,7 +72,7 @@ func TestAFifthDigestDropsTheOldestAndCountsIt(t *testing.T) {
 }
 
 // The mark the agents tell each other keeps four digests too, and telling
-// the same ones again changes nothing.
+// the same ones again, all six, changes nothing.
 func TestAToldConflictKeepsFourDigestsAndCountsTheRest(t *testing.T) {
 	s := newStore(t)
 	s.Note(storeZone, at(t, 7, "alpha"), nil)
@@ -83,7 +84,55 @@ func TestAToldConflictKeepsFourDigestsAndCountsTheRest(t *testing.T) {
 	if got := status(t, s, storeZone).OwnerError; got != want {
 		t.Errorf("six digests told: %q, want %q", got, want)
 	}
-	if s.noteToldConflict(storeZone, 7, told[2:]) {
-		t.Error("the same digests told again changed the mark")
+	if s.noteToldConflict(storeZone, 7, told) {
+		t.Errorf("the same six digests told again changed the mark: %q", status(t, s, storeZone).OwnerError)
+	}
+}
+
+// A digest this agent holds is told in every beat, beside the one a member
+// tells now. As the member steps through edits, the held one stays in the
+// mark, and the same beat again changes nothing.
+func TestTheDigestHeldStaysInTheToldMark(t *testing.T) {
+	s := newStore(t)
+	s.Note(storeZone, at(t, 7, "alpha"), nil)
+	for _, d := range []string{"d2", "d3", "d4", "d5"} {
+		s.noteToldConflict(storeZone, 7, []string{"d1", d})
+	}
+	want := "serial 7 told with 5 digests (d1, d3, d4, d5, … and 1 more)"
+	if got := status(t, s, storeZone).OwnerError; got != want {
+		t.Errorf("after four edits told: %q, want %q", got, want)
+	}
+	if s.noteToldConflict(storeZone, 7, []string{"d1", "d5"}) {
+		t.Errorf("the same beat again changed the mark: %q", status(t, s, storeZone).OwnerError)
+	}
+}
+
+// Another owner error at the serial, such as a copy that cannot be read, is
+// no conflict mark: an edit at that serial afterwards marks the digest held
+// and the new one.
+func TestAnEditAfterAnotherOwnerErrorListsTheDigestHeld(t *testing.T) {
+	s := newStore(t)
+	ins, d := sevens(t, 2)
+	s.Note(storeZone, ins[0], nil)
+	s.Note(storeZone, nil, errors.New("two HSYNCPARAM records"))
+	s.Note(storeZone, ins[1], nil)
+	want := fmt.Sprintf("serial 7 with two digests (%s, %s)", d[0], d[1])
+	if got := status(t, s, storeZone).OwnerError; got != want {
+		t.Errorf("an edit after an unreadable copy: %q, want %q", got, want)
+	}
+}
+
+// An edit back to the digest held, after the mark dropped it, is seen again
+// and counted again, as any digest dropped is.
+func TestAnEditBackToTheDroppedDigestHeldCountsIt(t *testing.T) {
+	s := newStore(t)
+	ins, d := sevens(t, 5)
+	for _, in := range ins {
+		s.Note(storeZone, in, nil)
+	}
+	s.Note(storeZone, ins[0], nil) // the copy held, which the fifth digest dropped
+	want := fmt.Sprintf("serial 7 with 6 digests (%s, %s, … and 2 more)", strings.Join(d[2:5], ", "), d[0])
+	if got := status(t, s, storeZone).OwnerError; got != want {
+		t.Errorf("an edit back to the digest held: %q, want %q", got, want)
 	}
 }

@@ -686,9 +686,9 @@ func (s *InstructionStore) noteToldConflict(zone string, serial uint32, digests 
 		if z.ErrorAt != nil && *z.ErrorAt == serial {
 			conflict, dropped = slices.Clone(z.Conflict), z.ConflictMore
 		}
-		for _, d := range digests {
-			conflict, dropped = addConflictDigest(conflict, dropped, d)
-		}
+		// Every digest told is live: telling the same ones again changes
+		// nothing, and none of them is dropped while another can be.
+		conflict, dropped = addConflictDigests(conflict, dropped, digests)
 		msg := fmt.Sprintf("serial %d told with %s", serial, conflictText(conflict, dropped))
 		if z.OwnerError == msg && slices.Equal(z.Conflict, conflict) && z.ConflictMore == dropped {
 			return errToldUnchanged

@@ -388,20 +388,45 @@ func (z *zoneSerials) ownerError(zone, msg string) {
 // disk and in the status, without end (#307).
 const maxConflictDigests = 4
 
-// addConflictDigest adds d to a conflict mark, its digests and the count of
-// those dropped, unless the mark holds it; beyond maxConflictDigests the
-// oldest is dropped and counted. A digest dropped and seen again counts
-// again.
-func addConflictDigest(conflict []string, dropped int, d string) ([]string, int) {
-	if slices.Contains(conflict, d) {
-		return conflict, dropped
+// addConflictDigests adds live, the digests seen now, to a conflict mark:
+// its digests, oldest first, and the count of those dropped. A digest the
+// mark holds is not added again. Beyond maxConflictDigests the oldest digest
+// that is not live is dropped and counted. A live digest is left out only
+// when every digest kept is live, and then the count is at least the number
+// of live digests left out. So seeing the same digests again changes
+// nothing, and a digest dropped and seen again counts again. With more than
+// maxConflictDigests live at once, the count is a lower bound.
+func addConflictDigests(conflict []string, dropped int, live []string) ([]string, int) {
+	out := slices.Clone(conflict)
+	var added []string
+	for _, d := range live {
+		if !slices.Contains(out, d) {
+			out = append(out, d)
+			added = append(added, d)
+		}
 	}
-	conflict = append(conflict, d)
-	if over := len(conflict) - maxConflictDigests; over > 0 {
-		conflict = slices.Clone(conflict[over:])
-		dropped += over
+	for len(out) > maxConflictDigests {
+		if i := slices.IndexFunc(out, func(d string) bool { return !slices.Contains(live, d) }); i >= 0 {
+			out = slices.Delete(out, i, i+1)
+			dropped++
+			continue
+		}
+		if len(added) == 0 { // a mark kept with more than the cap
+			out = slices.Delete(out, 0, 1)
+			dropped++
+			continue
+		}
+		i := slices.Index(out, added[0])
+		out = slices.Delete(out, i, i+1)
+		added = added[1:]
 	}
-	return conflict, dropped
+	leftOut := 0
+	for _, d := range live {
+		if !slices.Contains(out, d) {
+			leftOut++
+		}
+	}
+	return out, max(dropped, leftOut)
 }
 
 // conflictText is a conflict mark as the owner error says it: how many
@@ -451,12 +476,16 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 		cp := SerialDigest{Serial: in.Serial, Digest: in.Digest()}
 		z.Copy, z.CopyError = cp, ""
 		if h := z.held(in.Serial); h != nil {
-			if h.Digest != cp.Digest {
-				// an edit without a raised serial
-				if z.ErrorAt == nil || *z.ErrorAt != in.Serial {
+			// The mark at this serial, if there is one: a conflict, not
+			// another owner error.
+			marked := z.ErrorAt != nil && *z.ErrorAt == in.Serial && len(z.Conflict) > 0
+			// An edit without a raised serial, or one back to a digest the
+			// mark has dropped (the one held among them).
+			if h.Digest != cp.Digest || marked && !slices.Contains(z.Conflict, cp.Digest) {
+				if !marked {
 					z.Conflict, z.ConflictMore = []string{h.Digest}, 0
 				}
-				z.Conflict, z.ConflictMore = addConflictDigest(z.Conflict, z.ConflictMore, cp.Digest)
+				z.Conflict, z.ConflictMore = addConflictDigests(z.Conflict, z.ConflictMore, []string{cp.Digest})
 				at := in.Serial
 				z.ErrorAt = &at
 				z.ownerError(zone, fmt.Sprintf("serial %d with %s", in.Serial, conflictText(z.Conflict, z.ConflictMore)))
