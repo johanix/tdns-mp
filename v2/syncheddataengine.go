@@ -571,6 +571,21 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					Msg: note + fmt.Sprintf("Re-synced %d RRs for zone %s", totalRRs, sdcmd.Zone),
 				}
 
+			case "withdraw":
+				// the leader's withdrawal of another provider's records
+				// (agent debug withdraw, plan S16)
+				var r SynchedDataCmdResponse
+				if sdcmd.Withdraw == nil {
+					r.Error, r.Msg = true, "no withdrawal named"
+				} else if distID, err := conf.sendWithdrawal(zdr, sdcmd.Zone, AgentId(sdcmd.Withdraw.Provider), sdcmd.Withdraw.RRtype); err != nil {
+					r.Error, r.Msg = true, err.Error()
+				} else {
+					r.Msg = fmt.Sprintf("withdrawing %s's %s records in zone %s (distribution %s)", sdcmd.Withdraw.Provider, sdcmd.Withdraw.RRtype, sdcmd.Zone, distID)
+				}
+				if sdcmd.Response != nil {
+					sdcmd.Response <- &r
+				}
+
 			case "instr-activated":
 				// the zone's active serial changed, became known or went:
 				// what it kept of others goes on, and what waits for the
@@ -1121,6 +1136,12 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 	// (rule 6, plan S8): what it applied or removed is a fact and is taken,
 	// what it rejected or ignored leaves the record waiting for it, and
 	// the distribution goes to it again once the two are in step.
+	// A success of the leader's withdrawal removes every record of the
+	// provider's of its type at the recipient, named or not: an empty
+	// replace leaves none (plan S16).
+	_, withdrawal := zdr.withdrawalSent(detail.DistributionID)
+	withdrawn := withdrawal && !detail.NotYet && (strings.EqualFold(detail.Status, "SUCCESS") || detail.Status == "ok") // not-a-name: a confirmation status
+
 	if detail.NotYet {
 		rejectedMap, ignoredSet = nil, nil
 	}
@@ -1185,7 +1206,7 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 					}
 
 				case RRStatePendingRemoval:
-					if removedSet[rrStr] {
+					if removedSet[rrStr] || withdrawn {
 						setConfirmation(tr, "removed", "")
 						tr.UpdatedAt = now
 						matched++
@@ -1579,9 +1600,19 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 	}
 
 	// A CSYNC or a KEY that comes before this agent knows the zone's
-	// leader is kept whole until it does (plan S15).
+	// leader is kept whole until it does (plan S15), and so is a withdrawal
+	// (plan S16).
 	if conf.keepForLeader(synchedDataUpdate, msgQs) {
 		return
+	}
+
+	// A withdrawal is taken from the zone's leader only, of a provider the
+	// active instructions do not list for its type (plan S16).
+	if synchedDataUpdate.Withdraw != nil {
+		if why := conf.acceptWithdrawal(synchedDataUpdate); why != "" {
+			refuseWithdrawal(synchedDataUpdate, why, msgQs)
+			return
+		}
 	}
 
 	// A CSYNC or a KEY is taken from the zone's delegation sync
@@ -1790,7 +1821,7 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 						}
 						zdr.PendingRemoteConfirms[distID] = &PendingRemoteConfirmation{
 							OriginatingDistID: synchedDataUpdate.OriginatingDistID,
-							OriginatingSender: string(synchedDataUpdate.AgentId),
+							OriginatingSender: string(synchedDataUpdate.answerTo()),
 							Mechanism:         synchedDataUpdate.Mechanism,
 							Zone:              synchedDataUpdate.Zone,
 							CreatedAt:         time.Now(),
@@ -1949,7 +1980,7 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 					"originDistID", synchedDataUpdate.OriginatingDistID)
 				msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 					OriginatingDistID: synchedDataUpdate.OriginatingDistID,
-					OriginatingSender: string(agentId),
+					OriginatingSender: string(synchedDataUpdate.answerTo()),
 					Mechanism:         synchedDataUpdate.Mechanism,
 					Zone:              zone,
 					Status:            status,
