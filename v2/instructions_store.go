@@ -1072,6 +1072,12 @@ func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack b
 		if after := mpzd.MP.MPdata; before != nil && after != nil && !slices.Equal(before.Sets.DSSigners, after.Sets.DSSigners) {
 			conf.requestDelegationSync(nil, mpzd.ZoneName, "the step's DS set changed")
 		}
+		// a recipient the zone's CSYNC waits for may have no role since: the
+		// CSYNC's time-out for members with no role is looked at again
+		// (design 4), as no confirmation may come to look
+		if conf.csyncAwaited(mpzd.ZoneName) {
+			conf.askCsyncProgress(nil, ZoneName(mpzd.ZoneName))
+		}
 	}
 	givenBack = conf.followParentSyncParam(mpzd)
 	conf.handOverToParts(mpzd.ZoneName) // the agent's combiner and signer act by the sets too (S10, S11)

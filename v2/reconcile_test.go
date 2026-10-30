@@ -580,6 +580,79 @@ func TestALeavingMemberThatDoesNotConfirmAStepIsExcusedFromThenOn(t *testing.T) 
 	}
 }
 
+// A change of the sets asks the data engine to look at this agent's CSYNC
+// again while it waits for a recipient: a voting recipient may have no role
+// since, and no confirmation may come to look at its time-out (CodeRabbit
+// on #327). With no CSYNC waiting, nothing is asked.
+func TestAChangeOfTheSetsLooksAgainAtTheCSYNCThatWaits(t *testing.T) {
+	r := newReconcileRig(t, "csyncrole.reconcile.example.", roleA)
+	q := make(chan *SynchedDataCmd, 4)
+	r.conf.InternalMp.MsgQs = &MsgQs{SynchedDataCmd: q}
+	mpzd, _ := Zones.Get(r.zone)
+	looks := func() int {
+		n := 0
+		for {
+			select {
+			case cmd := <-q:
+				if cmd.Cmd == "csync-progress" && cmd.Zone == ZoneName(r.zone) {
+					n++
+				}
+			default:
+				return n
+			}
+		}
+	}
+	r.conf.onSetsChanged(mpzd, true)
+	if n := looks(); n != 0 {
+		t.Fatalf("no CSYNC waits, and %d looks were asked for", n)
+	}
+	c := &r.conf.InternalMp.delegationSyncChains
+	c.mu.Lock()
+	if c.csyncs == nil {
+		c.csyncs = map[string]*delegationCsync{}
+	}
+	c.csyncs[r.zone] = &delegationCsync{record: "csync", made: time.Now(), awaited: []string{roleB}}
+	c.mu.Unlock()
+	r.conf.onSetsChanged(mpzd, true)
+	if n := looks(); n != 1 {
+		t.Errorf("the sets changed while the CSYNC waits for b: %d looks asked for, want 1", n)
+	}
+}
+
+// A member that votes under N and is the auditor under V is not leaving: the
+// auditor is not waited for, and its stamps never tell a step held, so a
+// step goes on without it and it is not excused (CodeRabbit on #327).
+func TestAVoterThatBecomesTheAuditorIsNotLeaving(t *testing.T) {
+	logs := captureLog(t)
+	r := newReconcileRig(t, "toauditor.reconcile.example.", roleA)
+	r.n = freezeAt(t, 41, "n", "a,b,n", "")
+	r.v = freezeAt(t, 42, "v", "a,b", "n")
+	if err := r.store.update(r.zone, func(z *zoneSerials) error {
+		z.Active.Reading, z.Active.SerialDigest = r.n, sd(r.n)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.holdUnjudged(r.v, time.Now())
+	if err := r.conf.activate(r.zone, Thaw{From: sd(r.n), To: sd(r.v)}, roleA); err != nil {
+		t.Fatal(err)
+	}
+	r.partsTake()
+	r.holdsToo(roleB)
+	st := r.own()
+	st.StepHeld = false
+	r.hear(roleN, st, true) // heard, as the auditor is, its step never held
+	now := time.Now()
+	r.turn(now)
+	if st, _ := r.step(); st.Number != 1 {
+		t.Errorf("the step waited for the auditor: %+v, status %q", st, r.conf.thawLine(r.zone))
+	}
+	r.turn(now.Add(2 * time.Hour))
+	if strings.Contains(logs.String(), `msg="a leaving member that has not confirmed a step is excused"`) {
+		t.Error("the auditor was excused as a leaving member")
+	}
+}
+
 // TestAMemberWithNoRoleIsWaitedForWithATimeOut, with
 // TestANewcomerWhoseAgentIsNotRunningHoldsNothingUp: n has a record and no
 // role. Not heard, it holds nothing up; heard, it is waited for up to
