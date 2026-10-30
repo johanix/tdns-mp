@@ -67,6 +67,9 @@ func ValidateTransitions(mp *MultiProviderConf) error {
 	if t := mp.Transitions.NoRoleTimeout; t < 0 {
 		return fmt.Errorf("multi-provider.transitions.no-role-timeout: %d is negative", t)
 	}
+	if t := mp.Transitions.RollRetry; t < 0 {
+		return fmt.Errorf("multi-provider.transitions.roll-retry: %d is negative", t)
+	}
 	if beat := hsyncConfigFromMp(mp).BeatInterval; leavingTimeoutFor(mp) <= beat {
 		return fmt.Errorf("multi-provider.transitions.leaving-timeout: %s is not above the beat interval (%s)", leavingTimeoutFor(mp), beat)
 	}
@@ -97,6 +100,17 @@ func noRoleTimeoutFor(mp *MultiProviderConf) time.Duration {
 		return time.Duration(mp.Transitions.NoRoleTimeout) * time.Second
 	}
 	return noRoleTimeoutDefault
+}
+
+// rollRetryDefault is multi-provider.transitions.roll-retry's default.
+const rollRetryDefault = 15 * time.Minute
+
+// rollRetryFor is multi-provider.transitions.roll-retry, or its default.
+func rollRetryFor(mp *MultiProviderConf) time.Duration {
+	if mp != nil && mp.Transitions.RollRetry > 0 {
+		return time.Duration(mp.Transitions.RollRetry) * time.Second
+	}
+	return rollRetryDefault
 }
 
 // ValidatePartAgents refuses an empty entry in multi-provider.agents, which

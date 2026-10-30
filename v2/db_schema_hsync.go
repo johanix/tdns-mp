@@ -242,6 +242,8 @@ var HsyncTables = map[string]string{
 		rrtype      INTEGER NOT NULL,
 		origin_time INTEGER NOT NULL, -- unix nanoseconds; the wire Time is RFC3339Nano
 		dist_id     TEXT NOT NULL,
+		under       INTEGER NOT NULL DEFAULT 0, -- the active serial stamped at the send (S16)
+		has_under   INTEGER NOT NULL DEFAULT 0,
 		UNIQUE(zone, agent_id, rrtype)
 	)`,
 
@@ -343,6 +345,21 @@ var HsyncTables = map[string]string{
 		ns_names  TEXT DEFAULT '',
 		since     TEXT DEFAULT '',
 		UNIQUE (zonename, label, identity)
+	)`,
+	// MPSig0Rolls are the rolls of a zone's SIG(0) key this agent runs as
+	// the zone's leader, one row per zone: the phase, the old key and the
+	// new one, and when a failed phase is tried again (plan S17a). A roll
+	// that is done is deleted.
+	"MPSig0Rolls": `CREATE TABLE IF NOT EXISTS 'MPSig0Rolls' (
+		zonename  TEXT NOT NULL,
+		phase     TEXT NOT NULL,
+		oldkeyid  INTEGER NOT NULL,
+		newkeyid  INTEGER NOT NULL,
+		started   INTEGER DEFAULT 0,
+		nexttry   INTEGER DEFAULT 0,
+		failures  INTEGER DEFAULT 0,
+		lasterr   TEXT DEFAULT '',
+		UNIQUE (zonename)
 	)`,
 	// MPStampEpoch is the epoch of this agent's stamps (plan S5a), one row,
 	// raised at every start: its peers count its tellings only from its
@@ -693,6 +710,14 @@ func (hdb *HsyncDB) migrateHsyncSchema() error {
 				log.Printf("schema migration failed: %s.%s → %s: %v", m.table, m.oldCol, m.newCol, err)
 			} else {
 				log.Printf("schema migration applied: %s.%s → %s", m.table, m.oldCol, m.newCol)
+			}
+		}
+	}
+	// a replace's origin keeps the serial stamped at its send (S16)
+	for _, col := range []string{"under", "has_under"} {
+		if !dbColumnExists(hdb.DB, "ZoneDataReplaceOrigin", col) {
+			if _, err := hdb.DB.Exec(fmt.Sprintf("ALTER TABLE ZoneDataReplaceOrigin ADD COLUMN %s INTEGER NOT NULL DEFAULT 0", col)); err != nil {
+				log.Printf("schema migration failed: ZoneDataReplaceOrigin.%s: %v", col, err)
 			}
 		}
 	}

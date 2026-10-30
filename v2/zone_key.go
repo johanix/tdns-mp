@@ -49,14 +49,18 @@ type zoneKey struct {
 	published []*dns.KEY
 	active    []sig0Row
 	held      *sig0Row // the zone's key, when this agent holds it
+	// rolling: held is the new key of this leader's roll (plan S17a), kept
+	// published, not active, while the old one signs
+	rolling bool
 }
 
 // several: the apex carries more than one KEY.
 func (z *zoneKey) several() bool { return len(z.published) > 1 }
 
-// others are the active keys that are not the zone's key.
+// others are the active keys that are not the zone's key. None while the
+// leader rolls the key: the old key signs until the roll's step 5.
 func (z *zoneKey) others() []sig0Row {
-	if z.held == nil {
+	if z.held == nil || z.rolling {
 		return nil
 	}
 	var out []sig0Row
@@ -93,8 +97,13 @@ func publishedKeys(zone ZoneName) []*dns.KEY {
 // activeSig0Rows reads the zone's active SIG(0) keys from the keystore, every
 // row, with no cache.
 func activeSig0Rows(kdb *tdns.KeyDB, zone ZoneName) ([]sig0Row, error) {
+	return sig0Rows(kdb, zone, tdns.Sig0StateActive)
+}
+
+// sig0Rows reads the zone's SIG(0) keys in state from the keystore.
+func sig0Rows(kdb *tdns.KeyDB, zone ZoneName, state string) ([]sig0Row, error) {
 	rows, err := kdb.Query(`SELECT keyid, algorithm, privatekey, keyrr, COALESCE(parent_state, 0), COALESCE(creator, '') FROM Sig0KeyStore WHERE zonename=? AND state=?`,
-		dns.Fqdn(string(zone)), tdns.Sig0StateActive)
+		dns.Fqdn(string(zone)), state)
 	if err != nil {
 		return nil, err
 	}
@@ -137,8 +146,15 @@ func readZoneKey(kdb *tdns.KeyDB, zone ZoneName) (*zoneKey, error) {
 		return nil, err
 	}
 	z.active = active
+	// Between the roll's steps 3 and 5 the zone's key is the leader's new
+	// key, not active yet (plan S17a): from when its KEY is sent, whatever
+	// the leader's own copy still serves, and while the copy serves it
+	// before the phase is written
+	r, sent := rollingKey(kdb, zone)
 	switch {
 	case z.several():
+	case r != nil && (sent || len(z.published) == 1 && sameKey(r.key, z.published[0])):
+		z.held, z.rolling = r, true
 	case len(z.published) == 1:
 		for i := range active {
 			if sameKey(active[i].key, z.published[0]) {

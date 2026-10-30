@@ -170,6 +170,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 		// every provider's combiner publishes it there (#206); taken from
 		// the leader only (refuseCsyncNotFromLeader)
 		zu.Publish = ampp.Publish
+		zu.Withdraw = ampp.Withdraw
 
 		var cresp = make(chan *AgentMsgResponse, 1)
 		synchedDataUpdateQ <- &SynchedDataUpdate{
@@ -183,6 +184,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			OriginatingTime:   ampp.Time,
 			DeliveredBy:       ampp.DeliveredBy,
 			CatchUp:           ampp.CatchUp,
+			Withdraw:          ampp.Withdraw,
 			Response:          cresp,
 		}
 		select {
