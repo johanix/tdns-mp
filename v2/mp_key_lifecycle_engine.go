@@ -71,31 +71,6 @@ func (w *signerWire) IsSigner(zone string) bool {
 	return signs
 }
 
-// leavers are the providers leaving the zone's signing set (#147), this
-// one or others, by identity; none while nobody leaves. While one leaves,
-// the zone's key machine starts nothing, an emergency rollover included,
-// and a rollover under way waits where it is: the leaver takes no
-// distribution, so another signer's new key would be missing from the
-// DNSKEY RRset its nameservers serve, and the leaver's own keys stay as
-// they are. The rollovers resume when the owner removes the leaver's
-// HSYNC3 record.
-func (w *signerWire) leavers(zone string) []string {
-	mpzd := w.mpzd(zone)
-	if mpzd == nil || mpzd.MP == nil || mpzd.MP.MPdata == nil {
-		return nil
-	}
-	return mpzd.MP.MPdata.Leavers
-}
-
-// pauseLine is the status and log line of a zone whose rollovers pause for
-// leavers.
-func pauseLine(leavers []string) string {
-	if len(leavers) == 1 {
-		return fmt.Sprintf("key rollovers paused: %s is leaving the signing set", leavers[0])
-	}
-	return fmt.Sprintf("key rollovers paused: %s are leaving the signing set", strings.Join(leavers, " and "))
-}
-
 // sets are this provider's label in the zone, the zone's sets
 // (signerSets), and whether this provider signs it.
 func (w *signerWire) sets(zone string) (self string, r Roles, signs bool) {
@@ -113,39 +88,26 @@ func (w *signerWire) sets(zone string) (self string, r Roles, signs bool) {
 
 // signerSets are the sets the signer acts by for the zone, and this
 // provider's label in them (plan S11): the sets its agent handed it and the
-// label its identity has there (S3). Waiting for its agent's
-// hand-over (signerWaits), the signing set it last signed by for every set,
-// and the label its identity has there: its copy changes none of its roles
-// (rule 5), not even when the copy drops this provider. Otherwise its
-// signing set (signers= and those leaving it, #147) for every set, as
-// before the hand-over, and the label its identity has in the zone's HSYNC3
-// records. The label is "" when nothing gives one.
+// label its identity has there (S3). Waiting for its agent's hand-over
+// (signerWaits), the sets it last acted by and the label its identity has
+// there: its copy changes none of its roles (rule 5), not even when the copy
+// drops this provider. Otherwise the zone's sets (roles), as before the
+// hand-over, and the label its identity has in the zone's HSYNC3 records.
+// The label is "" when nothing gives one.
 func signerSets(mpzd *MPZoneData, mp *MultiProviderConf) (self string, r Roles) {
 	ours := ourHsyncIdentities(mp)
 	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
 	if handed, ok := actingHeld.Load().roles(mpzd.ZoneName); ok {
 		return labelOfIdentity(handed, ours), handed
 	}
-	if signerWaits(mpzd.ZoneName, apex) {
-		if set, ok := mpzd.lastSigningSet(mpzd.KeyDB); ok {
-			labels := make([]string, 0, len(set))
-			for label := range set {
-				labels = append(labels, label)
-			}
-			sort.Strings(labels)
-			var signing []Provider
-			for _, label := range labels {
-				signing = append(signing, Provider{Label: label, Identity: set[label]})
-			}
-			r = Roles{KeySigners: signing, DSSigners: signing, KeyConfirmers: signing, Signing: signing}
-			return labelOfIdentity(r, ours), r
-		}
+	if signerWaits(mpzd.ZoneName, apex) && mpzd.MP != nil && mpzd.MP.MPdata.computed() {
+		r = mpzd.MP.MPdata.Sets
+		return labelOfIdentity(r, ours), r
 	}
 	if _, label, err := mpzd.matchHsyncIdentity(ours); err == nil {
 		self = trimDot(label)
 	}
-	signing := mpzd.signingProviders()
-	return self, Roles{KeySigners: signing, DSSigners: signing, KeyConfirmers: signing, Signing: signing}
+	return self, mpzd.roles()
 }
 
 // labelOfIdentity is the label the sets give a provider with one of the
@@ -424,33 +386,6 @@ type KeyLifecycleEngine struct {
 	waiting map[string]string // configured zones not ready to take, with why (logged once per reason)
 	refused map[string]bool   // configured zones that are not multi-provider: never taken
 	idle    map[string]bool   // owned zones driverState found this provider does not sign, said once (plan S11; isIdle judges now)
-
-	// kept is what arrived for a zone while its rollovers pause (#147,
-	// signerWire.leavers): the agents' confirmations, in order, and the
-	// other providers' latest word. Applied at the first tick after the
-	// pause, before the tick. Kept in memory only: after a restart the
-	// distributions still in flight are sent again once the pause is over,
-	// and the agents answer again.
-	keptMu sync.Mutex
-	kept   map[string]*keptWhilePaused
-}
-
-// keptWhilePaused is what keptMu guards for one zone.
-type keptWhilePaused struct {
-	signals []keptSignal
-	word    *keptWord // the latest; a word replaces the one before
-}
-
-type keptSignal struct {
-	keytag          uint16
-	signal, message string
-	at              time.Time
-}
-
-type keptWord struct {
-	keys      []core.ForeignKeyState
-	spoken    []string
-	hasSpoken bool // ForeignWord's; Foreign's names no spoken providers
 }
 
 func NewKeyLifecycleEngine(conf *Config, owner *MPKeyLifecycleOwner) *KeyLifecycleEngine {
@@ -527,11 +462,7 @@ func (e *KeyLifecycleEngine) driverState(zone string) (l *ZoneKeyLifecycle, owne
 // Signal routes a KEYSTATE signal from an agent to the zone's driver:
 // "propagated" is every expected signer's applied confirmation (the agent
 // aggregates them), "rejected" one rejection. Reports whether the zone is
-// owned, so the caller can keep today's path for one that is not. While
-// the zone's rollovers pause for a provider leaving the signing set (#147)
-// the signal is kept, not applied: a confirmation would carry a rollover
-// under way on (a key sent again, a DS withdrawn, a key moved to its next
-// state). tickOwned applies it once the pause is over.
+// owned, so the caller can keep today's path for one that is not.
 func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message string, at time.Time) bool {
 	l, owned := e.driverState(zone)
 	if !owned {
@@ -547,14 +478,6 @@ func (e *KeyLifecycleEngine) Signal(zone string, keytag uint16, signal, message 
 			return true
 		}
 		lgSigner.Warn("key lifecycle: signal dropped, the zone's driver is not running", "zone", zone, "keytag", keytag, "signal", signal)
-		return true
-	}
-	if leavers := e.wire.leavers(zone); len(leavers) > 0 {
-		e.keep(zone, func(k *keptWhilePaused) {
-			k.signals = append(k.signals, keptSignal{keytag: keytag, signal: signal, message: message, at: at})
-		})
-		lgSigner.Info("key lifecycle: a confirmation is kept, not applied, while the rollovers pause; applied when the leave is over (#147)",
-			"zone", zone, "keytag", keytag, "signal", signal, "leaving", strings.Join(leavers, " "))
 		return true
 	}
 	e.applySignal(l, zone, keytag, signal, message, at)
@@ -599,51 +522,6 @@ func (e *KeyLifecycleEngine) applySignal(l *ZoneKeyLifecycle, zone string, keyta
 	}
 }
 
-// keep records something for a zone whose rollovers pause.
-func (e *KeyLifecycleEngine) keep(zone string, f func(*keptWhilePaused)) {
-	zone = dns.Fqdn(zone)
-	e.keptMu.Lock()
-	defer e.keptMu.Unlock()
-	if e.kept == nil {
-		e.kept = map[string]*keptWhilePaused{}
-	}
-	k := e.kept[zone]
-	if k == nil {
-		k = &keptWhilePaused{}
-		e.kept[zone] = k
-	}
-	f(k)
-}
-
-// applyKept applies what was kept for a zone while its rollovers paused:
-// the other providers' latest word, then the confirmations in the order
-// they came. Run by tickOwned before the zone's first tick after the pause.
-func (e *KeyLifecycleEngine) applyKept(l *ZoneKeyLifecycle, zone string) {
-	zone = dns.Fqdn(zone)
-	e.keptMu.Lock()
-	k := e.kept[zone]
-	delete(e.kept, zone)
-	e.keptMu.Unlock()
-	if k == nil {
-		return
-	}
-	lgSigner.Info("key lifecycle: applying what was kept while the rollovers paused (#147)", "zone", zone, "confirmations", len(k.signals), "word", k.word != nil)
-	if w := k.word; w != nil {
-		var err error
-		if w.hasSpoken {
-			err = l.SetForeignWord(w.keys, w.spoken)
-		} else {
-			err = l.SetForeignStates(w.keys)
-		}
-		if err != nil {
-			lgSigner.Error("key lifecycle: recording the other providers' key states failed", "zone", zone, "err", err)
-		}
-	}
-	for _, s := range k.signals {
-		e.applySignal(l, zone, s.keytag, s.signal, s.message, s.at)
-	}
-}
-
 // Foreign hands the zone's driver what the other providers said about
 // their keys (the agent's KEYSTATE "foreign", tdns-mp #58). Reports
 // whether the zone is owned: for one that is not, nobody writes ds on the
@@ -655,9 +533,6 @@ func (e *KeyLifecycleEngine) Foreign(zone string, keys []core.ForeignKeyState) b
 	}
 	if l == nil {
 		lgSigner.Warn("key lifecycle: the other providers' key states dropped, the zone's driver is not running; the agent sends them again with the next inventory", "zone", zone)
-		return true
-	}
-	if e.keepWordWhilePaused(zone, keys, nil, false) {
 		return true
 	}
 	if err := l.SetForeignStates(keys); err != nil {
@@ -673,57 +548,24 @@ func (e *KeyLifecycleEngine) Run(ctx context.Context, interval time.Duration) {
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
-	paused := map[string]keyPause{}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 			e.TakeConfiguredZones() // a configured zone loaded or bound since
-			e.tickOwned(paused)
+			e.tickOwned()
 		}
 	}
 }
 
-// keyPause is what was last said of a zone whose rollovers pause.
-type keyPause struct {
-	line string
-	at   time.Time
-}
-
-// tickOwned ticks every owned zone, except one a provider is leaving (#147,
-// signerWire.leavers): it stays owned, so tdns's own key machine does not
-// take it either, and is ticked again once nobody leaves. paused holds what
-// was last said of each paused zone: the line is logged when it changes,
-// and again every hour.
-func (e *KeyLifecycleEngine) tickOwned(paused map[string]keyPause) {
+// tickOwned ticks every owned zone.
+func (e *KeyLifecycleEngine) tickOwned() {
 	for _, zone := range e.owner.Zones() {
 		l := e.driver(zone)
 		if l == nil {
 			continue
 		}
-		if leavers := e.wire.leavers(zone); len(leavers) > 0 {
-			line := pauseLine(leavers)
-			if p, said := paused[zone]; !said || p.line != line || time.Since(p.at) >= time.Hour {
-				paused[zone] = keyPause{line: line, at: time.Now()}
-				lgSigner.Info("key lifecycle: "+line+"; resumed when the owner removes its HSYNC3 record (#147)", "zone", zone, "leaving", strings.Join(leavers, " "))
-			}
-			continue
-		}
-		if _, was := paused[zone]; was {
-			// a hand-over during the pause may have changed the providers
-			// expected (handedOver): the distributions in flight follow
-			// now, and the pause holds until they do
-			if others := e.wire.OtherSigners(zone); !l.Expects(others) {
-				if err := l.SignersChanged(); err != nil {
-					lgSigner.Error("key lifecycle: the distributions in flight could not follow the providers handed; the rollovers stay paused", "zone", zone, "err", err)
-					continue
-				}
-			}
-			delete(paused, zone)
-			lgSigner.Info("key lifecycle: key rollovers resumed: nobody is leaving the signing set", "zone", zone)
-		}
-		e.applyKept(l, zone)
 		l.SetHold(e.conf.InternalMp.SignerHolds.held(zone))
 		if err := l.Tick(); err != nil {
 			lgSigner.Error("key lifecycle: tick failed", "zone", zone, "err", err)
@@ -824,9 +666,6 @@ type KeyLifecycleStatus struct {
 	Foreign      []KeyLifecycleKey    `json:"foreign,omitempty"`
 	InFlight     []DistributionStatus `json:"in_flight,omitempty"`
 	Rollovers    []string             `json:"rollovers,omitempty"`
-	// Paused says why the machine starts nothing now: a provider leaving
-	// the signing set (#147). Empty while it runs.
-	Paused string `json:"paused,omitempty"`
 	// Acting is what the signer acts by for the zone: the serial its agent
 	// handed, provisional, or waiting for its agent (plan S11).
 	Acting string `json:"acting,omitempty"`
@@ -863,9 +702,6 @@ func (e *KeyLifecycleEngine) Status(zone string) (*KeyLifecycleStatus, error) {
 	st := &KeyLifecycleStatus{Zone: l.Zone, OtherSigners: l.Wire.OtherSigners(l.Zone), InFlight: l.InFlight(), Rollovers: l.RolloverRequests(), Acting: signerActingLine(l.Zone)}
 	if zd != nil {
 		st.PolicyName = zd.DnssecPolicyName
-	}
-	if leavers := e.wire.leavers(l.Zone); len(leavers) > 0 {
-		st.Paused = pauseLine(leavers)
 	}
 	// the algorithm rollovers from the same read of the rows as the keys:
 	// a read that fails fails the status, and no rollover under way shows

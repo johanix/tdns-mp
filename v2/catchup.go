@@ -789,10 +789,30 @@ func (t *catchUpTracker) afterRefresh(zone ZoneName, a *ZoneRefreshAnalysis) {
 	case a.StandingAfter == standingVoting && a.StandingBefore != standingVoting:
 		t.AskZone(zone, catchUpRole)
 	}
+	t.askNewVoters(zone, a.NewVoters)
+}
+
+// peersEntered asks each other provider that a thaw's activation put in
+// servers= or signers=, a list it was not in under from, for the zone's
+// state: peer-role, as for a peer given its first role, and so for a
+// provider put back (design 5.1, plan S18a). A refresh asks the same
+// through afterRefresh.
+func (t *catchUpTracker) peersEntered(zone ZoneName, from, to *Instructions) {
+	if t == nil || from == nil || to == nil {
+		return
+	}
+	a := &ZoneRefreshAnalysis{}
+	catchUpReasons(a, from, to, t.self, true)
+	t.askNewVoters(ZoneName(dns.Fqdn(string(zone))), a.NewVoters)
+}
+
+// askNewVoters asks each of the zone's new voting members but this agent
+// with peer-role, in a zone in which this agent asks.
+func (t *catchUpTracker) askNewVoters(zone ZoneName, voters []AgentId) {
 	if !asksInZone(zone, t.self) {
 		return
 	}
-	for _, peer := range a.NewVoters {
+	for _, peer := range voters {
 		if !isAmong([]string{string(t.self)}, peer) {
 			t.Ask(zone, peer, catchUpPeerRole)
 		}

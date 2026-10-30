@@ -95,7 +95,6 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 					conf.noteInstructions(mpzd)
 					givenBack := conf.onSetsChanged(mpzd, false)
 					mpzd.PostRefresh(tm, msgQs)
-					conf.afterSigningSetChange(mpzd)
 					if givenBack {
 						// after PostRefresh, which applies this refresh's
 						// HSYNC3 change and recomputes the groups: who leads
@@ -383,4 +382,7 @@ type InternalMpConf struct {
 	// reconciles: what the agent and the auditor keep of their zones'
 	// reconciliations in memory (reconcile.go).
 	reconciles reconcileBook
+	// transfers: the agent's transfer confirmations for a server role's
+	// step (server_role.go).
+	transfers transferBook
 }

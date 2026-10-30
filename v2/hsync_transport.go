@@ -1218,10 +1218,21 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			sentAt = t
 		}
 	}
+	// A withdrawal is the named provider's update, delivered by the leader
+	// that sent it (plan S16). Only a sync is one: any other message keeps
+	// its authenticated sender, and the field is dropped.
+	originator := senderID
+	if payload.Withdraw != nil {
+		if messageType == AgentMsgNotify {
+			originator = payload.Withdraw.Provider
+		} else {
+			payload.Withdraw = nil
+		}
+	}
 	msgPost := &AgentMsgPostPlus{
 		AgentMsgPost: AgentMsgPost{
 			MessageType:    messageType,
-			OriginatorID:   AgentId(senderID),
+			OriginatorID:   AgentId(originator),
 			DeliveredBy:    AgentId(deliveredBy),
 			Zone:           ZoneName(zone),
 			Records:        records,
@@ -1236,6 +1247,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			Publish:        payload.GetPublish(),
 			CatchUp:        payload.CatchUp,
 			Acting:         payload.Acting,
+			Withdraw:       payload.Withdraw,
 		},
 		Mechanism: msg.Mechanism,
 	}
@@ -2253,6 +2265,10 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 		// the leader's KEY goes to the other agents with its publish
 		// instruction too, for their combiners (#206)
 		syncReq.Publish = update.Publish
+		// to the agents from the leader, which sends it; to the combiner
+		// in the provider's name, as the flag it takes from its own agent
+		// only (S16)
+		syncReq.Withdraw = update.Withdraw
 		if !isCombiner {
 			syncReq.CatchUp = update.CatchUp // an answer's marker is for the asker, not the combiner it is passed on to
 		}
@@ -2717,8 +2733,9 @@ func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(ctx context.Context, distID st
 	}
 }
 
-// signingAgents: those of a zone's agents whose provider signs the zone, by
-// the identities of the step's signing set. nil when the zone or its
+// signingAgents: those of a zone's agents whose confirmations a key's
+// distribution expects, by the identities of the step's KeyConfirmers (plan
+// S13): a leaving signer counts until it leaves them. nil when the zone or its
 // HSYNCPARAM is not here to ask; the tracker then takes every answer as it
 // comes.
 func signingAgents(zone ZoneName, agents []AgentId) map[AgentId]bool {
@@ -2729,7 +2746,7 @@ func signingAgents(zone ZoneName, agents []AgentId) map[AgentId]bool {
 	if in := mpzd.instructions(); in == nil || !in.HasParam {
 		return nil
 	}
-	signing := identities(mpzd.roles().Signing)
+	signing := identities(mpzd.roles().KeyConfirmers)
 	out := map[AgentId]bool{}
 	for _, a := range agents {
 		if isAmong(signing, a) {

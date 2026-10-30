@@ -1057,10 +1057,21 @@ func (conf *Config) noteInstructions(mpzd *MPZoneData) {
 // sets takes effect without a transfer. A refresh calls it without
 // recompute: its pre-refresh analysis has computed them from the incoming
 // copy, whose reading is the active one until S7. S12 calls it with
-// recompute at every step.
+// recompute at every step. A step that changes DSSigners changes the DS set
+// with no key and no inventory changing, so it asks the leader's
+// delegation sync (plan S13): explicit, an update only where the parent
+// differs; an agent that does not lead, and a zone whose parent the owner
+// syncs, ask for nothing.
 func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack bool) {
 	if recompute && mpzd.Options[tdns.OptMultiProvider] {
-		mpzd.populateMPdata(conf.MpConfig(), nextSigningSetOf(mpzd.instructions(), mpzd.signingSet()))
+		var before *MPdata
+		if mpzd.MP != nil {
+			before = mpzd.MP.MPdata
+		}
+		mpzd.populateMPdata(conf.MpConfig(), mpzd.roles())
+		if after := mpzd.MP.MPdata; before != nil && after != nil && !slices.Equal(before.Sets.DSSigners, after.Sets.DSSigners) {
+			conf.requestDelegationSync(nil, mpzd.ZoneName, "the step's DS set changed")
+		}
 		// a recipient the zone's CSYNC waits for may have no role since: the
 		// CSYNC's time-out for members with no role is looked at again
 		// (design 4), as no confirmation may come to look

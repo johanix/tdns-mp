@@ -177,7 +177,7 @@ func (conf *Config) tellKept(u *SynchedDataUpdate, text string, msgQs *MsgQs) {
 	if u.OriginatingDistID != "" && msgQs != nil && msgQs.OnRemoteConfirmationReady != nil {
 		msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 			OriginatingDistID: u.OriginatingDistID,
-			OriginatingSender: string(u.AgentId),
+			OriginatingSender: string(u.answerTo()),
 			Mechanism:         u.Mechanism,
 			Zone:              u.Zone,
 			Status:            "PENDING",
@@ -198,7 +198,7 @@ func refuseStale(u *SynchedDataUpdate, active, made *SerialDigest, msgQs *MsgQs)
 	if u.OriginatingDistID != "" && msgQs != nil && msgQs.OnRemoteConfirmationReady != nil {
 		msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 			OriginatingDistID: u.OriginatingDistID,
-			OriginatingSender: string(u.AgentId),
+			OriginatingSender: string(u.answerTo()),
 			Mechanism:         u.Mechanism,
 			Zone:              u.Zone,
 			Status:            "REJECTED",
@@ -277,7 +277,7 @@ func (conf *Config) instrActivated(ctx context.Context, zdr *ZoneDataRepo, zone 
 			if kept && receiptOf(active, madeUnder(e.Update.Instr)) == receiptKeep {
 				continue // made under a higher serial: it waits on
 			}
-			if kept && carriesLeaderOnly(e.Update.Operations, e.Update.Publish) {
+			if kept && (carriesLeaderOnly(e.Update.Operations, e.Update.Publish) || e.Update.Withdraw != nil) {
 				if holds, leader, until := conf.leaderHolds(zone, e.Update, now); blocked || holds {
 					if !e.Update.ForLeader {
 						if err := k.markForLeader(string(zone), e.Seq, leader, until); err != nil {
@@ -319,7 +319,7 @@ func (conf *Config) releaseKept(ctx context.Context, zdr *ZoneDataRepo, zone Zon
 		if ok, why := tm.IsPeerAuthorized(string(sender), string(zone)); !ok {
 			lgEngine.Info("a kept distribution is refused at its release: its sender may not send for the zone now", "zone", zone, "peer", u.AgentId, "distrib", u.OriginatingDistID, "why", why)
 			if u.OriginatingDistID != "" && msgQs != nil && msgQs.OnRemoteConfirmationReady != nil {
-				msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{OriginatingDistID: u.OriginatingDistID, OriginatingSender: string(u.AgentId),
+				msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{OriginatingDistID: u.OriginatingDistID, OriginatingSender: string(u.answerTo()),
 					Mechanism: u.Mechanism, Zone: zone, Status: "REJECTED", Message: "refused at its release: " + why})
 			}
 			return
@@ -490,6 +490,17 @@ func (conf *Config) resendInStep(zdr *ZoneDataRepo, zone ZoneName) {
 			due = append(due, n)
 		}
 	}
+	// a withdrawal this agent sent as the zone's leader goes again as
+	// itself, not as this agent's own records (plan S16)
+	own := due[:0:0]
+	for _, n := range due {
+		if sw, ok := zdr.withdrawalSent(n.distID); ok {
+			conf.withdrawAgain(zone, n, sw)
+			continue
+		}
+		own = append(own, n)
+	}
+	due = own
 	if len(due) == 0 {
 		return
 	}

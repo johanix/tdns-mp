@@ -79,7 +79,7 @@ func (cs *CombinerState) SetGetPeerAddress(fn func(senderID string) (address str
 type editPolicy struct {
 	ZoneSigned  bool
 	WeAreSigner bool
-	Leaving     bool  // a signer out of signers= that signs on (#147): it applies, and submits no keys
+	Leaving     bool  // a signer out of signers= that the step's sets keep signing (plan S13): it applies, and submits no keys
 	NSmgmt      uint8 // core.HsyncNSmgmtOWNER or core.HsyncNSmgmtAGENT
 	ParentSync  uint8 // core.HsyncParentSyncOwner or core.HsyncParentSyncAgent
 }
@@ -346,9 +346,10 @@ func (mpzd *MPZoneData) checkMPauthorization() error {
 // takes by HSYNC or HSYNC2 records alone has no standings; both are left as
 // they are (votesInZone). What the combiner already stores of an origin
 // that stops voting stays (decision 37). One exception: while its provider
-// is out of signers= and signs on (#147), the combiner takes its own
-// agent's operations (local, one of its configured agents), so that what
-// it serves does not go stale. Nil when the origin may contribute.
+// is out of signers= and the step's sets keep it signing (plan S13), the
+// combiner takes its own agent's operations (local, one of its configured
+// agents), so that what it serves does not go stale. Nil when the origin
+// may contribute.
 func originVoteRefusal(zone, origin string, local bool, ops []core.RROperation, records map[string][]string) *CombinerSyncResponse {
 	if votesInZone(ZoneName(zone), AgentId(origin)) {
 		return nil
@@ -370,6 +371,12 @@ func originVoteRefusal(zone, origin string, local bool, ops []core.RROperation, 
 		}
 	}
 	return resp
+}
+
+// leavingSigner: this provider signs the zone by the step's sets though its
+// signers= no longer names it (plan S13).
+func (mpzd *MPZoneData) leavingSigner() bool {
+	return mpzd.MP != nil && mpzd.MP.MPdata != nil && mpzd.MP.MPdata.Leaving
 }
 
 func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []string, localAgents map[string]bool, hdb *HsyncDB, tm *MPTransportBridge) *CombinerSyncResponse {
@@ -436,7 +443,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		}
 	}
 
-	if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Operations, req.Records); refusal != nil {
+	if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Operations, req.Records); refusal != nil && !req.Removal {
 		refusal.DistributionID, refusal.Timestamp = resp.DistributionID, resp.Timestamp
 		return refusal
 	}
@@ -1238,7 +1245,7 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 		// Non-signer combiners persist DNSKEYs without this check. Only
 		// what an origin adds is judged: its removal of its own keys is
 		// not (S10).
-		if rrtype == dns.TypeDNSKEY && !isProvider && policy.canApply(rrtype) && (op.Operation == "add" || (op.Operation == "replace" && len(op.Records) > 0)) {
+		if rrtype == dns.TypeDNSKEY && !isProvider && !req.Removal && policy.canApply(rrtype) && (op.Operation == "add" || (op.Operation == "replace" && len(op.Records) > 0)) {
 			reject, reason := mpzd.checkDNSKEYPolicy(req.SenderID)
 			if reject {
 				for _, rec := range op.Records {
@@ -1317,7 +1324,7 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 				continue
 			}
 
-			if (rrtype == dns.TypeKEY || rrtype == dns.TypeCDS) && len(parsedRRs) > 0 {
+			if (rrtype == dns.TypeKEY || rrtype == dns.TypeCDS) && len(parsedRRs) > 0 && !req.Removal {
 				senderIsLocal := localAgents[req.SenderID]
 				if existingSender, existingRRs := mpzd.findExistingContribution(zonename, rrtype, req.SenderID); existingSender != "" {
 					existingIsLocal := localAgents[existingSender]
@@ -1799,22 +1806,21 @@ var combinerReplaceOrigins = struct {
 }{m: map[string]replaceOrigin{}}
 
 // staleCombinerReplace answers whether a REPLACE is older than the one last
-// applied for the same (zone, sender, rrtype) -- an earlier time, or the same
-// time and a lower distribution id -- and records it as the newest when it
-// is not. A request without a time is never stale.
+// applied for the same (zone, sender, rrtype), by the active serial its
+// agent stamped at the send, then by the time (olderThan), and records it
+// as the newest when it is not. A request without a time is never stale.
 func staleCombinerReplace(req *CombinerSyncRequest, zonename string, rrtype uint16) (bool, replaceOrigin) {
 	if req.Timestamp.IsZero() {
 		return false, replaceOrigin{}
 	}
 	key := zonename + "|" + req.SenderID + "|" + dns.TypeToString[rrtype]
+	origin := originOf(req.Timestamp, req.DistributionID, req.Instr)
 	combinerReplaceOrigins.mu.Lock()
 	defer combinerReplaceOrigins.mu.Unlock()
-	if cur, ok := combinerReplaceOrigins.m[key]; ok {
-		if cur.Time.After(req.Timestamp) || (cur.Time.Equal(req.Timestamp) && cur.DistID > req.DistributionID) {
-			return true, cur
-		}
+	if cur, ok := combinerReplaceOrigins.m[key]; ok && origin.olderThan(cur) {
+		return true, cur
 	}
-	combinerReplaceOrigins.m[key] = replaceOrigin{Time: req.Timestamp, DistID: req.DistributionID}
+	combinerReplaceOrigins.m[key] = origin
 	return false, replaceOrigin{}
 }
 

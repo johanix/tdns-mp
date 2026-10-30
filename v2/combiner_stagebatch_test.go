@@ -333,7 +333,7 @@ func TestPreRefreshReadersSeeTheIncomingZone(t *testing.T) {
 
 	mp := &MultiProviderConf{Role: "agent", Identity: identity}
 	newMpzd := &MPZoneData{ZoneData: incoming, MP: &MPState{}, MPOptions: map[tdns.ZoneOption]bool{}}
-	newMpzd.populateMPdata(mp, newMpzd.signingSet())
+	newMpzd.populateMPdata(mp, newMpzd.roles())
 	if newMpzd.MP.MPdata == nil {
 		t.Fatal("populateMPdata found nothing in an incoming zone with HSYNC3 and HSYNCPARAM")
 	}

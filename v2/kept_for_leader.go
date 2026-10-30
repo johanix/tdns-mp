@@ -66,7 +66,8 @@ func (conf *Config) leaderWait(zone ZoneName, sender AgentId) (why string, leade
 }
 
 // keepForLeader keeps u whole on the zone's kept list when it carries a
-// CSYNC or a KEY and waits for the zone's leader here (leaderWait), or when
+// CSYNC or a KEY, or is a withdrawal (plan S16), and waits for the zone's
+// leader here (leaderWait), or when
 // an earlier such update of the zone is kept for it: a later CSYNC or KEY
 // waits behind it. A catch-up answer is kept whole too. Its sender is told
 // in a PENDING, again for every resend. Reports whether u was kept. An
@@ -76,7 +77,7 @@ func (conf *Config) leaderWait(zone ZoneName, sender AgentId) (why string, leade
 // daemon that keeps no lists, keep nothing.
 func (conf *Config) keepForLeader(u *SynchedDataUpdate, msgQs *MsgQs) bool {
 	k := conf.InternalMp.Kept
-	if u == nil || u.Update == nil || u.leaderJudged || k == nil || !carriesLeaderOnly(u.Update.Operations, u.Update.Publish) {
+	if u == nil || u.Update == nil || u.leaderJudged || k == nil || (!carriesLeaderOnly(u.Update.Operations, u.Update.Publish) && u.Withdraw == nil) {
 		return false
 	}
 	if _, kept := conf.InternalMp.Instructions.activeSerial(string(u.Zone)); !kept {

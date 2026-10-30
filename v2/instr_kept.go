@@ -49,6 +49,7 @@ type keptUpdate struct {
 	Time        time.Time                `json:"time,omitzero"`
 	Instr       *MsgStamp                `json:"instr,omitempty"`
 	CatchUp     *CatchUp                 `json:"catch_up,omitempty"`
+	Withdraw    *Withdraw                `json:"withdraw,omitempty"` // the leader's withdrawal (plan S16)
 	// ForLeader: kept until this agent knows the zone's leader, a CSYNC or
 	// a KEY (plan S15); Leader is the leader known then, at an agent that
 	// does not vote, and LeaseUntil its lease (kept_for_leader.go).
@@ -242,7 +243,7 @@ func keptUpdateOf(u *SynchedDataUpdate) keptUpdate {
 func keptRemoteOf(u *SynchedDataUpdate) keptUpdate {
 	k := keptUpdateOf(u)
 	k.Sender, k.DeliveredBy, k.Mechanism, k.Time = u.AgentId, u.DeliveredBy, u.Mechanism, u.OriginatingTime
-	k.Instr, k.CatchUp = u.OriginatingInstr, u.CatchUp
+	k.Instr, k.CatchUp, k.Withdraw = u.OriginatingInstr, u.CatchUp, u.Withdraw
 	return k
 }
 
@@ -253,10 +254,11 @@ func (e keptEntry) remoteUpdate(zone ZoneName) (*SynchedDataUpdate, error) {
 	if err != nil {
 		return nil, err
 	}
-	zu.CatchUp = e.Update.CatchUp
+	zu.CatchUp, zu.Withdraw = e.Update.CatchUp, e.Update.Withdraw
 	return &SynchedDataUpdate{Zone: zone, AgentId: e.Update.Sender, UpdateType: "remote", Update: zu,
 		OriginatingDistID: e.Distribution, OriginatingInstr: e.Update.Instr, Mechanism: e.Update.Mechanism,
-		OriginatingTime: e.Update.Time, DeliveredBy: e.Update.DeliveredBy, CatchUp: e.Update.CatchUp, Force: e.Update.Force}, nil
+		OriginatingTime: e.Update.Time, DeliveredBy: e.Update.DeliveredBy, CatchUp: e.Update.CatchUp, Force: e.Update.Force,
+		Withdraw: e.Update.Withdraw}, nil
 }
 
 // zoneUpdate is the update k keeps, for zone and agent, its records parsed

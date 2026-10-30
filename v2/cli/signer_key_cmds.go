@@ -238,9 +238,6 @@ func printSignerKeyStatus(st *tdnsmp.KeyLifecycleStatus) {
 	if st.Acting != "" {
 		fmt.Printf("%s\n", st.Acting)
 	}
-	if st.Paused != "" {
-		fmt.Printf("%s; they resume when the owner removes its HSYNC3 record\n", st.Paused)
-	}
 	rows := []string{"KeyID|Role|Alg|State|Pub|Sign|DS|Published|Active|Retired"}
 	for _, k := range st.Keys {
 		rows = append(rows, fmt.Sprintf("%d|%s|%s|%s|%s|%s|%s|%s|%s|%s", k.KeyId, k.Role, dns.AlgorithmToString[k.Algorithm], k.State,

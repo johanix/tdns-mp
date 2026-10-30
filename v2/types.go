@@ -165,6 +165,10 @@ type CombinerSyncRequest struct {
 	Serial         uint32
 	DistributionID string
 	Timestamp      time.Time
+	Instr          *MsgStamp // the delivering agent's stamp at its send: replaces are ordered by it (S16)
+	// Removal: a removal in any origin's name that the combiner's own agent
+	// delivered with the withdrawal's flag (design 3.5, plan S16)
+	Removal bool
 }
 
 type CombinerSyncResponse struct {
@@ -256,6 +260,7 @@ type ZoneUpdate struct {
 	Publish    *core.PublishInstruction // KEY/CDS publication instruction for combiner
 	CatchUp    *CatchUp                 `json:"catch_up,omitempty"` // on the answer to a request for the zone's state
 	Acting     *ActingHandover          `json:"acting,omitempty"`   // a hand-over to this agent's combiner (S10)
+	Withdraw   *Withdraw                `json:"withdraw,omitempty"` // a withdrawal of AgentId's records (S16)
 }
 
 // OwnerData matches tdns.OwnerData; alias keeps *tdns.ZoneData.Data map types aligned.
@@ -351,11 +356,10 @@ func NewMsgQs() *MsgQs {
 type MPdata struct {
 	WeAreProvider bool                     // At least one of our agent identities matches an HSYNC3 Identity
 	OurLabel      string                   // Our provider label from the matching HSYNC3 record
-	WeAreSigner   bool                     // Our label is in Signing: in HSYNCPARAM signers, or leaving it (#147)
-	OtherSigners  int                      // Count of the other providers in Signing
-	ZoneSigned    bool                     // Signing is non-empty (zone uses multi-signer)
-	Signing       signingSet               // The providers that sign the zone: signers= and those leaving it (leaving_signer.go)
-	Leaving       bool                     // We sign, though signers= no longer names us (#147)
-	Leavers       []string                 // The providers in Signing that signers= no longer names, by identity (#147)
+	WeAreSigner   bool                     // Our label is in Sets.Signing
+	OtherSigners  int                      // Count of the other providers in Sets.KeySigners
+	ZoneSigned    bool                     // Sets.Signing is non-empty (zone uses multi-signer)
+	Sets          Roles                    // The sets the data is computed from: the step's (plan S13)
+	Leaving       bool                     // We sign by the step's sets, though signers= no longer names us (plan S13)
 	Options       map[tdns.ZoneOption]bool // MP-specific options (future: migrate from zd.Options)
 }

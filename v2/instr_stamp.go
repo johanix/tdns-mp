@@ -60,6 +60,10 @@ type stampTable struct {
 	// agent came to hold the serial it agrees on (holdConfirmed, plan S6); nil on
 	// the auditor, which has no signer.
 	hold func(zone string) bool
+	// caughtUp: this agent has caught up in the zone (the catch-up
+	// tracker's CaughtUp, plan S18a); nil on the auditor, which asks for
+	// nothing.
+	caughtUp func(zone string) bool
 	// stepHeld: this agent holds the zone's step at its active serial, its
 	// combiner and its signer included (holdsStep, plan S12); nil on the
 	// auditor, which has no parts.
@@ -156,7 +160,8 @@ func (t *stampTable) entryFor(peer string) *GossipMessage {
 
 // ownStamp is what this agent tells of zone: the serials its store keeps,
 // with its provider's rollover flag, whom a rollover under way waits on,
-// its signer's hold, and whether its parts hold the step it holds.
+// its signer's hold, whether it has caught up, and whether its parts hold
+// the step it holds.
 func (t *stampTable) ownStamp(zone string) (InstrStamp, bool) {
 	st, ok := t.store.stampOf(zone)
 	if !ok {
@@ -173,6 +178,9 @@ func (t *stampTable) ownStamp(zone string) (InstrStamp, bool) {
 	}
 	if t.hold != nil {
 		st.Hold = t.hold(zone)
+	}
+	if t.caughtUp != nil {
+		st.CaughtUp = t.caughtUp(zone)
 	}
 	return st, true
 }
@@ -501,7 +509,8 @@ type MemberInstructions struct {
 	Refused   string        `json:"refused,omitempty"`
 	Error     string        `json:"error,omitempty"`
 	Rollover  bool          `json:"rollover,omitempty"`
-	Hold      bool          `json:"hold,omitempty"` // its signer has confirmed the hold (plan S6)
+	Hold      bool          `json:"hold,omitempty"`      // its signer has confirmed the hold (plan S6)
+	CaughtUp  bool          `json:"caught_up,omitempty"` // it has caught up in the zone (plan S18a)
 	Crypto    bool          `json:"crypto"`
 	Mechanism string        `json:"mechanism,omitempty"`
 	Enveloped bool          `json:"enveloped,omitempty"`
@@ -569,7 +578,7 @@ func (t *stampTable) members(zone string) []MemberInstructions {
 
 // memberRow is the status row of what identity tells in st.
 func memberRow(identity string, st InstrStamp) MemberInstructions {
-	r := MemberInstructions{Identity: identity, Refused: st.Refused, Error: st.Error, Rollover: st.Rollover, Hold: st.Hold}
+	r := MemberInstructions{Identity: identity, Refused: st.Refused, Error: st.Error, Rollover: st.Rollover, Hold: st.Hold, CaughtUp: st.CaughtUp}
 	if st.Known && st.ActiveDigest != "" {
 		r.Active = &SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}
 	}
@@ -822,6 +831,10 @@ func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, cry
 	if agent {
 		t.rollover, t.waitsOn = tm.rolloverAt, waitsOnAt
 		t.hold = conf.holdConfirmed
+		t.caughtUp = func(zone string) bool {
+			ok, _ := conf.InternalMp.CatchUp.CaughtUp(ZoneName(zone))
+			return ok
+		}
 		t.stepHeld = conf.holdsStep
 		t.fetch = conf.fetchZone
 		if !crypto {
