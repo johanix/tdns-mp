@@ -465,15 +465,17 @@ func (conf *Config) namesCombiner() bool {
 }
 
 // loadedForCatchUp: the zone has loaded here, and its multi-provider data
-// is the first load's, not the stub main_init puts in place, which reads as
-// no provider (MPPreRefresh replaces it at the first load).
+// is the first load's, not the stub main_init puts in place, which names no
+// label (MPPreRefresh replaces it at the first load). The label, not
+// WeAreProvider: a member with no role is no provider, and catches up too
+// (plan S15).
 func (mpzd *MPZoneData) loadedForCatchUp() bool {
 	if !mpzd.Ready {
 		return false
 	}
 	mpzd.Lock()
 	defer mpzd.Unlock()
-	return mpzd.MP != nil && mpzd.MP.MPdata != nil && mpzd.MP.MPdata.WeAreProvider
+	return mpzd.MP != nil && mpzd.MP.MPdata != nil && mpzd.MP.MPdata.OurLabel != ""
 }
 
 // hasProviderData: the load gave the zone provider data (populateMPdata):
