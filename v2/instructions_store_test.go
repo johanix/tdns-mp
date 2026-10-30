@@ -253,6 +253,19 @@ func TestBothRecordsDroppedWithTwoProvidersIsAnOwnerError(t *testing.T) {
 	}
 }
 
+// With no active serial known the zone acts by its newest serial held, and
+// both records dropped while that serial lists two providers is an owner
+// error too: the serials are kept (S9).
+func TestBothRecordsDroppedWithNoActiveSerialKnownIsAnOwnerError(t *testing.T) {
+	s := newStore(t)
+	s.Note(storeZone, at(t, 7, "alpha,beta"), nil)
+	s.Note(storeZone, nil, nil)
+	st := status(t, s, storeZone)
+	if st.Phase != PhaseOwnerError || !strings.Contains(st.OwnerError, "serial 7 lists 2 providers") || st.Active != nil || st.Newest == nil || st.Newest.Serial != 7 {
+		t.Errorf("phase %s error %q active %s newest %s", st.Phase, st.OwnerError, serialOf(st.Active), serialOf(st.Newest))
+	}
+}
+
 func TestTheEndOfMultiProviderServiceEndsTheSerials(t *testing.T) {
 	_, hdb := storeDB(t)
 	s := loadStore(t, hdb)
