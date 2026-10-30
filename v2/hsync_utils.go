@@ -1091,6 +1091,11 @@ func mpDataLock(zone string) *sync.Mutex {
 	return m.(*sync.Mutex)
 }
 
+// computed: d is data a load or a hand-over computed (populateMPdata),
+// which names this provider's label; not what the config parse leaves, the
+// zone's options alone (main_init.go).
+func (d *MPdata) computed() bool { return d != nil && d.OurLabel != "" }
+
 // populateMPdata evaluates the multi-provider guards for a zone and
 // populates zd.MP.MPdata accordingly. Called after every zone refresh/transfer.
 //
@@ -1367,14 +1372,8 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 	mpMu := mpDataLock(mpzd.ZoneName)
 	mpMu.Lock()
 	var resign bool
-	newApex, _ := new_zd.OwnerForAnalysis(new_zd.ZoneName)
-	// A signer that waits for its agent's hand-over acts by the data it last
-	// acted by: its copy changes none of its roles (rule 5), not even when
-	// the copy drops this provider. Before its first load here it has none,
-	// and takes its copy's.
-	_, handed := actingHeld.Load().roles(mpzd.ZoneName)
-	waits := !handed && tdns.Globals.App.Type == AppTypeMPSigner && signerWaits(mpzd.ZoneName, newApex) && mpzd.MP.MPdata != nil
-	if new_zd.Options[tdns.OptMultiProvider] && !waits {
+	if new_zd.Options[tdns.OptMultiProvider] {
+		newApex, _ := new_zd.OwnerForAnalysis(new_zd.ZoneName)
 		newMpzd := &MPZoneData{
 			ZoneData:  new_zd,
 			MP:        &MPState{},
@@ -1382,13 +1381,28 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 		}
 		// A combiner or signer that holds a hand-over acts by the sets
 		// handed, not by the incoming copy (S10, S11); an agent, by the
-		// step's (S12, S13).
-		newMpzd.populateMPdata(mp, newMpzd.roles())
-		// under the zone's lock, as a hand-over sets the two
-		mpzd.Lock()
-		mpzd.MP.MPdata = newMpzd.MP.MPdata
-		mpzd.MPOptions = newMpzd.MPOptions
-		mpzd.Unlock()
+		// step's (S12, S13). A signer that waits for its agent's hand-over
+		// signs by the signer sets it last acted by, unchanged by its copy
+		// (rule 5), and keeps its data whole when the copy drops this
+		// provider. At its first load here it has acted by none: what the
+		// config parse leaves is no data (computed), and the first load
+		// takes its copy's, so that inline-signing is on before the first
+		// publish (main_init.go).
+		r := newMpzd.roles()
+		_, handed := actingHeld.Load().roles(mpzd.ZoneName)
+		kept := mpzd.MP.MPdata
+		waits := !handed && tdns.Globals.App.Type == AppTypeMPSigner && signerWaits(mpzd.ZoneName, newApex) && kept.computed()
+		if waits {
+			r.KeySigners, r.DSSigners, r.KeyConfirmers, r.Signing = kept.Sets.KeySigners, kept.Sets.DSSigners, kept.Sets.KeyConfirmers, kept.Sets.Signing
+		}
+		newMpzd.populateMPdata(mp, r)
+		if !waits || newMpzd.MP.MPdata != nil {
+			// under the zone's lock, as a hand-over sets the two
+			mpzd.Lock()
+			mpzd.MP.MPdata = newMpzd.MP.MPdata
+			mpzd.MPOptions = newMpzd.MPOptions
+			mpzd.Unlock()
+		}
 	}
 
 	// Signer: dynamically enable/disable inline-signing based on HSYNC

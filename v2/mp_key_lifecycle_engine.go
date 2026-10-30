@@ -100,7 +100,7 @@ func signerSets(mpzd *MPZoneData, mp *MultiProviderConf) (self string, r Roles) 
 	if handed, ok := actingHeld.Load().roles(mpzd.ZoneName); ok {
 		return labelOfIdentity(handed, ours), handed
 	}
-	if signerWaits(mpzd.ZoneName, apex) && mpzd.MP != nil && mpzd.MP.MPdata != nil {
+	if signerWaits(mpzd.ZoneName, apex) && mpzd.MP != nil && mpzd.MP.MPdata.computed() {
 		r = mpzd.MP.MPdata.Sets
 		return labelOfIdentity(r, ours), r
 	}
