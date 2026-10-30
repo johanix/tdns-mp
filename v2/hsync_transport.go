@@ -2698,7 +2698,7 @@ func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(ctx context.Context, distID st
 		}
 		lgTransport.Warn("a member with no role did not confirm in time, going on", "zone", prop.Zone, "member", a, "what", "the DNSKEY distribution "+distID)
 		for _, kt := range prop.KeyTags {
-			prop.setResultLocked(a, kt, "timed out", nil) // no answer, so no stamp
+			prop.setResultLocked(a, kt, "timed out", nil) // no answer, no stamp
 		}
 	}
 	tm.finishDnskeyPropagationLocked(distID, prop)
