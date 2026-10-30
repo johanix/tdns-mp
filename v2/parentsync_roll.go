@@ -605,8 +605,11 @@ func (conf *Config) publishRolledKEY(zone ZoneName, newKey *sig0Row) error {
 
 // rollMembers is step 4: once every recipient has confirmed the new KEY
 // (members with no role after the time-out), the new key is made active and
-// the old one retired at the leader, in one transaction. A KEY booked in no
-// earlier pass of this process (a restart), or refused, is published again.
+// the old one retired at the leader, in one transaction. A recipient that
+// keeps the KEY and does not apply it by its role (IGNORED: a combiner that
+// signs nothing publishes no KEY) has taken it; FAILED and REJECTED have
+// not. A KEY booked in no earlier pass of this process (a restart), or
+// refused, is published again.
 func (conf *Config) rollMembers(kdb *tdns.KeyDB, r *sig0Roll) (string, error) {
 	zone := r.zone
 	tm := conf.InternalMp.MPTransport
@@ -627,7 +630,7 @@ func (conf *Config) rollMembers(kdb *tdns.KeyDB, r *sig0Roll) (string, error) {
 		switch {
 		case !heard:
 			awaited = append(awaited, rcpt)
-		case w.status != "SUCCESS" && w.status != "PARTIAL":
+		case w.status == "FAILED" || w.status == "REJECTED":
 			tm.rollKEYs.forget(zone)
 			return "", fmt.Errorf("%s did not take the new KEY (%s: %s)", rcpt, w.status, w.message)
 		}
