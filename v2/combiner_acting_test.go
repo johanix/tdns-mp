@@ -608,24 +608,37 @@ func TestAStoredDNSKEYIsJudgedAgainAtEveryHandOver(t *testing.T) {
 }
 
 // A signer the owner takes out of signers= keeps its DNSKEYs and its CDS at
-// every other provider's combiner while its HSYNC3 record stays (#275: the
-// agent hands its signing set), and loses them when the record goes.
-func TestALeaverKeepsItsDNSKEYsAndCDSAtEveryOtherCombinerUntilItsRecordGoes(t *testing.T) {
+// every other provider's combiner while the step's sets keep it in
+// KeySigners and DSSigners (plan S13): its CDS leaves at its DS step, by
+// DSSigners, and its DNSKEYs at its DNSKEY step, by KeySigners.
+func TestALeavingSignersCDSLeavesAtTheDSStep(t *testing.T) {
 	const zone = "leaver.acting.example."
 	agentMp := &MultiProviderConf{Role: "agent", Identity: actUs}
 	agentConf := &Config{Config: &tdns.Config{}}
 	agentConf.SetMpConfig(agentMp)
 
-	// the agent's copy: beta out of signers=, its record kept, beta in the
-	// signing set the copy before gave
+	// the agent's copy: beta out of signers=, its record kept
 	asMPDaemon(t, AppTypeMPAgent)
 	mpzd := instrTestZone(t, zone, actRecords(`serial="6" servers="alpha,beta" signers="alpha"`)...)
-	apex, _ := mpzd.OwnerForAnalysis(zone)
 	mpzd.EnsureMP()
-	mpzd.populateMPdata(agentMp, nextSigningSet(apex, signingSet{"alpha": actUs, "beta": actOther}))
+	mpzd.populateMPdata(agentMp, mpzd.roles())
 	h := agentConf.wantedHandover(zone)
-	if h == nil || !has(h.Sets.KeySigners, "beta") || !has(h.Sets.DSSigners, "beta") || has(h.Sets.Servers, "gamma") {
-		t.Fatalf("the agent hands %+v, want beta among the key and DS signers", h)
+	if h == nil || has(h.Sets.KeySigners, "beta") || has(h.Sets.DSSigners, "beta") {
+		t.Fatalf("at rest the agent hands %+v, want the active lists: beta in no signer set", h)
+	}
+	beta := Provider{Label: "beta", Identity: actOther}
+	step := func(keys, ds bool) *ActingHandover {
+		c := *h
+		c.Sets = h.Sets
+		c.Sets.KeySigners, c.Sets.DSSigners = slices.Clone(h.Sets.KeySigners), slices.Clone(h.Sets.DSSigners)
+		if keys {
+			c.Sets.KeySigners = append(c.Sets.KeySigners, beta)
+		}
+		if ds {
+			c.Sets.DSSigners = append(c.Sets.DSSigners, beta)
+		}
+		c.Made = time.Now()
+		return &c
 	}
 
 	// at the combiner
@@ -635,38 +648,23 @@ func TestALeaverKeepsItsDNSKEYsAndCDSAtEveryOtherCombinerUntilItsRecordGoes(t *t
 	mpzd.MP.AgentContributions = map[string]map[string]map[uint16]core.RRset{
 		actOther: {zone: {dns.TypeDNSKEY: dnskeyContribution(t, zone, testDnskey(t, zone, 257)), dns.TypeCDS: {Name: zone, RRtype: dns.TypeCDS, RRs: []dns.RR{cds}}}},
 	}
-	if _, _, err := s.take(h, actUs); err != nil {
-		t.Fatalf("take: %v", err)
+	merged := func(h *ActingHandover) (dnskeys, cdss int) {
+		t.Helper()
+		if _, _, err := s.take(h, actUs); err != nil {
+			t.Fatalf("take: %v", err)
+		}
+		mpzd.RebuildCombinerData()
+		od, _ := mpzd.MP.CombinerData.Get(zone)
+		return len(od.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs), len(od.RRtypes.GetOnlyRRSet(dns.TypeCDS).RRs)
 	}
-	mpzd.RebuildCombinerData()
-	od, _ := mpzd.MP.CombinerData.Get(zone)
-	if len(od.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs) != 1 || len(od.RRtypes.GetOnlyRRSet(dns.TypeCDS).RRs) != 1 {
-		t.Fatal("the leaver's DNSKEY or CDS left another provider's combiner while it signs on")
+	if k, c := merged(step(true, true)); k != 1 || c != 1 {
+		t.Fatalf("before its DS step the leaver's DNSKEYs %d and CDS %d at another combiner, want both", k, c)
 	}
-
-	// the owner removes beta's record: the signing set loses it, and so does
-	// what the agent hands
-	asMPDaemon(t, AppTypeMPAgent)
-	actingHeld.Store(nil)
-	gone := instrTestZone(t, "gone."+zone, actRecords(`serial="7" servers="alpha" signers="alpha"`)[0], `3600 IN HSYNCPARAM serial="7" servers="alpha" signers="alpha"`)
-	goneApex, _ := gone.OwnerForAnalysis(gone.ZoneName)
-	cp := *goneApex
-	cp.Name = zone
-	mpzd.Data.Set(zone, cp)
-	mpzd.InstallInitialSnapshot()
-	mpzd.populateMPdata(agentMp, nextSigningSet(&cp, mpzd.signingSet()))
-	h2 := agentConf.wantedHandover(zone)
-	if h2 == nil || has(h2.Sets.KeySigners, "beta") {
-		t.Fatalf("with beta's record gone the agent hands %+v", h2)
+	if k, c := merged(step(true, false)); k != 1 || c != 0 {
+		t.Errorf("at its DS step the leaver's DNSKEYs %d and CDS %d, want its DNSKEY alone", k, c)
 	}
-	actingHeld.Store(s)
-	if _, _, err := s.take(h2, actUs); err != nil {
-		t.Fatalf("take: %v", err)
-	}
-	mpzd.RebuildCombinerData()
-	od, _ = mpzd.MP.CombinerData.Get(zone)
-	if n := len(od.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs) + len(od.RRtypes.GetOnlyRRSet(dns.TypeCDS).RRs); n != 0 {
-		t.Errorf("beta's record is gone, and the combiner still merges %d of its DNSKEY and CDS records", n)
+	if k, c := merged(step(false, false)); k != 0 || c != 0 {
+		t.Errorf("at its DNSKEY step the combiner still merges %d of its DNSKEYs and %d of its CDS", k, c)
 	}
 }
 
