@@ -46,6 +46,9 @@ type GossipStateTable struct {
 	onGroupOperational func(groupHash string)
 	onGroupDegraded    func(groupHash string)
 	onElectionUpdate   func(groupHash string, state GroupElectionState)
+	// gateExcused are the members a group's gate leaves out (plan S7);
+	// nil: none.
+	gateExcused func(groupHash string) []string
 	// Track which groups have fired operational callback
 	operationalGroups map[string]bool
 	// firstRowHoldUntil: until then, a group's first local row is written
@@ -202,16 +205,17 @@ type LeaderElectionManager struct {
 	localID              AgentId
 	leaderTTL            time.Duration
 	broadcastFunc        func(zone ZoneName, rfiType string, records map[string][]string) error
-	operationalPeersFunc func(zone ZoneName) int   // returns count of operational peers for a zone
-	configuredPeersFunc  func(zone ZoneName) int   // returns count of configured peers for a zone
-	onLeaderElected      func(zone ZoneName) error // called when local agent wins election
-	onZoneJoined         func(zone ZoneName) error // called when a zone joins a group the local agent already leads
-	onZoneLeft           func(zone ZoneName) bool  // ends what is scheduled for the parent of a zone that left its group (step 8)
-	onZoneRegrouped      func(zone ZoneName)       // called when a zone enters a provider group, whoever leads it (SetOnZoneRegrouped)
-	onLeaderNamed        func()                    // called when an election names a leader, this agent or another (SetOnLeaderNamed)
-	onLeadLost           func(hold uint64)         // called when another agent takes a lead this agent held (SetOnLeadLost)
-	keySetups            sync.Map                  // ZoneName -> *sync.Mutex: one SIG(0) key setup per zone at a time (inKeySetup)
-	hooks                sync.WaitGroup            // the callbacks that run in goroutines of their own (onLeadLost, onLeaderNamed), until each has returned
+	operationalPeersFunc func(zone ZoneName) int         // returns count of operational peers for a zone
+	configuredPeersFunc  func(zone ZoneName) int         // returns count of configured peers for a zone
+	onLeaderElected      func(zone ZoneName) error       // called when local agent wins election
+	onZoneJoined         func(zone ZoneName) error       // called when a zone joins a group the local agent already leads
+	onZoneLeft           func(zone ZoneName) bool        // ends what is scheduled for the parent of a zone that left its group (step 8)
+	onZoneRegrouped      func(zone ZoneName)             // called when a zone enters a provider group, whoever leads it (SetOnZoneRegrouped)
+	onLeaderNamed        func()                          // called when an election names a leader, this agent or another (SetOnLeaderNamed)
+	onLeadLost           func(hold uint64)               // called when another agent takes a lead this agent held (SetOnLeadLost)
+	gateExcused          func(groupHash string) []string // the members a group's election leaves out (SetGateExcused, plan S7)
+	keySetups            sync.Map                        // ZoneName -> *sync.Mutex: one SIG(0) key setup per zone at a time (inKeySetup)
+	hooks                sync.WaitGroup                  // the callbacks that run in goroutines of their own (onLeadLost, onLeaderNamed), until each has returned
 	providerGroupMgr     *ProviderGroupManager
 }
 

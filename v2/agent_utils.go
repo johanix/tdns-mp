@@ -5,10 +5,12 @@
 package tdnsmp
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/johanix/tdns-mp/v2/hsync"
+	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 )
 
@@ -162,8 +164,14 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 		return nil, fmt.Errorf("zone %q is unknown", zonename)
 	}
 
+	// A zone not loaded yet that its agent stored serials of was placed in
+	// its group at the start (plan S9): its members are the stored
+	// reading's, which is what the readers act by anyway (activeOr).
 	apex, err := zd.GetOwner(string(zonename))
-	if err != nil {
+	switch {
+	case errors.Is(err, tdns.ErrZoneNotReady) && instrStore.Load().reading(zd.ZoneName) != nil:
+		apex = nil
+	case err != nil:
 		lgAgent.Error("error getting apex", "zone", zonename, "err", err)
 		return nil, fmt.Errorf("error getting apex for zone %q: %v", zonename, err)
 	}

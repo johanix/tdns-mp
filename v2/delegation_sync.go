@@ -406,6 +406,15 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 	// option is read, so a takeover either finds it or is seen here.
 	runCtx, done := conf.delegationSyncRun(ctx, ds.ZoneName)
 	defer done()
+	// A sync cancelled at the thaw's turn (cancelParentWork) is owed until
+	// the transition is done, not retried as a failure (plan S7)
+	defer func() {
+		var pw parentWorkCancelled
+		if err != nil && errors.As(context.Cause(runCtx), &pw) {
+			conf.syncHeld(ds.ZoneName, syncOther)
+			err = fmt.Errorf("%w: %w", pw, err)
+		}
+	}()
 	if ownerSyncsDelegation(ds.ZoneData) {
 		return "", 0, tdns.UpdateResult{}, false, errors.New("the zone's owner has taken its delegation sync over; nothing is sent")
 	}
@@ -483,7 +492,8 @@ func (e syncAskedAgain) Unwrap() error { return e.err }
 // and still leads, unless syncDelegation has asked again already.
 func (conf *Config) leaderSyncFailed(ctx context.Context, ds tdns.DelegationSyncRequest, err error) {
 	var asked syncAskedAgain
-	if errors.As(err, &asked) {
+	var cancelled parentWorkCancelled
+	if errors.As(err, &asked) || errors.As(err, &cancelled) {
 		return
 	}
 	if mpLeaderSync(conf, ds) && conf.stillParticipates(ds.ZoneName) && conf.stillLeads(ds.ZoneName) {

@@ -80,6 +80,9 @@ multi-provider:
          hello_fast_interval: 2
          catchup_outage:      3600
          peer_hold:           86400
+   # A change of the owner's instructions, in seconds; the default.
+   transitions:
+      leaving-timeout:        3600
 
 service:
    name:           TDNS-MPAGENT

@@ -70,6 +70,11 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 			return fmt.Errorf("%s receive path: %w", "auditor", err)
 		}
 	}
+	// The auditor takes a thaw from any voting member (plan S7).
+	tdns.StartEngine(&tdns.Globals.App, "Thaws", func() error {
+		conf.runThaws(ctx)
+		return nil
+	})
 
 	// Phase B: in-memory audit state and the auditor engine. Constructed
 	// before RefreshEngine starts: the first zone load reports every
@@ -81,6 +86,9 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	conf.InternalMp.AuditStateManager = stateManager
 	ar.AuditState = stateManager
 	auditorEngine := NewAuditorEngine(conf, stateManager)
+	// The zones are in their groups before their first load, by the serials
+	// stored (plan S9).
+	conf.placeGroupsAtStart()
 
 	tdns.StartEngineNoError(&tdns.Globals.App, "RefreshEngine", func() {
 		tdns.RefreshEngine(ctx, conf.Config)

@@ -555,6 +555,9 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	}
 	conf.InternalMp.Kept = kept
 	store.onFreeze = conf.onFreeze
+	// a zone whose active serial changes, becomes known or goes hands what
+	// it kept of other agents' distributions to the data engine (plan S8)
+	store.onActive = func(zone string) { conf.askActivated(ZoneName(zone)) }
 	// tdns asks the agent whether the agents sync a zone's delegation (P3),
 	// rather than reading its own copy: by the step's sets, since parentsync
 	// changes only at a step (design 3.3).

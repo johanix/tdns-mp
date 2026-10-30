@@ -1,13 +1,14 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * The lists a zone keeps while it is frozen, each in order, on disk (design
- * 3.1, rule 3, plan S6): the owed list, this provider's own changes,
- * released when the transition is done; and the kept list, other agents'
- * distributions, released at the activation (S8 fills it). Both are kept
- * apart from the agent's data, which catch-up answers and syncs read: a
- * kept change reaches no peer and no parent before its release. Only the
- * data engine takes from them.
+ * The lists a zone keeps, each in order, on disk (design 3.1, rules 3 and
+ * 6, plans S6 and S8): the owed list, this provider's own changes made while
+ * the zone is frozen, released when the transition is done; and the kept
+ * list, other agents' distributions made under a serial this agent is not
+ * active at, released at the activation. Both are kept apart from the
+ * agent's data, which catch-up answers and syncs read: a kept change
+ * reaches no peer and no parent before its release. Only the data engine
+ * takes from them.
  */
 package tdnsmp
 
@@ -27,13 +28,27 @@ import (
 // listOwed is the owed list: this provider's own changes.
 const listOwed = "owed"
 
+// listKept is the kept list: other agents' distributions (plan S8).
+const listKept = "kept"
+
 // keptUpdate is an update as a list keeps it: what the data engine needs to
-// handle it again, its records as text, each with its class.
+// handle it again, its records as text, each with its class, and the
+// instruction to publish its KEY with them (#206). An entry of
+// the kept list also keeps where the update came from: the agent it names,
+// the one the transport established, the mechanism it came on, the
+// sender's time, the stamp it was made under, and the request it answers.
 type keptUpdate struct {
-	Operations []core.RROperation  `json:"operations,omitempty"`
-	RRsets     map[string][]string `json:"rrsets,omitempty"` // by type
-	RRs        []string            `json:"rrs,omitempty"`
-	Force      bool                `json:"force,omitempty"`
+	Operations  []core.RROperation       `json:"operations,omitempty"`
+	RRsets      map[string][]string      `json:"rrsets,omitempty"` // by type
+	RRs         []string                 `json:"rrs,omitempty"`
+	Force       bool                     `json:"force,omitempty"`
+	Publish     *core.PublishInstruction `json:"publish,omitempty"`
+	Sender      AgentId                  `json:"sender,omitempty"`
+	DeliveredBy AgentId                  `json:"delivered_by,omitempty"`
+	Mechanism   string                   `json:"mechanism,omitempty"`
+	Time        time.Time                `json:"time,omitzero"`
+	Instr       *MsgStamp                `json:"instr,omitempty"`
+	CatchUp     *CatchUp                 `json:"catch_up,omitempty"`
 }
 
 // keptEntry is one entry of a list: its place, the sender's distribution
@@ -122,6 +137,23 @@ func (k *keptLists) add(zone, list, distribution string, u keptUpdate) (bool, er
 	return true, nil
 }
 
+// keepOnce puts u, another agent's distribution, at the end of the zone's
+// kept list, unless the list holds that sender's distribution already: a
+// resend is kept once. Reports whether it was added.
+func (k *keptLists) keepOnce(zone, distribution string, u keptUpdate) (bool, error) {
+	if distribution != "" {
+		k.mu.Lock()
+		held := slices.ContainsFunc(k.lists[canonicalName(zone)][listKept], func(e keptEntry) bool {
+			return e.Distribution == distribution && canonicalName(string(e.Update.Sender)) == canonicalName(string(u.Sender))
+		})
+		k.mu.Unlock()
+		if held {
+			return false, nil
+		}
+	}
+	return k.add(zone, listKept, distribution, u)
+}
+
 // entries is the zone's list, in order; a copy.
 func (k *keptLists) entries(zone, list string) []keptEntry {
 	if k == nil {
@@ -181,7 +213,7 @@ func keptUpdateOf(u *SynchedDataUpdate) keptUpdate {
 	if u.Update == nil {
 		return k
 	}
-	k.Operations = slices.Clone(u.Update.Operations)
+	k.Operations, k.Publish = slices.Clone(u.Update.Operations), u.Update.Publish
 	for rrtype, rrset := range u.Update.RRsets {
 		if len(rrset.RRs) == 0 {
 			continue
@@ -199,10 +231,32 @@ func keptUpdateOf(u *SynchedDataUpdate) keptUpdate {
 	return k
 }
 
+// keptRemoteOf is u, another agent's distribution, as the kept list keeps
+// it.
+func keptRemoteOf(u *SynchedDataUpdate) keptUpdate {
+	k := keptUpdateOf(u)
+	k.Sender, k.DeliveredBy, k.Mechanism, k.Time = u.AgentId, u.DeliveredBy, u.Mechanism, u.OriginatingTime
+	k.Instr, k.CatchUp = u.OriginatingInstr, u.CatchUp
+	return k
+}
+
+// remoteUpdate is the distribution the kept entry e keeps, for zone, as
+// the data engine took it in.
+func (e keptEntry) remoteUpdate(zone ZoneName) (*SynchedDataUpdate, error) {
+	zu, err := e.Update.zoneUpdate(zone, e.Update.Sender)
+	if err != nil {
+		return nil, err
+	}
+	zu.CatchUp = e.Update.CatchUp
+	return &SynchedDataUpdate{Zone: zone, AgentId: e.Update.Sender, UpdateType: "remote", Update: zu,
+		OriginatingDistID: e.Distribution, OriginatingInstr: e.Update.Instr, Mechanism: e.Update.Mechanism,
+		OriginatingTime: e.Update.Time, DeliveredBy: e.Update.DeliveredBy, CatchUp: e.Update.CatchUp, Force: e.Update.Force}, nil
+}
+
 // zoneUpdate is the update k keeps, for zone and agent, its records parsed
 // again.
 func (k keptUpdate) zoneUpdate(zone ZoneName, agent AgentId) (*ZoneUpdate, error) {
-	zu := &ZoneUpdate{Zone: zone, AgentId: agent, RRsets: map[uint16]core.RRset{}, Operations: slices.Clone(k.Operations)}
+	zu := &ZoneUpdate{Zone: zone, AgentId: agent, RRsets: map[uint16]core.RRset{}, Operations: slices.Clone(k.Operations), Publish: k.Publish}
 	for typ, records := range k.RRsets {
 		rrtype, ok := dns.StringToType[typ]
 		if !ok {

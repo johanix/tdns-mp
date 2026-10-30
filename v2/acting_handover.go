@@ -143,20 +143,24 @@ func (mpzd *MPZoneData) actingSets() Roles {
 }
 
 // wantedHandover is what this agent wants its combiner to act by for the
-// zone: the instructions it acts by (until S7 its copy's, S3's rule), the
+// zone: the instructions it acts by (its active ones, S3's rule), the
 // store's newest serial, phase and step, and the step's sets, with the hold
 // while the zone is frozen (S6, folded in by S11). Until S13 the
 // sets of whose DNSKEYs and DS are published, and of who signs, are the
 // zone's signing set, signers= with the providers leaving it (#275): so the
 // other providers' combiners keep a leaving signer's DNSKEYs and CDS while
 // it signs on, until the owner removes its HSYNC3 record. Nil for a zone
-// that is not loaded here or not multi-provider; one with no records for a
-// zone whose instructions are gone (the end of multi-provider service).
+// that is not loaded here or not multi-provider, and for one whose active
+// serial this agent does not know (S9); one with no records for a zone
+// whose instructions are gone (the end of multi-provider service).
 func (conf *Config) wantedHandover(zone string) *ActingHandover {
 	zone = dns.Fqdn(zone)
 	mpzd, ok := Zones.Get(zone)
 	if !ok || mpzd == nil || !mpzd.Options[tdns.OptMultiProvider] || !mpzd.Ready {
 		return nil
+	}
+	if conf.InternalMp.Instructions.activeUnknown(zone) {
+		return nil // nothing new until the active serial is known (design 3.3, 3.4)
 	}
 	h := &ActingHandover{Zone: zone, Phase: PhaseSteady, Made: time.Now()}
 	in := mpzd.instructions()
@@ -200,6 +204,16 @@ type handoverTracker struct {
 	toSigner bool
 }
 
+// resendAfter is how long a hand-over may be in flight before the ticker
+// sends it again: handoverResend for the combiner, which confirms it;
+// signerHandoverResend for the signer, which does not.
+func (t *handoverTracker) resendAfter() time.Duration {
+	if t.toSigner {
+		return signerHandoverResend
+	}
+	return handoverResend
+}
+
 // part is the part the tracker hands over to, for the log.
 func (t *handoverTracker) part() string {
 	if t.toSigner {
@@ -217,23 +231,28 @@ type zoneHandover struct {
 	flight   *ActingHandover
 	flightAt time.Time
 	heldAt   time.Time // when the combiner was last known to hold want
-	waiting  []waitingUpdate
-	draining bool      // an update that waited is being queued (drain)
-	reset    bool      // the zone's serials were forgotten: a hand-over says so until one that does is confirmed
-	resetAt  time.Time // when they were forgotten
+	// when a resend was last logged at Info: to the signer, once per
+	// handoverResend, though it goes every signerHandoverResend
+	resendLogged time.Time
+	waiting      []waitingUpdate
+	draining     bool      // an update that waited is being queued (drain)
+	reset        bool      // the zone's serials were forgotten: a hand-over says so until one that does is confirmed
+	resetAt      time.Time // when they were forgotten
 }
 
 type waitingUpdate struct {
-	zone   ZoneName // as the caller named it
-	update *ZoneUpdate
-	distID string
+	zone    ZoneName // as the caller named it
+	update  *ZoneUpdate
+	distID  string
+	removed []string // what the combiner removed on a word that was not final
 }
 
 type sentUpdate struct {
-	zone   ZoneName // as the caller named it
-	update *ZoneUpdate
-	under  *ActingHandover
-	at     time.Time
+	zone    ZoneName // as the caller named it
+	update  *ZoneUpdate
+	under   *ActingHandover
+	at      time.Time
+	removed []string // as waitingUpdate's
 }
 
 // handoverMaxWaiting is how many updates may wait for a zone's hand-over:
@@ -245,6 +264,12 @@ const handoverMaxWaiting = 10000
 // before the ticker hands over again; the queue gives a message up long
 // before.
 const handoverResend = 5 * time.Minute
+
+// signerHandoverResend is the same for the signer, which confirms nothing:
+// a hand-over no inventory since has said it holds goes again after it. The
+// KEYSTATE's own confirmation says only that it arrived, and a signal
+// dropped on the signer's full queue has one too.
+const signerHandoverResend = 30 * time.Second
 
 func newHandoverTracker(self AgentId, enqueue func(ZoneName, *ZoneUpdate, string) (string, error)) *handoverTracker {
 	return &handoverTracker{zones: map[string]*zoneHandover{}, sent: map[string]*sentUpdate{}, enqueue: enqueue, self: self}
@@ -264,10 +289,12 @@ func (t *handoverTracker) handOver(h *ActingHandover) {
 	t.send(send)
 }
 
-// handoverSend is a hand-over due, with the distribution it goes under.
+// handoverSend is a hand-over due, with the distribution it goes under;
+// quiet, a resend logged at Debug.
 type handoverSend struct {
 	h      *ActingHandover
 	distID string
+	quiet  bool
 }
 
 // dueLocked is the hand-over to send for z now, nil when none is due: the
@@ -315,7 +342,11 @@ func (t *handoverTracker) deliver(hs *handoverSend) {
 		t.mu.Unlock()
 		return
 	}
-	lgEngine.Info("handing the "+t.part()+" the serial it acts by", "zone", h.Zone, "handover", h.String(), "distrib", hs.distID)
+	log := lgEngine.Info
+	if hs.quiet {
+		log = lgEngine.Debug
+	}
+	log("handing the "+t.part()+" the serial it acts by", "zone", h.Zone, "handover", h.String(), "distrib", hs.distID)
 }
 
 func (t *handoverTracker) zone(zone string) *zoneHandover {
@@ -364,11 +395,16 @@ func (t *handoverTracker) gate(zone ZoneName, update *ZoneUpdate, distID string)
 // goes out, in order; anything else is a refusal, and the combiner's own
 // read says what it holds. A refusal or an "ignored" of an update sent
 // while the combiner held another serial than this agent now wants is not
-// final: the update is sent again, under the serial wanted. handled says
-// the word goes no further.
-func (t *handoverTracker) confirmation(distID string, status transport.ConfirmStatus) (handled bool) {
+// final, and nor is one from a combiner that says it acts by another
+// serial than the one the update was sent under (acting, plan S8): the
+// update is sent again, under the serial wanted. What the combiner removed
+// in such a word is gone whatever the serial, and its answer to the update
+// sent again cannot name it, since it no longer holds it: the removed
+// records are kept with the update and returned with the final word, which
+// names them (carried). handled says the word goes no further.
+func (t *handoverTracker) confirmation(distID string, status transport.ConfirmStatus, acting *ActingStamp, removed []string) (handled bool, carried []string) {
 	if t == nil || status == transport.ConfirmPending {
-		return t != nil && t.isHandover(distID)
+		return t != nil && t.isHandover(distID), nil
 	}
 	t.mu.Lock()
 	for zone, z := range t.zones {
@@ -381,7 +417,7 @@ func (t *handoverTracker) confirmation(distID string, status transport.ConfirmSt
 			z.held = nil
 			t.mu.Unlock()
 			lgEngine.Warn("the combiner refused the hand-over; its own read says what it holds", "zone", zone, "handover", h.String(), "status", status.String())
-			return true
+			return true, nil
 		}
 		// a forget is told until a hand-over that tells it is confirmed
 		z.held, z.heldAt, z.reset = h, time.Now(), z.reset && !h.Reset
@@ -393,34 +429,34 @@ func (t *handoverTracker) confirmation(distID string, status transport.ConfirmSt
 		lgEngine.Info("the combiner acts by the serial handed", "zone", zone, "handover", h.String(), "waiting", waiting)
 		t.drain(zone)
 		t.send(send)
-		return true
+		return true, nil
 	}
 	s := t.sent[distID]
 	if s == nil {
 		t.mu.Unlock()
-		return false
+		return false, nil
 	}
 	delete(t.sent, distID)
 	z := t.zones[handoverKey(string(s.zone))]
-	stale := z != nil && z.want != nil && !z.want.sameAs(s.under)
+	stale := z != nil && z.want != nil && (!z.want.sameAs(s.under) || acting != nil && !acting.names(s.under))
 	t.mu.Unlock()
 	switch status {
 	case transport.ConfirmFailed, transport.ConfirmRejected, transport.ConfirmIgnored, transport.ConfirmPartial:
 	default:
-		return false
+		return false, s.removed
 	}
 	if !stale {
-		return false
+		return false, s.removed
 	}
 	lgEngine.Info("the combiner's word on an update sent under another serial is not final: sending it again", "zone", s.zone, "distrib", distID, "status", status.String(), "sentUnder", s.under.String())
 	// it waits behind what waits already, and goes out as they do
 	key := handoverKey(string(s.zone))
 	t.mu.Lock()
 	z = t.zone(key)
-	z.waiting = append(z.waiting, waitingUpdate{zone: s.zone, update: s.update, distID: distID})
+	z.waiting = append(z.waiting, waitingUpdate{zone: s.zone, update: s.update, distID: distID, removed: append(slices.Clip(s.removed), removed...)})
 	t.mu.Unlock()
 	t.drain(key)
-	return true
+	return true, nil
 }
 
 // unsent forgets an update the gate let through and the queue then
@@ -453,7 +489,7 @@ func (t *handoverTracker) drain(zone string) {
 		}
 		w := z.waiting[0]
 		z.draining = true
-		t.sent[w.distID] = &sentUpdate{zone: w.zone, update: w.update, under: z.held, at: time.Now()}
+		t.sent[w.distID] = &sentUpdate{zone: w.zone, update: w.update, under: z.held, at: time.Now(), removed: w.removed}
 		t.mu.Unlock()
 		_, err := t.enqueue(w.zone, w.update, w.distID)
 		t.mu.Lock()
@@ -576,6 +612,39 @@ func (t *handoverTracker) letHoldGo(zone string) {
 	t.send(send)
 }
 
+// holdLast: this agent knows no active serial for the zone, so it hands
+// its parts nothing new (design 3.3, 3.4), and nothing new starts at its
+// signer either (the project owner, 2026-10-29): the signer is handed what
+// it holds, or failing that what this agent last wanted it to hold, with
+// the hold set and its sets as they are. Nothing when neither carries
+// instructions: a signer that holds nothing acts by nothing (rule 5), and
+// its inventory says what it holds when it has something (learned).
+func (t *handoverTracker) holdLast(zone string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	z := t.zone(zone)
+	base := z.held
+	if base == nil {
+		base = z.want
+	}
+	if base == nil || len(base.Records) == 0 {
+		t.mu.Unlock()
+		return
+	}
+	h := *base
+	h.Sets.Hold = true
+	if h.sameAs(z.want) {
+		t.mu.Unlock()
+		return
+	}
+	z.want = &h
+	send := t.dueLocked(z, false)
+	t.mu.Unlock()
+	t.send(send)
+}
+
 // holdHeld: the part holds what is wanted for the zone, and that carries
 // the hold.
 func (t *handoverTracker) holdHeld(zone string) bool {
@@ -600,8 +669,8 @@ func (t *handoverTracker) forgot(zone string) {
 	t.mu.Unlock()
 }
 
-// tick hands over again where the combiner does not hold what is wanted and
-// nothing has been in flight for handoverResend, drains what still waits,
+// tick hands over again where the part does not hold what is wanted and
+// nothing has been in flight for resendAfter, drains what still waits,
 // and forgets what was sent a day ago and never answered: the queue has
 // given it up by then.
 func (t *handoverTracker) tick() {
@@ -612,8 +681,17 @@ func (t *handoverTracker) tick() {
 	var sends []*handoverSend
 	var drains []string
 	for key, z := range t.zones {
-		if z.flight == nil || time.Since(z.flightAt) > handoverResend {
-			sends = append(sends, t.dueLocked(z, true))
+		// a failed send to the combiner goes again at once; to the signer,
+		// as an unanswered one: its inventory at its start asks sooner
+		failed := z.flight == nil && !t.toSigner
+		if failed || time.Since(z.flightAt) > t.resendAfter() {
+			if hs := t.dueLocked(z, true); hs != nil {
+				hs.quiet = t.toSigner && time.Since(z.resendLogged) < handoverResend
+				if !hs.quiet {
+					z.resendLogged = time.Now()
+				}
+				sends = append(sends, hs)
+			}
 		}
 		if len(z.waiting) > 0 {
 			drains = append(drains, key)
@@ -671,13 +749,17 @@ func (conf *Config) handOverToParts(zone string) {
 	}
 	h := conf.wantedHandover(zone)
 	t.handOver(h)
+	if h == nil && conf.InternalMp.Instructions.activeUnknown(zone) {
+		ts.holdLast(zone)
+		return
+	}
 	ts.handOver(h)
 }
 
 // startHandovers sets up the agent's side of the hand-over: when the agent
 // names a combiner, the tracker every send to the combiner passes
 // (EnqueueForCombiner); when it names a signer, the signer's (plan S11);
-// and their slow ticker.
+// and their tickers.
 func (conf *Config) startHandovers(ctx context.Context, tm *MPTransportBridge) {
 	mp := conf.MpConfig()
 	if tm == nil || mp == nil {
@@ -695,23 +777,24 @@ func (conf *Config) startHandovers(ctx context.Context, tm *MPTransportBridge) {
 		conf.InternalMp.SignerHandover = t
 		trackers = append(trackers, t)
 	}
-	if len(trackers) == 0 {
-		return
+	for _, t := range trackers {
+		go t.run(ctx)
 	}
-	go func() {
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				for _, t := range trackers {
-					t.tick()
-				}
-			}
+}
+
+// run ticks the tracker five times in each resendAfter, so a hand-over due
+// goes again within a fifth of it: the combiner's every minute.
+func (t *handoverTracker) run(ctx context.Context) {
+	ticker := time.NewTicker(t.resendAfter() / 5)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			t.tick()
 		}
-	}()
+	}
 }
 
 // fromCombiner: the STATUS-UPDATE's sender is this agent's combiner.

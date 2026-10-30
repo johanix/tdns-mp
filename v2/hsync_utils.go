@@ -566,6 +566,12 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 // peer did not take: refused on the wire (step 6's rules), or not
 // delivered. The operator is told that, not a time-out.
 func requestConfig(ar *AgentRegistry, agent *Agent, zone string, subtype string, msgQs *MsgQs) (*ConfigResponseMsg, error) {
+	return requestConfigWith(ar, agent, zone, subtype, nil, msgQs)
+}
+
+// requestConfigWith is requestConfig with records that say what is asked
+// for (the instructions RFI's serial and digest, plan S7).
+func requestConfigWith(ar *AgentRegistry, agent *Agent, zone string, subtype string, records map[string][]string, msgQs *MsgQs) (*ConfigResponseMsg, error) {
 	if msgQs == nil {
 		lgEngine.Warn("RequestAndWaitForConfig: no MsgQs available")
 		return nil, fmt.Errorf("this agent has no message queues")
@@ -596,6 +602,7 @@ func requestConfig(ar *AgentRegistry, agent *Agent, zone string, subtype string,
 		Zone:           ZoneName(zone),
 		RfiType:        "CONFIG",
 		RfiSubtype:     subtype,
+		Records:        records,
 		DistributionID: distributionID,
 		Nonce:          nonce,
 	})
@@ -980,33 +987,26 @@ func ourHsyncIdentities(mp *MultiProviderConf) []string {
 	return ids
 }
 
-// instructions are the instructions mpzd's decisions read: for the zone as
-// served here, its active instructions (instructionsFor); for a copy wrapped
-// for analysis, the incoming copy at a refresh, the reading of that copy. On
-// a combiner that holds a hand-over, what it was handed, for both, unless
-// the copy is newer (actsBy).
+// instructions are the instructions mpzd's decisions read, for the zone as
+// served here and for a copy wrapped for analysis (the incoming copy at a
+// refresh) alike: the store's active instructions (instructionsFor), since
+// from the thaw a newer copy is held, not acted on (plan S7). Where the
+// store keeps none, or a record from before S7, the reading of the copy. On
+// a combiner or a signer that holds a hand-over, what it was handed.
 func (mpzd *MPZoneData) instructions() *Instructions {
-	// A combiner acts by what its agent handed it, for the zone as served
-	// and for a copy being analysed alike, unless that copy is newer (S10).
 	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	if in := actingHeld.Load().reading(mpzd.ZoneName, apex); in != nil {
-		return in
-	}
-	if mpzd.served() {
-		return activeOr(mpzd.ZoneName, apex)
-	}
-	return readingOf(apex)
+	return activeOr(mpzd.ZoneName, apex)
 }
 
-// roles are the sets mpzd's decisions read: the zone's current step's for
-// the zone as served here, its copy's for one wrapped for analysis.
+// roles are the sets mpzd's decisions read: the zone's current step's, for
+// the zone as served here and for a copy wrapped for analysis alike; where
+// the store keeps no enforced record, the copy's.
 func (mpzd *MPZoneData) roles() Roles {
-	apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-	if handed, ok := actingHeld.Load().roles(mpzd.ZoneName, apex); ok {
-		return handed // a combiner's, as instructions
+	if handed, ok := actingHeld.Load().roles(mpzd.ZoneName); ok {
+		return handed // a combiner's or a signer's, as instructions
 	}
 	var r Roles
-	if from, to, step := instrStore.Load().transition(mpzd.ZoneName); mpzd.served() && to != nil {
+	if from, to, step := instrStore.Load().transition(mpzd.ZoneName); to != nil {
 		r = rolesFor(from, to, step)
 	} else {
 		in := mpzd.instructions()
@@ -1029,13 +1029,6 @@ func (mpzd *MPZoneData) labelOf(identities ...string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// served: mpzd is the zone as tdns serves it here, not a copy wrapped for
-// analysis.
-func (mpzd *MPZoneData) served() bool {
-	zd, ok := tdns.Zones.Get(mpzd.ZoneName)
-	return ok && zd == mpzd.ZoneData
 }
 
 // matchHsyncIdentity checks whether any of our identities has an ON HSYNC3
@@ -1379,25 +1372,26 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			kdb = mpzd.KeyDB
 		}
 		newApex, _ := new_zd.OwnerForAnalysis(new_zd.ZoneName)
+		newMpzd := &MPZoneData{
+			ZoneData:  new_zd,
+			MP:        &MPState{},
+			MPOptions: make(map[tdns.ZoneOption]bool),
+		}
 		// A combiner or signer that holds a hand-over signs by the set
-		// handed, not by the incoming copy, unless that copy is newer (S10,
-		// S11). A signer that waits for its agent's hand-over signs by the
-		// set it last signed by, unchanged by its copy, where it has one
-		// (rule 5).
-		signing, handed := actingHeld.Load().signingSet(mpzd.ZoneName, newApex)
+		// handed, not by the incoming copy (S10, S11). A signer that waits
+		// for its agent's hand-over signs by the set it last signed by,
+		// unchanged by its copy, where it has one (rule 5). Every other role
+		// advances its signing set by the instructions it acts by: the
+		// active ones, from the thaw (S7), not a newer copy.
+		signing, handed := actingHeld.Load().signingSet(mpzd.ZoneName)
 		if !handed && tdns.Globals.App.Type == AppTypeMPSigner && signerWaits(mpzd.ZoneName, newApex) {
 			signing, handed = mpzd.lastSigningSet(kdb)
 		}
 		if !handed {
 			var changed bool
-			if signing, changed = mpzd.advanceSigningSet(newApex, kdb); changed {
+			if signing, changed = mpzd.advanceSigningSet(newMpzd.instructions(), kdb); changed {
 				mpzd.MP.SigningChanged = true
 			}
-		}
-		newMpzd := &MPZoneData{
-			ZoneData:  new_zd,
-			MP:        &MPState{},
-			MPOptions: make(map[tdns.ZoneOption]bool),
 		}
 		newMpzd.populateMPdata(mp, signing)
 		// under the zone's lock, as a hand-over sets the two
@@ -1413,8 +1407,7 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 	// set: the ones its signers= names, and those leaving it (#147).
 	if mpzd.MP.MPdata != nil && tdns.Globals.App.Type == AppTypeMPSigner {
 		others := mpzd.MP.MPdata.Signing.others(mpzd.MP.MPdata.OurLabel)
-		newApex, _ := new_zd.OwnerForAnalysis(new_zd.ZoneName)
-		if handed, ok := actingHeld.Load().roles(mpzd.ZoneName, newApex); ok {
+		if handed, ok := actingHeld.Load().roles(mpzd.ZoneName); ok {
 			others = othersIn(handed.KeySigners, labelOfIdentity(handed, ourHsyncIdentities(mp)))
 		}
 		_, resign = mpzd.signerSwitch(new_zd, others, mp)
@@ -1748,7 +1741,8 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 
 	// The hook at activation (plan S3), from the zone's active instructions
 	// before the refresh and after it: the post-refresh callback has noted
-	// the copy first, and until S7 the active serial follows it. It runs at
+	// the copy first, which from S7 moves the active serial only at a
+	// zone's first record (the thaw moves it after that). It runs at
 	// every first load, whatever the store holds, and at every change of the
 	// active instructions; a refresh that changes nothing else of them (a
 	// TTL, an order, an OFF record's fields) runs nothing.
@@ -1799,7 +1793,10 @@ func (mpzd *MPZoneData) onActiveChanged(tm *MPTransportBridge, from, to *Instruc
 		zone := ZoneName(mpzd.ZoneName)
 		if lem := ar.LeaderElectionManager; lem != nil {
 			switch {
-			case mpzd.Options[tdns.OptParentSync] && hasHSYNC3(to):
+			case mpzd.Options[tdns.OptMultiProvider] && hasHSYNC3(to):
+				// every group with two or more voting members elects,
+				// whatever its parentsync: transitions need a leader
+				// (design 3, plan S7)
 				lem.zoneChanged(zone)
 			case mpzd.Options[tdns.OptMultiProvider] && !hasHSYNC3(to):
 				// The owner removed every provider's record: nobody
