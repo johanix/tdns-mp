@@ -68,6 +68,9 @@ type zoneSerials struct {
 	From      *heldSerial  `json:"from,omitempty"` // thawed from, until "done"
 	Held      []heldSerial `json:"held,omitempty"` // above Active, lowest first
 	LastThaw  *Thaw        `json:"last_thaw,omitempty"`
+	// Follows: the active serial is the copy's, taken by the not-built
+	// fallback (notBuiltOnly), and why; "" once a thaw moves it.
+	Follows string `json:"follows,omitempty"`
 	// LastFrom is the last thaw's from-serial, kept after "done" until the
 	// next thaw, so that a member behind the thaw can fetch it here (the
 	// instructions RFI, plan S7).
@@ -508,6 +511,18 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 		// restart rule makes one known (S9).
 		if z.Active != nil {
 			s.judge(zone, z.Active, &h)
+			// Refused only for kinds whose steps are not built, with no owner
+			// error and no transition under way, the zone follows its copy as
+			// before S7: the serial is made active here, with nothing frozen
+			// or thawed for it. Each kind leaves this as its step lands
+			// (builtKinds).
+			if why := notBuiltOnly(h.Refused); why != "" && z.OwnerError == "" && z.From == nil && len(z.Removals) == 0 {
+				h.Refused = nil
+				z.Active, z.Follows = &h, why
+				z.dropAtOrBelow(h.Serial)
+				s.judged(zone, z)
+				return nil
+			}
 		}
 		z.Held = append(z.Held, h)
 		return nil
@@ -523,6 +538,19 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 }
 
 var errEndOfService = errors.New("the zone's instructions are gone")
+
+// notBuiltOnly is the reasons of refused, joined, when every one is a kind
+// whose step is not built or cannot be carried out yet; "" otherwise.
+func notBuiltOnly(refused []Refusal) string {
+	var why []string
+	for _, r := range refused {
+		if r.Code != RefusedNotBuilt && r.Code != RefusedStepMissing {
+			return ""
+		}
+		why = append(why, r.Reason)
+	}
+	return strings.Join(why, "; ")
+}
 
 // Activate makes the thaw's target the zone's active serial (S7). It
 // succeeds only when the target is held, above the active serial and not
@@ -564,7 +592,7 @@ func (s *InstructionStore) Activate(zone string, thaw Thaw) error {
 		z.dropAtOrBelow(t.Serial)
 		s.judged(zone, z)
 		z.Step, z.Removals = 0, nil
-		z.LastThaw = &thaw
+		z.LastThaw, z.Follows = &thaw, ""
 		z.Enforced = true
 		return nil
 	})
@@ -833,6 +861,7 @@ type InstructionsStatus struct {
 	CopyError  string        `json:"copy_error,omitempty"`
 	From       *SerialDigest `json:"from,omitempty"`
 	LastThaw   *Thaw         `json:"last_thaw,omitempty"`
+	Follows    string        `json:"follows,omitempty"`
 	OwnerError string        `json:"owner_error,omitempty"`
 	Enforced   bool          `json:"enforced"`
 	Removals   []Removal     `json:"removals,omitempty"`
@@ -857,6 +886,7 @@ func (s *InstructionStore) Status(zone string) *InstructionsStatus {
 		Copy:       z.Copy,
 		CopyError:  z.CopyError,
 		LastThaw:   z.LastThaw,
+		Follows:    z.Follows,
 		OwnerError: z.OwnerError,
 		Enforced:   z.Enforced,
 		Removals:   slices.Clone(z.Removals),
@@ -911,6 +941,9 @@ func (st *InstructionsStatus) Line() string {
 	}
 	parts = append(parts, fmt.Sprintf("copy %d", st.Copy.Serial))
 	line := strings.Join(parts, ", ")
+	if st.Follows != "" {
+		line = "follows the copy: " + st.Follows + "; " + line
+	}
 	if r := st.refusedLine(); r != "" {
 		line = r + "; " + line
 	}
