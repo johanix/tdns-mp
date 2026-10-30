@@ -32,6 +32,58 @@ type MsgStamp = hsync.MsgStamp
 // confirmApp is what tdns-mp carries in a confirmation's application field.
 type confirmApp struct {
 	Instr *MsgStamp `json:"instr,omitempty"` // the confirmer's stamp
+	// Acting is the combiner's: the serial it acts by (plan S8). It is no
+	// member's telling, so never "instr": a combiner acting by an older
+	// serial would read as an owner error.
+	Acting *ActingStamp `json:"acting,omitempty"`
+}
+
+// ActingStamp is the serial a combiner acts by, as its confirmations tell
+// it: what its agent last handed it, by serial, digest and step.
+type ActingStamp struct {
+	Serial uint32 `json:"serial"`
+	Digest string `json:"digest"`
+	Step   int    `json:"step"`
+}
+
+// actingStampOf is the stamp of a hand-over; nil for none.
+func actingStampOf(h *ActingHandover) *ActingStamp {
+	if h == nil {
+		return nil
+	}
+	return &ActingStamp{Serial: h.Serial, Digest: h.Digest, Step: h.Step}
+}
+
+// names: the stamp names the hand-over h, by serial, digest and step.
+func (a *ActingStamp) names(h *ActingHandover) bool {
+	return h != nil && a.Serial == h.Serial && a.Digest == h.Digest && a.Step == h.Step
+}
+
+// actingAppFor is the application field of a combiner's confirmation for
+// zone: the serial it acts by; nil while it was handed nothing for it.
+func actingAppFor(zone string) json.RawMessage {
+	held, ok := actingHeld.Load().get(zone)
+	if !ok {
+		return nil
+	}
+	b, err := json.Marshal(confirmApp{Acting: actingStampOf(held.handover)})
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// confirmActing is the serial a combiner's confirmation says it acts by;
+// nil with none, or one that does not parse.
+func confirmActing(app json.RawMessage) *ActingStamp {
+	if len(app) == 0 {
+		return nil
+	}
+	var ca confirmApp
+	if err := json.Unmarshal(app, &ca); err != nil {
+		return nil
+	}
+	return ca.Acting
 }
 
 // messageStamp is this agent's stamp of zone for a message it sends now:
@@ -174,6 +226,20 @@ func (t *stampTable) sent(distID, recipient, zone string, ms *MsgStamp) {
 	if len(t.dists) > distStampsKept {
 		t.pruneDistsLocked()
 	}
+}
+
+// sentStamp is this agent's stamp at its latest send of distribution
+// distID to recipient; nil when none is recorded.
+func (t *stampTable) sentStamp(distID, recipient string) *MsgStamp {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if d := t.dists[distKey(distID, recipient)]; d != nil {
+		return d.Sent
+	}
+	return nil
 }
 
 // laterStamp reports whether a member stamped a after b: in a later start,
