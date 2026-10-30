@@ -1224,13 +1224,17 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 		}
 	}
 	// A withdrawal is the named provider's update, delivered by the leader
-	// that sent it (plan S16). Only a sync is one: any other message keeps
-	// its authenticated sender, and the field is dropped.
+	// that sent it (plan S16). An agent's update to its combiner, already
+	// in the provider's name, keeps the field as the combiner's flag. Any
+	// other message keeps its authenticated sender, and the field is
+	// dropped.
 	originator := senderID
 	if payload.Withdraw != nil {
-		if messageType == AgentMsgNotify {
+		switch messageType {
+		case AgentMsgNotify:
 			originator = payload.Withdraw.Provider
-		} else {
+		case AgentMsg("update"):
+		default:
 			payload.Withdraw = nil
 		}
 	}

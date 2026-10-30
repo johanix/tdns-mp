@@ -1306,7 +1306,7 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		// published here: the word is PARTIAL and names the keys that are
 		// held, as on the other paths (heldSuccess).
 		var message string
-		status, message, appliedRecords = zdr.heldSuccess(prc.Zone, AgentId(prc.OriginatingSender), prc.DnskeyOps, status, detail.Message, appliedRecords)
+		status, message, appliedRecords = zdr.heldSuccess(prc.Zone, prc.Origin, prc.DnskeyOps, status, detail.Message, appliedRecords)
 
 		lgEngine.Info("triggering remote confirmation", "source", source, "originDistID", prc.OriginatingDistID, "to", prc.OriginatingSender, "status", status, "applied", len(appliedRecords), "ignored", len(ignoredRecords))
 		remoteDetail := &RemoteConfirmationDetail{
@@ -1547,7 +1547,7 @@ func (zdr *ZoneDataRepo) heldRecords(zone ZoneName, agentId AgentId, ops []core.
 // confirmation (SUCCESS or IGNORED) with no record lists.
 func (zdr *ZoneDataRepo) reconstructRecordsFromRepo(prc *PendingRemoteConfirmation) []string {
 	var records []string
-	agentId := AgentId(prc.OriginatingSender)
+	agentId := prc.Origin
 	if agentRepo, ok := zdr.Repo.Get(prc.Zone); ok {
 		if nod, ok := agentRepo.Get(agentId); ok {
 			for _, rrtype := range nod.RRtypes.Keys() {
@@ -1833,6 +1833,7 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 						zdr.PendingRemoteConfirms[distID] = &PendingRemoteConfirmation{
 							OriginatingDistID: synchedDataUpdate.OriginatingDistID,
 							OriginatingSender: string(synchedDataUpdate.answerTo()),
+							Origin:            synchedDataUpdate.AgentId,
 							Mechanism:         synchedDataUpdate.Mechanism,
 							Zone:              synchedDataUpdate.Zone,
 							CreatedAt:         time.Now(),

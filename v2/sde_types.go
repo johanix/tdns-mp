@@ -223,9 +223,13 @@ type replaceOrigin struct {
 type PendingRemoteConfirmation struct {
 	OriginatingDistID string
 	OriginatingSender string
-	Mechanism         string
-	Zone              ZoneName
-	CreatedAt         time.Time
+	// Origin is whose records the update carries: its agent, and for the
+	// leader's withdrawal the provider, while OriginatingSender is the
+	// leader its answer goes to (plan S16)
+	Origin    AgentId
+	Mechanism string
+	Zone      ZoneName
+	CreatedAt time.Time
 	// StaleHeld: the records of the update's stale replaces that the repo
 	// holds. They did not go to the combiner; the confirmation to the
 	// sender names them beside what the combiner applied.
