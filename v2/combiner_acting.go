@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -325,7 +326,7 @@ func (conf *Config) combinerTakeHandover(msg *AgentMsgPostPlus, localAgents map[
 		store.owe(zone, actErr != nil)
 	}
 	if h.Refresh {
-		conf.refreshFromUpstream(mpzd)
+		conf.refreshFromUpstream(mpzd, lgCombiner)
 	}
 	if actErr != nil {
 		// Held and judged by, not served: said so, as a contribution's
@@ -353,7 +354,10 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 		signing = nextSigningSetOf(mpzd.instructions(), mpzd.signingSet())
 	}
 	// Computed on a wrapper of the zone as served, with a map of its own:
-	// the zone's options map is read without a lock.
+	// the zone's options map is read without a lock. One refresh or
+	// hand-over at a time (mpDataLock).
+	mpMu := mpDataLock(mpzd.ZoneName)
+	mpMu.Lock()
 	mpzd.Lock()
 	mpzd.EnsureMP()
 	opts := make(map[tdns.ZoneOption]bool, len(mpzd.MPOptions))
@@ -371,6 +375,7 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 	mpzd.RebuildCombinerData()
 	allow := mpzd.MPOptions[tdns.OptAllowEdits]
 	mpzd.Unlock()
+	mpMu.Unlock()
 	var combineErr error
 	if allow {
 		if _, combineErr = mpzd.CombineWithLocalChanges(); combineErr != nil {
@@ -404,16 +409,17 @@ func handedOrigin(r Roles, origin string, rrtype uint16) bool {
 	})
 }
 
-// refreshFromUpstream asks for a refresh of the zone from the combiner's
-// upstream (the hand-over's Refresh: the fetch down the provider's chain,
-// design 3.1). One already asked for is enough.
-func (conf *Config) refreshFromUpstream(mpzd *MPZoneData) {
+// refreshFromUpstream asks for a refresh of the zone from the combiner's or
+// the signer's upstream (the hand-over's Refresh: the fetch down the
+// provider's chain, design 3.1), logged by the part's logger. One already
+// asked for is enough.
+func (conf *Config) refreshFromUpstream(mpzd *MPZoneData, lg *slog.Logger) {
 	zr := tdns.ZoneRefresher{Name: mpzd.ZoneName, ZoneType: mpzd.ZoneType, ZoneStore: mpzd.ZoneStore}
 	select {
 	case conf.Config.Internal.RefreshZoneCh <- zr:
-		lgCombiner.Info("refreshing the zone from upstream, as the agent asks", "zone", mpzd.ZoneName)
+		lg.Info("refreshing the zone from upstream, as the agent asks", "zone", mpzd.ZoneName)
 	default:
-		lgCombiner.Warn("the refresh engine's queue is full; the agent asks again", "zone", mpzd.ZoneName)
+		lg.Warn("the refresh engine's queue is full; the agent asks again", "zone", mpzd.ZoneName)
 	}
 }
 

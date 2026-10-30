@@ -96,13 +96,17 @@ type syncWirePayload struct {
 
 // keystateWirePayload is the KEYSTATE message as it goes on the wire:
 // tdns's core.AgentKeystatePost, whose fields it encodes under their own
-// names, and beside them the one field tdns-mp adds (S7). An older receiver
-// decodes the post and ignores the field; DnsKeystatePayload decodes both.
+// names, and beside them the fields tdns-mp adds (S7, S11). An older receiver
+// decodes the post and ignores them; DnsKeystatePayload decodes both.
 type keystateWirePayload struct {
 	*core.AgentKeystatePost
-	ForeignSpoken []string `json:"ForeignSpoken,omitempty"`
-	Resend        []uint16 `json:"Resend,omitempty"`
-	Hold          bool     `json:"Hold,omitempty"` // S6
+	ForeignSpoken []string            `json:"ForeignSpoken,omitempty"`
+	Resend        []uint16            `json:"Resend,omitempty"`
+	Acting        *ActingHandover     `json:"Acting,omitempty"`
+	NotSigning    bool                `json:"NotSigning,omitempty"`
+	Rollover      bool                `json:"Rollover,omitempty"`
+	WaitsOn       map[uint16][]string `json:"WaitsOn,omitempty"`
+	Hold          bool                `json:"Hold,omitempty"` // S6
 }
 
 // keystateAppMessage mirrors DNSTransport.Keystate (core.AgentKeystatePost).
@@ -137,6 +141,10 @@ func keystateAppMessage(req *PeerKeystateRequest, peerID string) (*transport.App
 		},
 		ForeignSpoken: req.ForeignSpoken,
 		Resend:        req.Resend,
+		Acting:        req.Acting,
+		NotSigning:    req.NotSigning,
+		Rollover:      req.Rollover,
+		WaitsOn:       req.WaitsOn,
 		Hold:          req.Hold,
 	}
 	b, err := json.Marshal(payload)

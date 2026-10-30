@@ -834,6 +834,6 @@ func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack b
 		mpzd.populateMPdata(conf.MpConfig(), nextSigningSetOf(mpzd.instructions(), mpzd.signingSet()))
 	}
 	givenBack = conf.followParentSyncParam(mpzd)
-	conf.handOverToCombiner(mpzd.ZoneName) // the agent's combiner acts by the sets too (S10)
+	conf.handOverToParts(mpzd.ZoneName) // the agent's combiner and signer act by the sets too (S10, S11)
 	return givenBack
 }

@@ -428,6 +428,12 @@ refuses a validity at or below 2 × (largest served TTL +
 production use days rather than hours, with a propagation
 delay that matches your secondaries.
 
+`agents:` lists exactly one agent, the provider's own, as for
+the combiner. The signer signs by the zone's instructions as
+that agent hands them to it, not by its own copy of the zone,
+and it refuses to start with more than one agent ("a
+multi-provider signer has more than one agent").
+
 ### 4.4 Agent Configuration
 
 `/etc/tdns/tdns-mpagent.yaml`:

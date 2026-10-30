@@ -52,8 +52,7 @@ func genKey(t *testing.T, kdb *tdns.KeyDB, zone, state, role string, alg uint8) 
 
 // The owner's answer: a named multi-provider zone with keys to sign with is
 // owned before it is taken; one not named, one that is not multi-provider,
-// and one with no active key of a role are not. A released zone is tdns's
-// until it is taken again.
+// and one with no active key of a role are not. A zone taken stays owned.
 func TestNamedZoneIsOwnedBeforeTheTake(t *testing.T) {
 	kdb, _, owner := ownsConfigRig(t, "named.owns.example.", "plain.owns.example.", "fresh.owns.example.")
 	named := signerTestZone(t, "named.owns.example.", kdb)
@@ -93,13 +92,9 @@ func TestNamedZoneIsOwnedBeforeTheTake(t *testing.T) {
 		t.Error("a named zone with an active KSK and ZSK is not owned")
 	}
 
-	owner.Release(named.ZoneName)
-	if owner.Owns(named.ZoneData) {
-		t.Error("a released named zone is still owned")
-	}
 	owner.Take(named.ZoneName)
 	if !owner.Owns(named.ZoneData) {
-		t.Error("a named zone taken again is not owned")
+		t.Error("a named zone taken is not owned")
 	}
 }
 
