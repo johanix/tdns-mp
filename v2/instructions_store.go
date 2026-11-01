@@ -894,7 +894,6 @@ func (s *InstructionStore) Status(zone string) *InstructionsStatus {
 		Copy:       z.Copy,
 		CopyError:  z.CopyError,
 		LastThaw:   z.LastThaw,
-		Follows:    z.Follows,
 		OwnerError: z.OwnerError,
 		Enforced:   z.Enforced,
 		Removals:   slices.Clone(z.Removals),
@@ -902,6 +901,10 @@ func (s *InstructionStore) Status(zone string) *InstructionsStatus {
 	if z.Active != nil {
 		a := z.Active.SerialDigest
 		st.Active = &a
+		// the zone follows its copy only while the active serial is the copy
+		if a == z.Copy {
+			st.Follows = z.Follows
+		}
 	}
 	if h := z.highest(); h != nil {
 		n := h.SerialDigest

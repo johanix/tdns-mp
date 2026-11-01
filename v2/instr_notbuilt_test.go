@@ -35,6 +35,33 @@ func TestANotBuiltChangeIsFollowed(t *testing.T) {
 	}
 }
 
+// The status says the zone follows the copy only while it does: a newer copy
+// that is not followed, accepted or refused, ends the line (CodeRabbit on
+// tdns-mp #350).
+func TestAFollowedSerialIsNotReportedOnceTheCopyMoves(t *testing.T) {
+	for _, c := range []struct{ name, to string }{
+		{"accepted", `3600 IN HSYNCPARAM serial="9" servers="alpha" signers="alpha" suffix="x"`},
+		{"refused", `3600 IN HSYNCPARAM serial="9" servers="alpha,zulu" signers="alpha"`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newStore(t)
+			notBuiltFrom(t, s)
+			s.Note(storeZone, readOf(t, instrBase[0], instrBase[1], `3600 IN HSYNCPARAM serial="8" servers="alpha" signers="alpha"`), nil)
+			if st := status(t, s, storeZone); st.Follows == "" {
+				t.Fatalf("8 is not followed: %s", st.Line())
+			}
+			s.Note(storeZone, readOf(t, instrBase[0], instrBase[1], c.to), nil)
+			st := status(t, s, storeZone)
+			if st.Active == nil || st.Active.Serial != 8 || st.Copy.Serial != 9 {
+				t.Fatalf("active %s, copy %d", serialOf(st.Active), st.Copy.Serial)
+			}
+			if st.Follows != "" || strings.Contains(st.Line(), "follows the copy") {
+				t.Errorf("active 8, copy 9, and the status says: %s", st.Line())
+			}
+		})
+	}
+}
+
 // An owner error is still held: after the zone followed a not-built change
 // to 8, the owner's edit of 8 without a raised serial is not acted on.
 func TestAnOwnerErrorIsHeldAfterTheNotBuiltFallback(t *testing.T) {
