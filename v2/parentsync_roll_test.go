@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -393,52 +394,153 @@ func TestAMemberWithNoRoleIsNotHandedTheRolledKey(t *testing.T) {
 	}
 }
 
-// A member that takes the leader's KEY keeps it and no other: a KEY held
-// under another name goes from its data, and the combiner is asked to drop
-// it.
-func TestAMemberKeepsTheLeadersKEYAndNoOther(t *testing.T) {
-	const zone ZoneName = "roll.onekey.example."
-	zdr, _ := NewZoneDataRepo()
-	ar, _ := NewAgentRepo()
-	zdr.Repo.Set(zone, ar)
-	keyOf := func(origin AgentId, rr string) {
-		od := tdns.NewOwnerData(string(zone))
-		k, err := dns.NewRR(rr)
+// keyPurgeRig: a member's data with the KEY of the leader, the other
+// provider, and one under an earlier leader's name; the sends to the
+// combiner are noted, and fail while failSends is set.
+type keyPurgeRig struct {
+	*rollRig
+	zdr       *ZoneDataRepo
+	ar        *AgentRepo
+	sends     []string
+	failSends bool
+}
+
+const earlierLeader AgentId = "agent.earlier.example."
+
+func newKeyPurgeRig(t *testing.T, zone string) *keyPurgeRig {
+	t.Helper()
+	r := &keyPurgeRig{rollRig: newRollRig(t, zone)}
+	r.leader(r.them)
+	r.zdr, _ = NewZoneDataRepo()
+	r.ar, _ = NewAgentRepo()
+	r.zdr.Repo.Set(r.zone, r.ar)
+	keyOf := func(origin AgentId, public string) {
+		od := tdns.NewOwnerData(string(r.zone))
+		k, err := dns.NewRR(string(r.zone) + " 3600 IN KEY 256 3 15 " + public)
 		if err != nil {
 			t.Fatal(err)
 		}
 		od.RRtypes.Set(dns.TypeKEY, core.RRset{RRs: []dns.RR{k}})
-		ar.Set(origin, od)
+		r.ar.Set(origin, od)
 	}
-	keyOf("agent.leader.example.", string(zone)+" 3600 IN KEY 256 3 15 l+upbn5Hdg/DHyxYVZNmqKpkbfD+PG3sXrqg1ozR6Fs=")
-	keyOf("agent.earlier.example.", string(zone)+" 3600 IN KEY 256 3 15 yXLRWnJ7mgKYUMxkKMTQ9wjCzX4jUQyqzzhJAo+AkIk=")
-	var purged []AgentId
-	saved := purgeKEYsAtCombiner
-	purgeKEYsAtCombiner = func(_ *MPTransportBridge, _ ZoneName, origins []AgentId) { purged = append(purged, origins...) }
-	t.Cleanup(func() { purgeKEYsAtCombiner = saved })
+	keyOf(r.them, "l+upbn5Hdg/DHyxYVZNmqKpkbfD+PG3sXrqg1ozR6Fs=")
+	keyOf(earlierLeader, "yXLRWnJ7mgKYUMxkKMTQ9wjCzX4jUQyqzzhJAo+AkIk=")
+	saved := sendKEYPurge
+	sendKEYPurge = func(_ *MPTransportBridge, _ ZoneName, origin AgentId, distID string) error {
+		if origin != earlierLeader {
+			t.Errorf("the combiner is asked to drop the KEY of %s", origin)
+		}
+		r.sends = append(r.sends, distID)
+		if r.failSends {
+			return errors.New("the queue is full")
+		}
+		return nil
+	}
+	t.Cleanup(func() { sendKEYPurge = saved })
+	return r
+}
 
-	// nothing is dropped before the leader's own KEY is here
-	(&Config{}).dropOtherKEYs(zdr, zone, "agent.nokey.example.")
-	if od, _ := ar.Get("agent.earlier.example."); od == nil || len(od.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs) != 1 {
-		t.Fatal("a KEY was dropped for a leader whose own KEY is not here")
+func (r *keyPurgeRig) holds(origin AgentId) bool {
+	od, ok := r.ar.Get(origin)
+	return ok && od != nil && len(od.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs) > 0
+}
+
+// dueAgain makes the request for the earlier leader's drop due, as time
+// passing would.
+func (r *keyPurgeRig) dueAgain() {
+	b := &r.conf.InternalMp.MPTransport.keyPurges
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if s := b.sent[purgeKey(r.zone, earlierLeader)]; s != nil {
+		s.at = time.Time{}
 	}
-	(&Config{}).dropOtherKEYs(zdr, zone, "agent.leader.example.")
-	if od, _ := ar.Get("agent.leader.example."); od == nil || len(od.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs) != 1 {
+}
+
+// A member that takes the leader's KEY keeps it and no other: the combiner
+// is asked to drop a KEY held under another name, by S16's flagged removal,
+// and it goes from the data once the combiner has.
+func TestAMemberKeepsTheLeadersKEYAndNoOther(t *testing.T) {
+	r := newKeyPurgeRig(t, "roll.onekey.example.")
+	// nothing is asked before the leader's own KEY is here
+	r.conf.dropOtherKEYs(r.zdr, r.zone, "agent.nokey.example.")
+	if len(r.sends) != 0 || !r.holds(earlierLeader) {
+		t.Fatalf("for a leader whose own KEY is not here: %d sends, earlier KEY held %v", len(r.sends), r.holds(earlierLeader))
+	}
+	r.conf.dropOtherKEYs(r.zdr, r.zone, r.them)
+	if len(r.sends) != 1 {
+		t.Fatalf("the combiner was asked %d times", len(r.sends))
+	}
+	r.conf.InternalMp.MPTransport.keyPurges.heard(r.sends[0], "SUCCESS", "", false)
+	r.conf.retryKEYPurges(r.zdr)
+	if !r.holds(r.them) {
 		t.Error("the leader's KEY is gone")
 	}
-	if od, _ := ar.Get("agent.earlier.example."); od == nil {
-		t.Fatal("the earlier origin's data is gone")
-	} else if _, has := od.RRtypes.Get(dns.TypeKEY); has {
-		t.Error("a KEY under another name than the leader's is kept")
-	}
-	if !slices.Equal(purged, []AgentId{"agent.earlier.example."}) {
-		t.Errorf("the combiner is asked to drop the KEYs of %v", purged)
+	if r.holds(earlierLeader) {
+		t.Error("a KEY under another name than the leader's is kept after the combiner dropped it")
 	}
 	// the drop at the combiner is S16's flagged removal in the origin's name
-	zu := keyPurge(zone, "agent.earlier.example.")
-	if zu.Withdraw == nil || zu.AgentId != "agent.earlier.example." || len(zu.Operations) != 1 ||
+	zu := keyPurge(r.zone, earlierLeader)
+	if zu.Withdraw == nil || zu.AgentId != earlierLeader || len(zu.Operations) != 1 ||
 		zu.Operations[0].Operation != "replace" || zu.Operations[0].RRtype != "KEY" || len(zu.Operations[0].Records) != 0 {
 		t.Errorf("the combiner's drop: %+v", zu)
+	}
+}
+
+// A drop the combiner has not made is asked for again until it has: after a
+// send that failed, a refusal, and a restart that lost the book. Until then
+// the KEY stays in the data, the record of what is owed.
+func TestAKEYPurgeIsAskedForAgainUntilTheCombinerHasMadeIt(t *testing.T) {
+	r := newKeyPurgeRig(t, "roll.purgeagain.example.")
+	book := &r.conf.InternalMp.MPTransport.keyPurges
+
+	r.failSends = true
+	r.conf.dropOtherKEYs(r.zdr, r.zone, r.them)
+	if len(r.sends) != 1 || !r.holds(earlierLeader) {
+		t.Fatalf("after a failed send: %d sends, KEY held %v", len(r.sends), r.holds(earlierLeader))
+	}
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 1 {
+		t.Errorf("the tick asked again within roll-retry: %d sends", len(r.sends))
+	}
+	r.failSends = false
+	r.dueAgain()
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 2 || r.sends[1] == r.sends[0] {
+		t.Fatalf("the tick after the failed send: %v", r.sends)
+	}
+
+	book.heard(r.sends[1], "PENDING", "", false)
+	book.heard(r.sends[1], "REJECTED", "not now", true) // at another serial: no final word
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 2 || !r.holds(earlierLeader) {
+		t.Fatalf("with no final word: %d sends, KEY held %v", len(r.sends), r.holds(earlierLeader))
+	}
+	book.heard(r.sends[1], "REJECTED", "not now", false)
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 3 || !r.holds(earlierLeader) {
+		t.Fatalf("after a refusal: %d sends, KEY held %v", len(r.sends), r.holds(earlierLeader))
+	}
+
+	book.forget(r.zone, earlierLeader) // the restart
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 4 {
+		t.Fatalf("after a restart: %d sends", len(r.sends))
+	}
+	book.heard(r.sends[0], "SUCCESS", "", false) // a word on an earlier request
+	r.conf.retryKEYPurges(r.zdr)
+	if !r.holds(earlierLeader) {
+		t.Fatal("a word on an earlier request dropped the KEY")
+	}
+
+	book.heard(r.sends[3], "SUCCESS", "", false)
+	r.conf.retryKEYPurges(r.zdr)
+	if r.holds(earlierLeader) {
+		t.Error("the KEY is kept after the combiner dropped it")
+	}
+	r.dueAgain()
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 4 {
+		t.Errorf("asked again once dropped: %d sends", len(r.sends))
 	}
 }
 

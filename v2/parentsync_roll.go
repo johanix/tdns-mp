@@ -927,11 +927,14 @@ func (conf *Config) rollLine(kdb *tdns.KeyDB, zone ZoneName) string {
 
 // dropOtherKEYs is a member's word on taking the leader's KEY: it keeps the
 // leader's KEY and no other (plan S17a, the third KEY item of the membership
-// plan's step 9). A KEY held under another name is dropped from its data
-// and at its combiner (purgeKEYsAtCombiner). On the engine's goroutine,
-// which owns the repo.
+// plan's step 9). The combiner is asked to drop a KEY held under another
+// name, and the KEY leaves this agent's data once it has: until then the data
+// is the record of what is owed, and the tick asks again (retryKEYPurges).
+// After a restart the combiner's own read gives such a KEY back, so nothing
+// else is kept on disk. On the engine's goroutine, which owns the repo.
 func (conf *Config) dropOtherKEYs(zdr *ZoneDataRepo, zone ZoneName, leader AgentId) {
-	if zdr == nil {
+	tm := conf.InternalMp.MPTransport
+	if zdr == nil || tm == nil {
 		return
 	}
 	ar, ok := zdr.Repo.Get(zone)
@@ -942,9 +945,10 @@ func (conf *Config) dropOtherKEYs(zdr *ZoneDataRepo, zone ZoneName, leader Agent
 	if od, ok := ar.Data.Get(leader); !ok || od == nil || od.RRtypes == nil || len(od.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs) == 0 {
 		return
 	}
-	var dropped []AgentId
+	every := rollRetryFor(conf.MpConfig())
 	for _, id := range ar.Data.Keys() {
 		if sameName(string(id), string(leader)) {
+			tm.keyPurges.forget(zone, id)
 			continue
 		}
 		od, ok := ar.Data.Get(id)
@@ -952,16 +956,53 @@ func (conf *Config) dropOtherKEYs(zdr *ZoneDataRepo, zone ZoneName, leader Agent
 			continue
 		}
 		if _, has := od.RRtypes.Get(dns.TypeKEY); !has {
+			tm.keyPurges.forget(zone, id)
 			continue
 		}
-		od.RRtypes.Delete(dns.TypeKEY)
-		zdr.removeTracking(zone, id, dns.TypeKEY)
-		dropped = append(dropped, id)
-		lgEngine.Info("a KEY held under another name than the leader's is dropped", "zone", zone, "origin", id, "leader", leader)
+		if tm.keyPurges.taken(zone, id) {
+			od.RRtypes.Delete(dns.TypeKEY)
+			zdr.removeTracking(zone, id, dns.TypeKEY)
+			tm.keyPurges.forget(zone, id)
+			lgEngine.Info("a KEY held under another name than the leader's is dropped", "zone", zone, "origin", id, "leader", leader)
+			continue
+		}
+		distID, due := tm.keyPurges.due(zone, id, every)
+		if !due {
+			continue
+		}
+		if err := sendKEYPurge(tm, zone, id, distID); err != nil {
+			lgEngine.Warn("the combiner could not be asked to drop a KEY held under another name, trying again", "zone", zone, "origin", id, "in", every, "err", err)
+			continue
+		}
+		lgEngine.Info("the combiner is asked to drop a KEY held under another name than the leader's", "zone", zone, "origin", id, "leader", leader)
 	}
-	if len(dropped) > 0 {
-		slices.Sort(dropped)
-		purgeKEYsAtCombiner(conf.InternalMp.MPTransport, zone, dropped)
+}
+
+// retryKEYPurges: the tick's word on the KEYs held under another name than
+// the zone's leader's: those the combiner has dropped go from the data, and
+// the others are asked for again when due. On the engine's goroutine.
+func (conf *Config) retryKEYPurges(zdr *ZoneDataRepo) {
+	lem := conf.InternalMp.LeaderElectionManager
+	if zdr == nil || lem == nil {
+		return
+	}
+	for _, zone := range zdr.Repo.Keys() {
+		ar, ok := zdr.Repo.Get(zone)
+		if !ok || ar == nil {
+			continue
+		}
+		holders := 0
+		for _, od := range ar.Data.Items() {
+			if od != nil && od.RRtypes != nil && len(od.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs) > 0 {
+				holders++
+			}
+		}
+		if holders < 2 {
+			continue
+		}
+		if leader, ok := lem.ZoneLeader(zone); ok {
+			conf.dropOtherKEYs(zdr, zone, leader)
+		}
 	}
 }
 
@@ -973,17 +1014,85 @@ func keyPurge(zone ZoneName, origin AgentId) *ZoneUpdate {
 	return (&Withdraw{Provider: string(origin), RRtype: "KEY"}).update(zone)
 }
 
-// purgeKEYsAtCombiner sends the combiner the drop of the KEYs held under
-// these origins' names; a test stands in for it.
-var purgeKEYsAtCombiner = func(tm *MPTransportBridge, zone ZoneName, origins []AgentId) {
-	if tm == nil {
+// sendKEYPurge sends the combiner the drop of origin's KEY under distID; a
+// test stands in for it.
+var sendKEYPurge = func(tm *MPTransportBridge, zone ZoneName, origin AgentId, distID string) error {
+	_, err := tm.EnqueueForCombiner(zone, keyPurge(zone, origin), distID)
+	return err
+}
+
+// keyPurgeBook: the drops of KEYs held under another name this agent asked
+// its combiner for, and whether it has made them. A leaf lock.
+type keyPurgeBook struct {
+	mu   sync.Mutex
+	sent map[keyPurgeKey]*keyPurgeSent
+}
+
+type keyPurgeKey struct {
+	zone   ZoneName
+	origin string
+}
+
+type keyPurgeSent struct {
+	distID  string
+	at      time.Time
+	dropped bool
+}
+
+func purgeKey(zone ZoneName, origin AgentId) keyPurgeKey {
+	return keyPurgeKey{zone: canonZone(zone), origin: canonicalName(string(origin))}
+}
+
+// due books a new request for origin's drop, under a new distribution ID,
+// unless the combiner has made it or one went within every.
+func (b *keyPurgeBook) due(zone ZoneName, origin AgentId, every time.Duration) (string, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.sent == nil {
+		b.sent = map[keyPurgeKey]*keyPurgeSent{}
+	}
+	k := purgeKey(zone, origin)
+	if s := b.sent[k]; s != nil && (s.dropped || time.Since(s.at) < every) {
+		return "", false
+	}
+	distID := transport.GenerateDistributionID()
+	b.sent[k] = &keyPurgeSent{distID: distID, at: time.Now()}
+	return distID, true
+}
+
+// heard notes the combiner's word on a drop it was asked for. SUCCESS, or
+// IGNORED (a combiner that signs nothing publishes no KEY): it is dropped.
+// Any other final word makes the request due again at the next tick.
+func (b *keyPurgeBook) heard(distID, status, message string, notYet bool) {
+	if status == "PENDING" || notYet {
 		return
 	}
-	for _, o := range origins {
-		if _, err := tm.EnqueueForCombiner(zone, keyPurge(zone, o), ""); err != nil {
-			lgEngine.Warn("the combiner could not be asked to drop a KEY held under another name", "zone", zone, "origin", o, "err", err)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for k, s := range b.sent {
+		if s.distID != distID {
+			continue
+		}
+		if status == "SUCCESS" || status == "IGNORED" {
+			s.dropped = true
+		} else {
+			s.at = time.Time{}
+			lgEngine.Warn("the combiner did not drop a KEY held under another name, trying again", "zone", k.zone, "origin", k.origin, "status", status, "msg", message)
 		}
 	}
+}
+
+func (b *keyPurgeBook) taken(zone ZoneName, origin AgentId) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s := b.sent[purgeKey(zone, origin)]
+	return s != nil && s.dropped
+}
+
+func (b *keyPurgeBook) forget(zone ZoneName, origin AgentId) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.sent, purgeKey(zone, origin))
 }
 
 // apiZoneParentSync is tdns's /zone/parentsync, but its roll-key for a
