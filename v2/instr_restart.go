@@ -84,6 +84,9 @@ type restartView struct {
 	fetch  []restartFetch
 	waits  []string // whom the leader waits for
 	differ []string // the voting members with a record, and what each tells
+	// reconciling: those it is taken from tell a transition to it under
+	// way (plan S12)
+	reconciling bool
 }
 
 // restartFetch is a serial to fetch from a member before the rule can take
@@ -186,6 +189,9 @@ func (conf *Config) restartView(zone string, now time.Time) (restartView, bool) 
 		return v, true
 	}
 	v.take, v.by, v.from = &take, records[take][0], knownFromRecords
+	for _, id := range records[take] {
+		v.reconciling = v.reconciling || told[canonicalName(id)].Reconciling
+	}
 	for i := range thaws {
 		if thaws[i].To == take {
 			v.thaw = &thaws[i]
@@ -225,7 +231,7 @@ func (conf *Config) leadersWord(v *restartView, newest *heldSerial, told map[str
 		if !conf.leadsUnder(reading, id) {
 			continue
 		}
-		v.take, v.by, v.from = &sd, id, knownFromLeader
+		v.take, v.by, v.from, v.reconciling = &sd, id, knownFromLeader, st.Reconciling
 		if st.Thaw != nil && st.Thaw.To == sd {
 			v.thaw = st.Thaw // the thaw to the serial taken, as the leader's own rule keeps it
 		}
@@ -330,7 +336,7 @@ func (conf *Config) knowActive(zone string) {
 		conf.fetchInstructions(v.zone, f.sd, f.member, f.why)
 	}
 	if v.take != nil {
-		conf.know(v.zone, *v.take, v.thaw, v.by, v.from)
+		conf.know(v.zone, *v.take, v.thaw, v.reconciling, v.by, v.from)
 	}
 }
 
@@ -340,10 +346,10 @@ func (conf *Config) knowActive(zone string) {
 // the sets handed to the parts (onSetsChanged), and the zone's turn asked
 // again, for a newer serial it may agree on now. The end of the freeze
 // releases what was owed (onFreeze), and S8 what was kept.
-func (conf *Config) know(zone string, sd SerialDigest, th *Thaw, by, from string) {
+func (conf *Config) know(zone string, sd SerialDigest, th *Thaw, reconciling bool, by, from string) {
 	s := conf.InternalMp.Instructions
 	before := s.reading(zone)
-	if err := s.Know(zone, sd, th); err != nil {
+	if err := s.Know(zone, sd, th, reconciling); err != nil {
 		lg.Warn("the zone's active serial could not be made known", "zone", zone, "serial", sd.Serial, "from", from, "err", err)
 		return
 	}
