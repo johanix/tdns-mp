@@ -1311,7 +1311,7 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		// published here: the word is PARTIAL and names the keys that are
 		// held, as on the other paths (heldSuccess).
 		var message string
-		status, message, appliedRecords = zdr.heldSuccess(prc.Zone, AgentId(prc.OriginatingSender), prc.DnskeyOps, status, detail.Message, appliedRecords)
+		status, message, appliedRecords = zdr.heldSuccess(prc.Zone, prc.Origin, prc.DnskeyOps, status, detail.Message, appliedRecords)
 
 		lgEngine.Info("triggering remote confirmation", "source", source, "originDistID", prc.OriginatingDistID, "to", prc.OriginatingSender, "status", status, "applied", len(appliedRecords), "ignored", len(ignoredRecords))
 		remoteDetail := &RemoteConfirmationDetail{
@@ -1552,7 +1552,7 @@ func (zdr *ZoneDataRepo) heldRecords(zone ZoneName, agentId AgentId, ops []core.
 // confirmation (SUCCESS or IGNORED) with no record lists.
 func (zdr *ZoneDataRepo) reconstructRecordsFromRepo(prc *PendingRemoteConfirmation) []string {
 	var records []string
-	agentId := AgentId(prc.OriginatingSender)
+	agentId := prc.Origin
 	if agentRepo, ok := zdr.Repo.Get(prc.Zone); ok {
 		if nod, ok := agentRepo.Get(agentId); ok {
 			for _, rrtype := range nod.RRtypes.Keys() {
@@ -1619,7 +1619,7 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 	// active instructions do not list for its type (plan S16).
 	if synchedDataUpdate.Withdraw != nil {
 		if why := conf.acceptWithdrawal(synchedDataUpdate); why != "" {
-			refuseWithdrawal(synchedDataUpdate, why, msgQs)
+			refuseWithdrawal(synchedDataUpdate, withdrawalRefused, why, msgQs)
 			return
 		}
 	}
@@ -1747,6 +1747,14 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 		staleIgnored := recordsOfTypes(staleHeld, ignoredSets)
 		staleHeld = recordsNotOfTypes(staleHeld, failedSets)
 		synchedDataUpdate.dropStaleOperations()
+		// A withdrawal older than the provider's own replace applied here
+		// is refused, not confirmed and not passed on: the provider's
+		// records stay, and the leader's removal stays open, and it sends
+		// the withdrawal again (plan S16).
+		if err == nil && synchedDataUpdate.Withdraw != nil && synchedDataUpdate.Update != nil && len(synchedDataUpdate.Update.Operations) == 0 {
+			refuseWithdrawal(synchedDataUpdate, staleWithdrawal, "older than the provider's own records applied here", msgQs)
+			return
+		}
 		if err == nil && !change && synchedDataUpdate.Update != nil {
 			fresh := updateRRtypes(synchedDataUpdate.Update)
 			inFlight := zdr.setsNotHandedOver(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, fresh, false)
@@ -1838,6 +1846,7 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 						zdr.PendingRemoteConfirms[distID] = &PendingRemoteConfirmation{
 							OriginatingDistID: synchedDataUpdate.OriginatingDistID,
 							OriginatingSender: string(synchedDataUpdate.answerTo()),
+							Origin:            synchedDataUpdate.AgentId,
 							Mechanism:         synchedDataUpdate.Mechanism,
 							Zone:              synchedDataUpdate.Zone,
 							CreatedAt:         time.Now(),

@@ -230,6 +230,126 @@ func TestAWithdrawalThatCannotBeQueuedIsNotLeftPending(t *testing.T) {
 	}
 }
 
+// The final word on a withdrawal names the provider's records, not the
+// leader's, though it goes to the leader: a combiner's success with no
+// records named is filled from what the data holds of the provider.
+func TestAWithdrawalsFinalWordNamesTheProvidersRecordsOnly(t *testing.T) {
+	r := newReceiveRig(t, "origin.withdraw.example.")
+	r.leads(roleB)
+	r.heldForN(r.n, time.Now(), "ns1.n.example.")
+	bNS := core.RROperation{Operation: "replace", RRtype: "NS", Records: []string{r.ns("ns1.b.example.")}}
+	if _, _, err := r.zdr.ProcessUpdate(&SynchedDataUpdate{Zone: ZoneName(r.zone), AgentId: roleB, UpdateType: "remote",
+		Update: &ZoneUpdate{Zone: ZoneName(r.zone), AgentId: roleB, Operations: []core.RROperation{bNS}}, OriginatingTime: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	r.withdrawal(roleB, roleN, "d1", r.n, time.Now())
+	var toCombiner string
+	for d, p := range r.zdr.PendingRemoteConfirms {
+		if p.OriginatingDistID == "d1" {
+			toCombiner = d
+		}
+	}
+	if toCombiner == "" {
+		t.Fatal("the withdrawal was not handed to the combiner")
+	}
+	r.zdr.ProcessConfirmation(&ConfirmationDetail{DistributionID: toCombiner, Zone: ZoneName(r.zone), Source: freezeCombiner, Status: "SUCCESS"}, r.conf.InternalMp.MsgQs)
+	a := r.answered("d1")
+	if len(a) != 1 || a[0].OriginatingSender != roleB {
+		t.Fatalf("the final word on the withdrawal: %+v, want one to %s", a, roleB)
+	}
+	for _, rec := range a[0].AppliedRecords {
+		if strings.Contains(rec, "ns1.b.example.") {
+			t.Errorf("the final word names the leader's record %s as applied", rec)
+		}
+	}
+}
+
+// A withdrawal older than the provider's own replace applied here is
+// refused: the provider's records stay, nothing goes to the combiner, and
+// the leader is told why.
+func TestAWithdrawalOlderThanTheProvidersReplaceIsRefused(t *testing.T) {
+	r := newReceiveRig(t, "older.withdraw.example.")
+	r.leads(roleB)
+	r.heldForN(r.v, time.Now(), "ns1.n.example.")
+	r.withdrawal(roleB, roleN, "d1", r.n, time.Now().Add(time.Hour))
+	r.refused("d1", roleB, staleWithdrawal+": older than the provider's own records applied here")
+	if got := r.nsOf(roleN); len(got) != 1 {
+		t.Errorf("n's NS after an older withdrawal: %v", got)
+	}
+	if n := r.sent()[freezeCombiner]; n != 0 {
+		t.Errorf("an older withdrawal went to the combiner %d times", n)
+	}
+}
+
+// A withdrawal a member refused as older than the provider's own replace,
+// with both stamps at one serial, is sent again: to that member, under its
+// own distribution ID, and not at once, since only this agent's clock
+// passing the provider's helps. The record stays pending removal meanwhile.
+func TestAWithdrawalRefusedAsOlderIsSentAgainAfterAWait(t *testing.T) {
+	r := newReceiveRig(t, "retry.withdraw.example.")
+	r.heldForN(r.n, time.Now(), "ns1.n.example.")
+	r.leads(roleA)
+	zone, tm := ZoneName(r.zone), r.conf.InternalMp.MPTransport
+	distID, err := r.conf.sendWithdrawal(r.zdr, zone, roleN, "NS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := staleWithdrawal + ": older than the provider's own records applied here"
+	tm.stamps.sent(distID, roleB, r.zone, msgStampAt(r.n))
+	if !tm.notYetFrom(distID, roleB, transport.ConfirmRejected, text, msgStampAt(r.n)) {
+		t.Fatal("the refusal reads as final, though its stamp is the send's")
+	}
+	if notYetWait(text) != withdrawalRetryWait || notYetWait(staleInstructions+": made under older instructions") != 0 {
+		t.Errorf("the waits: %v, %v", notYetWait(text), notYetWait(staleInstructions+": made under older instructions"))
+	}
+	settleQueuedMessage(r.queue, distID, roleB, transport.ConfirmRejected)
+	tm.noteNotYetAfter(zone, roleB, distID, msgStampAt(r.n), time.Hour)
+	r.activated()
+	if r.resent(distID) {
+		t.Fatal("sent again before its wait has passed")
+	}
+	if st := r.zdr.Tracking[zone][roleN][dns.TypeNS].Tracked[0].State; st != RRStatePendingRemoval {
+		t.Errorf("n's NS during the wait: %v, want pending removal", st)
+	}
+	open := tm.notYets.forZone(zone)
+	if len(open) != 1 {
+		t.Fatalf("the book holds %d", len(open))
+	}
+	open[0].notBefore = time.Now().Add(-time.Second)
+	r.activated()
+	if !r.resent(distID) {
+		t.Errorf("not sent again after its wait; queued %v", r.sent())
+	}
+	if n := len(tm.notYets.forZone(zone)); n != 0 {
+		t.Errorf("the book still holds %d", n)
+	}
+}
+
+// agent debug withdraw waits for the data engine no longer than its time,
+// for the send as for the answer.
+func TestDebugWithdrawDoesNotWaitForABusyEngine(t *testing.T) {
+	r := newReceiveRig(t, "busy.withdraw.example.")
+	r.leads(roleA)
+	r.conf.InternalMp.MsgQs.SynchedDataCmd = make(chan *SynchedDataCmd) // nobody takes it
+	saved := debugWithdrawWait
+	debugWithdrawWait = 50 * time.Millisecond
+	t.Cleanup(func() { debugWithdrawWait = saved })
+	var resp AgentMgmtResponse
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.conf.debugWithdraw(&AgentMgmtPost{Zone: ZoneName(r.zone), AgentId: roleN, RRType: dns.TypeNS}, &resp)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("agent debug withdraw waits on a busy data engine")
+	}
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "in time") {
+		t.Errorf("the answer: %+v", resp)
+	}
+}
+
 // The leader's clock is not the provider's: n's last replace, made under
 // 41, is stamped later than the leader's withdrawal under 42, and the
 // withdrawal is not stale for it.

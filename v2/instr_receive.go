@@ -338,6 +338,8 @@ type notYet struct {
 	distID string
 	answer *MsgStamp
 	at     time.Time
+	// notBefore: it goes no earlier than this, in step or not (notYetWait)
+	notBefore time.Time
 }
 
 // notYetBook holds what waits to be sent again once this agent and the
@@ -433,7 +435,7 @@ func (b *notYetBook) zones() []ZoneName {
 func (tm *MPTransportBridge) notYetFrom(distID, peer string, status transport.ConfirmStatus, message string, answer *MsgStamp) bool {
 	switch status {
 	case transport.ConfirmRejected:
-		if strings.HasPrefix(message, staleInstructions+":") {
+		if strings.HasPrefix(message, staleInstructions+":") || strings.HasPrefix(message, staleWithdrawal+":") {
 			return true
 		}
 	case transport.ConfirmIgnored, transport.ConfirmFailed, transport.ConfirmPartial:
@@ -448,8 +450,15 @@ func (tm *MPTransportBridge) notYetFrom(distID, peer string, status transport.Co
 // to send the distribution again at once if the two are in step already:
 // the trigger, this agent's activation, has then fired (decision 52).
 func (tm *MPTransportBridge) noteNotYet(zone ZoneName, peer AgentId, distID string, answer *MsgStamp) {
+	tm.noteNotYetAfter(zone, peer, distID, answer, 0)
+}
+
+// noteNotYetAfter is noteNotYet for a distribution that goes no earlier than
+// wait from now.
+func (tm *MPTransportBridge) noteNotYetAfter(zone ZoneName, peer AgentId, distID string, answer *MsgStamp, wait time.Duration) {
 	lgEngine.Info("an answer from a peer at other instructions is not final; sending again when in step", "zone", zone, "peer", peer, "distrib", distID)
-	tm.notYets.add(&notYet{zone: zone, peer: peer, distID: distID, answer: answer, at: time.Now()})
+	now := time.Now()
+	tm.notYets.add(&notYet{zone: zone, peer: peer, distID: distID, answer: answer, at: now, notBefore: now.Add(wait)})
 	if tm.msgQs == nil || tm.msgQs.SynchedDataCmd == nil {
 		return
 	}
@@ -485,7 +494,11 @@ func (conf *Config) resendInStep(zdr *ZoneDataRepo, zone ZoneName) {
 		return
 	}
 	var due []*notYet
+	now := time.Now()
 	for _, n := range open {
+		if n.notBefore.After(now) {
+			continue
+		}
 		if peer := madeUnder(n.answer); peer == nil || CompareSerial(active.Serial, peer.Serial) >= 0 {
 			due = append(due, n)
 		}
