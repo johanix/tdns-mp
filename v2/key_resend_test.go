@@ -4,7 +4,6 @@
 package tdnsmp
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -556,7 +555,7 @@ func TestTheCallbackKeepsAConfirmationsStampWithItsResult(t *testing.T) {
 	}
 	tm.dnskeyPropMu.Unlock()
 	d, an := nextDistributionID(), nextDistributionID()
-	tm.TrackDnskeyPropagation(context.Background(), ZoneName(z), d, keys, nil, []AgentId{peer, other})
+	tm.TrackDnskeyPropagation(t.Context(), ZoneName(z), d, keys, nil, []AgentId{peer, other})
 	tm.noteCatchUpAnswer(an, ZoneName(z), peer, map[uint16]bool{credited.KeyTag(): true})
 
 	confirm := func(distID string, status transport.ConfirmStatus, applied []string, ms *MsgStamp) {
@@ -589,7 +588,7 @@ func TestTheCallbackKeepsAConfirmationsStampWithItsResult(t *testing.T) {
 	tm.dnskeyPropMu.Unlock()
 
 	resend := nextDistributionID()
-	tm.TrackDnskeyPropagation(context.Background(), ZoneName(z), resend, keys, nil, []AgentId{peer, other})
+	tm.TrackDnskeyPropagation(t.Context(), ZoneName(z), resend, keys, nil, []AgentId{peer, other})
 	tm.foldIntoResend(ZoneName(z), resend)
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
