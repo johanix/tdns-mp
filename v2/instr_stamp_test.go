@@ -292,11 +292,12 @@ func TestTheStampCarriesARefusal(t *testing.T) {
 	seven := stampAt(t, 7, "a")
 	st := stampTableAt(t, stampAlpha, seven)
 	enforced(t, st.store, stampZone)
-	// beta moved out of servers= with its record kept: taking a role away
-	eight := jAt(t, 8, `servers="alpha" signers="alpha" auditors="delta" suffix="a"`, stampRecords...)
+	// a server role for zulu, which has no record: a refusal the not-built
+	// fallback does not follow
+	eight := jAt(t, 8, `servers="alpha,beta,zulu" signers="alpha" auditors="delta" suffix="a"`, stampRecords...)
 	noteKnown(t, st.store, stampZone, eight)
 	got := st.entryFor(stampBeta).Members[stampAlpha].Instr[stampZone]
-	if got.Refused != "not-built" || got.Newest != 8 || got.AgreeingDigest != "" {
+	if got.Refused != RefusedRoleWithoutRecord || got.Newest != 8 || got.AgreeingDigest != "" {
 		t.Errorf("the stamp of a refused newest serial: %+v", got)
 	}
 	nine := stampAt(t, 9, "z")

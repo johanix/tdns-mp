@@ -405,7 +405,8 @@ func TestANewerSerialDuringAgreeingIsTheOneAgreedOn(t *testing.T) {
 
 // A refused newer serial does not replace the serial agreed on: a record
 // and then its role, published before the first is thawed. The first is
-// thawed, and the second is judged again against it.
+// thawed, and the second is judged again against it: refused only as not
+// built, the steady zone follows it (the not-built fallback).
 func TestARefusedNewerSerialDoesNotReplaceTheSerialAgreedOn(t *testing.T) {
 	r := newThawRig(t, "record-then-role.thaw.example.", roleA)
 	r.agree()
@@ -420,8 +421,8 @@ func TestARefusedNewerSerialDoesNotReplaceTheSerialAgreedOn(t *testing.T) {
 	r.conf.thawTurn(r.zone)
 	st = status(t, r.store, r.zone)
 	// TestARefusedNewerSerialIsJudgedAgainAfterDone
-	if st.Active.Serial != 42 || st.Newest.Serial != 43 || len(st.Refused) == 0 || st.Agreeing != nil {
-		t.Fatalf("after the thaw: active %s, newest %s, refused %v, agreeing %s", serialOf(st.Active), serialOf(st.Newest), st.Refused, serialOf(st.Agreeing))
+	if st.Active.Serial != 43 || st.Follows == "" || st.Agreeing != nil {
+		t.Fatalf("after the thaw: active %s, follows %q, agreeing %s", serialOf(st.Active), st.Follows, serialOf(st.Agreeing))
 	}
 }
 
@@ -676,11 +677,11 @@ func TestAMemberActivatesOnAVotingMemberUnderV(t *testing.T) {
 
 // A member behind the thaw's from-serial, holding both, moves straight to
 // the target. It judges the thaw's own pair, not its own active serial
-// against the target: 40 to 42 changes nsmgmt and is refused, 41 to 42 is
-// not.
+// against the target: 40 to 42 removes z's record with its role and is
+// refused, 41 to 42 is not.
 func TestAMemberThatMovesStraightJudgesTheThawsPairNotItsOwn(t *testing.T) {
 	r := newThawRig(t, "straight.thaw.example.", roleB)
-	old := jAt(t, 40, `servers="a,b" nsmgmt="owner" suffix="o"`, freezeRecords...)
+	old := jAt(t, 40, `servers="a,b,z" nsmgmt="agent" suffix="o"`, append(slices.Clone(freezeRecords), `3600 IN HSYNC3 ON z z.role.example. .`)...)
 	if err := r.store.Forget(r.zone); err != nil {
 		t.Fatal(err)
 	}
@@ -795,7 +796,7 @@ func TestAnAgentFetchesASerialAgreedOnThatItDoesNotHold(t *testing.T) {
 // An agent never makes active a serial it refused.
 func TestAMemberNeverActivatesASerialItRefused(t *testing.T) {
 	r := newThawRig(t, "neverrefused.thaw.example.", roleB)
-	v := freezeAt(t, 42, "v", "a", "") // refused: b's role taken
+	v := freezeAt(t, 42, "v", "a,b,z", "") // refused: a role for z, which has no record
 	r.store.Note(r.zone, v, nil)
 	st := tells(v, v)
 	st.Thaw = &Thaw{From: sd(r.n), To: sd(v)}
