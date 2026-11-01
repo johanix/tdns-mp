@@ -564,7 +564,7 @@ var errEndOfService = errors.New("the zone's instructions are gone")
 // it as before S7. The serial is made active here, with nothing frozen or
 // thawed for it. Each kind leaves this as its step lands (builtKinds).
 func (z *zoneSerials) followNotBuilt() {
-	if z.Active == nil || z.OwnerError != "" || z.From != nil || len(z.Removals) > 0 || z.agreeing() != nil || len(z.Held) == 0 {
+	if z.Active == nil || z.OwnerError != "" || z.reconciling() || z.agreeing() != nil || len(z.Held) == 0 {
 		return
 	}
 	h := z.Held[len(z.Held)-1]
@@ -573,7 +573,7 @@ func (z *zoneSerials) followNotBuilt() {
 		return
 	}
 	h.Refused, h.Since = nil, time.Now()
-	z.Active, z.Follows = &h, why
+	z.Active, z.Follows, z.DoneAt = &h, why, time.Now()
 	z.dropAtOrBelow(h.Serial)
 }
 
