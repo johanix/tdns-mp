@@ -431,3 +431,62 @@ func TestTheFirstDataOverTheParsesStubAsksNoSync(t *testing.T) {
 		t.Errorf("the first data over the parse's stub asked for %d syncs", n)
 	}
 }
+
+// A step that gives the agents the parent sync and changes DSSigners asks
+// the leader's sync once the parentsync option follows the step: asked
+// before, it found the option off and asked nothing (CodeRabbit on #339).
+func TestAStepThatGivesTheAgentsTheParentSyncAsksItForTheDSSet(t *testing.T) {
+	asMPDaemon(t, AppTypeMPAgent)
+	r := newComputedDSRig(t, "toagents.steps.example.", []string{"us", "p2"})
+	z := r.mpzd.ZoneName
+	r.mpzd.Options[tdns.OptMultiProvider] = true
+	r.mpzd.Options[tdns.OptParentSync] = false // the owner syncs the parent
+	r.leader("agent.us.example.")
+	s := withActiveStore(t, r.mpzd)
+	rest := r.mpzd.roles()
+	rest.ParentSync = core.HsyncParentSyncOwner
+	stepAs(t, s, z, 1, withSigners(rest, "us", "p2"))
+	r.conf.onSetsChanged(r.mpzd, true)
+	if n := r.requests(t); n != 0 {
+		t.Fatalf("the owner syncs the parent, and %d syncs were asked for", n)
+	}
+	sets := withSigners(rest, "us", "p2", "p3")
+	sets.ParentSync = core.HsyncParentSyncAgent
+	stepAs(t, s, z, 2, sets)
+	r.conf.onSetsChanged(r.mpzd, true)
+	if !r.mpzd.Options[tdns.OptParentSync] {
+		t.Fatal("the step that gives the agents the parent sync did not turn the option on")
+	}
+	if n := r.requests(t); n != 1 {
+		t.Errorf("the step gave the agents the parent sync and changed the DS signers: %d syncs asked for, want 1", n)
+	}
+}
+
+// A signer that waits reads the data it last acted by under the zone's
+// lock, which a refresh or a hand-over swaps it in under (CodeRabbit on
+// #339). It tells only under -race.
+func TestAWaitingSignerReadsItsKeptDataUnderTheZonesLock(t *testing.T) {
+	const zone = "lockedsets.steps.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)...)
+	kept := r.mpzd.MP.MPdata
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			c := *kept
+			r.mpzd.Lock()
+			r.mpzd.MP.MPdata = &c
+			r.mpzd.Unlock()
+		}
+	}()
+	for range 200 {
+		signerSets(r.mpzd, r.conf.MpConfig())
+	}
+	close(stop)
+	<-done
+}
