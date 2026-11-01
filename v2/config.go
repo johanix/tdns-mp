@@ -358,6 +358,11 @@ type InternalMpConf struct {
 	// that run in this process, and what the hold of the leader's sync for
 	// the key needs besides (step 7b, key_hold.go).
 	keyPolls keyPollBook
+	// sig0Rolls: the passes of the leader's rolls of a zone's SIG(0) key
+	// that run (plan S17a, parentsync_roll.go); rollParent stands in for the
+	// parent in a test. Nil asks the parent through tdns.
+	sig0Rolls  rollBook
+	rollParent rollParent
 	// ownReads counts the re-reads of the agents' own state under way
 	// (own_read.go), until each has handed its answer back.
 	ownReads sync.WaitGroup

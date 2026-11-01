@@ -185,6 +185,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			// this goroutine: the test reads the keystore and asks the
 			// resolver
 			conf.retestKeyHoldsInBackground(ctx)
+			// the leader's rolls of a zone's SIG(0) key: one waiting for
+			// its members, and one whose retry is due (plan S17a)
+			conf.rollsDue(ctx)
 			// what a zone kept, released when its freeze ended and the
 			// engine's queue had no room, or a restart came between
 			conf.releaseUnfrozen(ctx, zdr)
@@ -1661,9 +1664,15 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 		// the first sign of a new zone key: the leader's replace
 		// reaches every member. The key is checked (step 7b); the
 		// rounds run on the tracker's goroutine.
-		if err == nil && change && synchedDataUpdate.Update != nil &&
+		if err == nil && synchedDataUpdate.Update != nil &&
 			slices.Contains(updateRRtypes(synchedDataUpdate.Update), dns.TypeKEY) {
-			conf.InternalMp.CatchUp.keyCheck(synchedDataUpdate.Zone)
+			if change {
+				conf.InternalMp.CatchUp.keyCheck(synchedDataUpdate.Zone)
+			}
+			// the leader's KEY, and no other (plan S17a), also when the
+			// leader's publication changed nothing here; what came here
+			// is the leader's (refuseCsyncNotFromLeader)
+			conf.dropOtherKEYs(zdr, synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
 		}
 		// The operations as they arrived, stale replaces too:
 		// the confirmation to the sender names what the repo
