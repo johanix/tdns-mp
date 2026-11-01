@@ -264,6 +264,23 @@ func TestAWithdrawalsFinalWordNamesTheProvidersRecordsOnly(t *testing.T) {
 	}
 }
 
+// A withdrawal older than the provider's own replace applied here is
+// refused: the provider's records stay, nothing goes to the combiner, and
+// the leader is told why.
+func TestAWithdrawalOlderThanTheProvidersReplaceIsRefused(t *testing.T) {
+	r := newReceiveRig(t, "older.withdraw.example.")
+	r.leads(roleB)
+	r.heldForN(r.v, time.Now(), "ns1.n.example.")
+	r.withdrawal(roleB, roleN, "d1", r.n, time.Now().Add(time.Hour))
+	r.refused("d1", roleB, "older than the provider's own records applied here")
+	if got := r.nsOf(roleN); len(got) != 1 {
+		t.Errorf("n's NS after an older withdrawal: %v", got)
+	}
+	if n := r.sent()[freezeCombiner]; n != 0 {
+		t.Errorf("an older withdrawal went to the combiner %d times", n)
+	}
+}
+
 // agent debug withdraw waits for the data engine no longer than its time,
 // for the send as for the answer.
 func TestDebugWithdrawDoesNotWaitForABusyEngine(t *testing.T) {
