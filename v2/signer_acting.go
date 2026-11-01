@@ -14,7 +14,7 @@
  * copy says (from S7). A signer handed nothing acts by its own copy (rule
  * 5): provisional for a copy with no reading (no serial=, #308), which
  * starts no multi-provider work; for one that reads, it waits for its
- * agent, and signs meanwhile by the signing set it last signed by.
+ * agent, and acts meanwhile by the sets it last acted by.
  */
 package tdnsmp
 
@@ -157,7 +157,7 @@ func (mpzd *MPZoneData) actBySignerHandover(conf *Config, confirmers []string) {
 		return
 	}
 	mp := conf.MpConfig()
-	signing, ok := actingHeld.Load().signingSet(mpzd.ZoneName)
+	r, ok := actingHeld.Load().roles(mpzd.ZoneName)
 	if !ok {
 		return
 	}
@@ -175,7 +175,7 @@ func (mpzd *MPZoneData) actBySignerHandover(conf *Config, confirmers []string) {
 	}
 	w := &MPZoneData{ZoneData: mpzd.ZoneData, MP: &MPState{MPdata: mpzd.MP.MPdata}, MPOptions: opts}
 	mpzd.Unlock()
-	w.populateMPdata(mp, signing)
+	w.populateMPdata(mp, r)
 	mpzd.Lock()
 	mpzd.MP.MPdata, mpzd.MPOptions = w.MP.MPdata, w.MPOptions
 	mpdata := mpzd.MP.MPdata
@@ -197,12 +197,10 @@ func (mpzd *MPZoneData) actBySignerHandover(conf *Config, confirmers []string) {
 // handedOver: a hand-over changed what the signer acts by for the zone.
 // For a zone the machine runs, every distribution in flight expects the
 // providers it expects now when they changed (SignersChanged), and the
-// foreign rows' ds follows DSSigners. While the zone's rollovers pause for
-// a provider leaving the signing set (#147) neither moves: a rollover under
-// way waits where it is, and the first tick after the pause catches up.
+// foreign rows' ds follows DSSigners.
 func (e *KeyLifecycleEngine) handedOver(zone string, confirmers []string) {
 	l := e.driver(zone)
-	if l == nil || len(e.wire.leavers(zone)) > 0 {
+	if l == nil {
 		return
 	}
 	if !slices.Equal(confirmers, e.wire.OtherSigners(zone)) {

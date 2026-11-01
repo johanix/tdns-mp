@@ -385,7 +385,7 @@ func TestThePreRefreshReadersGetTheActiveReading(t *testing.T) {
 	wrapper := &MPZoneData{ZoneData: incoming, MP: &MPState{}, MPOptions: map[tdns.ZoneOption]bool{}}
 	mp := &MultiProviderConf{Role: "agent", Identity: acAlpha}
 	withStore(t, nil)
-	wrapper.populateMPdata(mp, wrapper.signingSet())
+	wrapper.populateMPdata(mp, wrapper.roles())
 	if wrapper.MP.MPdata == nil || !wrapper.MP.MPdata.WeAreSigner {
 		t.Fatalf("with no store: the incoming copy's MPdata %+v; want alpha a signer, as the copy says", wrapper.MP.MPdata)
 	}
@@ -393,7 +393,7 @@ func TestThePreRefreshReadersGetTheActiveReading(t *testing.T) {
 	withStore(t, s)
 	s.Note(served.ZoneName, served.instructions(), nil)
 	wrapper = &MPZoneData{ZoneData: incoming, MP: &MPState{}, MPOptions: map[tdns.ZoneOption]bool{}}
-	wrapper.populateMPdata(mp, wrapper.signingSet())
+	wrapper.populateMPdata(mp, wrapper.roles())
 	if wrapper.MP.MPdata == nil || wrapper.MP.MPdata.WeAreSigner {
 		t.Errorf("the incoming copy's MPdata %+v; want alpha no signer, as the active serial 7 says", wrapper.MP.MPdata)
 	}
@@ -595,9 +595,9 @@ func TestEveryLabelResolverReadsTheSetsNotTheRecords(t *testing.T) {
 			sa := signingAgents(zone, []AgentId{acBeta, acGamma})
 			return sa[acGamma] && !sa[acBeta]
 		}(),
-		"signingPeers names gamma":            slices.Equal(signingPeers(zone, acAlpha), []AgentId{acGamma}),
-		"identitiesByLabel resolves gamma":    mpzd.identitiesByLabel()["gamma"] == acGamma,
-		"the signing labels are alpha, gamma": slices.Equal(mpzd.signingLabels(), []string{"alpha", "gamma"}),
+		"signingPeers names gamma":         slices.Equal(signingPeers(zone, acAlpha), []AgentId{acGamma}),
+		"identitiesByLabel resolves gamma": mpzd.identitiesByLabel()["gamma"] == acGamma,
+		"the DS signers are alpha, gamma":  slices.Equal(labelsOf(mpzd.roles().DSSigners), []string{"alpha", "gamma"}),
 	} {
 		if !ok {
 			t.Errorf("%s: no", name)
@@ -700,7 +700,7 @@ func TestAFirstCopyWithoutASerialGivesTheZoneNoInstructions(t *testing.T) {
 	if r := rolesForZone(zone); len(r.Servers) != 0 || len(r.Signing) != 0 {
 		t.Errorf("roles %+v, want none", r)
 	}
-	mpzd.populateMPdata(&MultiProviderConf{Role: "agent", Identity: acAlpha}, nil)
+	mpzd.populateMPdata(&MultiProviderConf{Role: "agent", Identity: acAlpha}, mpzd.roles())
 	if mpzd.MP.MPdata != nil {
 		t.Errorf("the zone is multi-provider here without a reading: %+v", mpzd.MP.MPdata)
 	}
