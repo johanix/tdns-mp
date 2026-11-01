@@ -18,6 +18,26 @@ import (
 	"github.com/miekg/dns"
 )
 
+// A member's refusal of a withdrawal as older than the provider's own
+// replace reaches the leader's confirmation callback with both stamps at
+// one serial, and is booked to go again, after a wait.
+func TestTransportBoundary_ARefusalAsOlderIsBookedToGoAgain(t *testing.T) {
+	zone := "older.boundary.example."
+	r, in := serialsRig(t, zone, true)
+	distID := nextDistributionID()
+	r.peer.Bridge.stamps.sent(distID, r.us.Identity, zone, msgStampAt(in[42]))
+	r.peer.Bridge.ChunkHandler.OnConfirmationReceived(&transport.IncomingConfirmation{DistributionID: distID, PeerID: r.us.Identity,
+		Status: transport.ConfirmRejected, Zone: zone, Message: staleWithdrawal + ": older than the provider's own records applied here",
+		App: r.us.Bridge.stamps.confirmAppFor(zone)})
+	open := r.peer.Bridge.notYets.forZone(ZoneName(zone))
+	if len(open) != 1 || open[0].distID != distID {
+		t.Fatalf("the leader's book of what goes again: %+v", open)
+	}
+	if !open[0].notBefore.After(open[0].at) {
+		t.Errorf("it goes at %v, booked at %v: want a wait", open[0].notBefore, open[0].at)
+	}
+}
+
 // The peer leads the zone, and gone, which has a record and no role, has
 // NS records at the agent. The peer's withdrawal of them reaches the agent
 // over the wire and is taken: they leave the agent's data, the agent hands

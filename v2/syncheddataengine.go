@@ -1611,7 +1611,7 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 	// active instructions do not list for its type (plan S16).
 	if synchedDataUpdate.Withdraw != nil {
 		if why := conf.acceptWithdrawal(synchedDataUpdate); why != "" {
-			refuseWithdrawal(synchedDataUpdate, why, msgQs)
+			refuseWithdrawal(synchedDataUpdate, withdrawalRefused, why, msgQs)
 			return
 		}
 	}
@@ -1735,9 +1735,10 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 		synchedDataUpdate.dropStaleOperations()
 		// A withdrawal older than the provider's own replace applied here
 		// is refused, not confirmed and not passed on: the provider's
-		// records stay, and the leader's removal stays open (plan S16).
+		// records stay, and the leader's removal stays open, and it sends
+		// the withdrawal again (plan S16).
 		if err == nil && synchedDataUpdate.Withdraw != nil && synchedDataUpdate.Update != nil && len(synchedDataUpdate.Update.Operations) == 0 {
-			refuseWithdrawal(synchedDataUpdate, "older than the provider's own records applied here", msgQs)
+			refuseWithdrawal(synchedDataUpdate, staleWithdrawal, "older than the provider's own records applied here", msgQs)
 			return
 		}
 		if err == nil && !change && synchedDataUpdate.Update != nil {

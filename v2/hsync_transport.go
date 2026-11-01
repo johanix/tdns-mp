@@ -489,7 +489,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 			}
 		}
 		if notYet {
-			tm.noteNotYet(ZoneName(zone), AgentId(senderID), distributionID, instr)
+			tm.noteNotYetAfter(ZoneName(zone), AgentId(senderID), distributionID, instr, notYetWait(c.Message))
 		}
 
 		// Phase 6: Check if this confirmation is for a pending DNSKEY propagation
