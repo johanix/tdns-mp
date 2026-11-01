@@ -883,7 +883,9 @@ func TestASyncStoppedBecauseThisAgentLeftIsNoFailure(t *testing.T) {
 		before, after func(us, peer string) ([]h3rec, []string)
 	}{
 		{"its role is taken", "left.update.example.",
-			func(us, peer string) ([]h3rec, []string) { return []h3rec{{us, true}, {peer, true}}, []string{us, peer} },
+			func(us, peer string) ([]h3rec, []string) {
+				return []h3rec{{us, true}, {peer, true}}, []string{us, peer}
+			},
 			func(us, peer string) ([]h3rec, []string) { return []h3rec{{us, true}, {peer, true}}, []string{peer} }},
 		{"the only provider's record turns OFF", "off.alone.update.example.",
 			func(us, _ string) ([]h3rec, []string) { return []h3rec{{us, true}}, []string{us} },
