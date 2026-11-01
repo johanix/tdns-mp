@@ -272,12 +272,56 @@ func TestAWithdrawalOlderThanTheProvidersReplaceIsRefused(t *testing.T) {
 	r.leads(roleB)
 	r.heldForN(r.v, time.Now(), "ns1.n.example.")
 	r.withdrawal(roleB, roleN, "d1", r.n, time.Now().Add(time.Hour))
-	r.refused("d1", roleB, "older than the provider's own records applied here")
+	r.refused("d1", roleB, staleWithdrawal+": older than the provider's own records applied here")
 	if got := r.nsOf(roleN); len(got) != 1 {
 		t.Errorf("n's NS after an older withdrawal: %v", got)
 	}
 	if n := r.sent()[freezeCombiner]; n != 0 {
 		t.Errorf("an older withdrawal went to the combiner %d times", n)
+	}
+}
+
+// A withdrawal a member refused as older than the provider's own replace,
+// with both stamps at one serial, is sent again: to that member, under its
+// own distribution ID, and not at once, since only this agent's clock
+// passing the provider's helps. The record stays pending removal meanwhile.
+func TestAWithdrawalRefusedAsOlderIsSentAgainAfterAWait(t *testing.T) {
+	r := newReceiveRig(t, "retry.withdraw.example.")
+	r.heldForN(r.n, time.Now(), "ns1.n.example.")
+	r.leads(roleA)
+	zone, tm := ZoneName(r.zone), r.conf.InternalMp.MPTransport
+	distID, err := r.conf.sendWithdrawal(r.zdr, zone, roleN, "NS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := staleWithdrawal + ": older than the provider's own records applied here"
+	tm.stamps.sent(distID, roleB, r.zone, msgStampAt(r.n))
+	if !tm.notYetFrom(distID, roleB, transport.ConfirmRejected, text, msgStampAt(r.n)) {
+		t.Fatal("the refusal reads as final, though its stamp is the send's")
+	}
+	if notYetWait(text) != withdrawalRetryWait || notYetWait(staleInstructions+": made under older instructions") != 0 {
+		t.Errorf("the waits: %v, %v", notYetWait(text), notYetWait(staleInstructions+": made under older instructions"))
+	}
+	settleQueuedMessage(r.queue, distID, roleB, transport.ConfirmRejected)
+	tm.noteNotYetAfter(zone, roleB, distID, msgStampAt(r.n), time.Hour)
+	r.activated()
+	if r.resent(distID) {
+		t.Fatal("sent again before its wait has passed")
+	}
+	if st := r.zdr.Tracking[zone][roleN][dns.TypeNS].Tracked[0].State; st != RRStatePendingRemoval {
+		t.Errorf("n's NS during the wait: %v, want pending removal", st)
+	}
+	open := tm.notYets.forZone(zone)
+	if len(open) != 1 {
+		t.Fatalf("the book holds %d", len(open))
+	}
+	open[0].notBefore = time.Now().Add(-time.Second)
+	r.activated()
+	if !r.resent(distID) {
+		t.Errorf("not sent again after its wait; queued %v", r.sent())
+	}
+	if n := len(tm.notYets.forZone(zone)); n != 0 {
+		t.Errorf("the book still holds %d", n)
 	}
 }
 
