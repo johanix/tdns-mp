@@ -1,9 +1,13 @@
 package tdnsmp
 
 import (
+	"slices"
+	"strings"
 	"testing"
 
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 // putMPZone puts a multi-provider zone into tdns.Zones under name, a new
@@ -130,5 +134,57 @@ func TestAZoneBackWithoutMultiProviderGetsNoCombinerSetup(t *testing.T) {
 	}
 	if w, ok := Zones.Get(name); ok && w.MP != nil && w.MP.PersistContributions != nil {
 		t.Error("a zone back without multi-provider persists contributions")
+	}
+}
+
+// While a zone's store has not been read (the snapshot could not be read
+// when the zone was set up), an update is refused: saving the sender's map
+// would replace its stored rows with part of them. The re-apply reads the
+// store, and updates are saved from then on.
+func TestAnUpdateBeforeTheStoreIsReadLeavesItAlone(t *testing.T) {
+	asMPDaemon(t, AppTypeMPCombiner)
+	kdb := newMPTestKeyDB(t)
+	hdb := NewHsyncDB(kdb)
+	if err := hdb.InitHsyncTables(); err != nil {
+		t.Fatalf("InitHsyncTables: %v", err)
+	}
+	const zone = "unread-store.example."
+	const sender = "agent-a"
+	mpzd := combinerTestZone(t, zone)
+	stored := nsContribution(zone, "ns8."+zone)[zone][0]
+	if err := SaveContributions(hdb, zone, sender, map[string]map[uint16]core.RRset{zone: {dns.TypeNS: stored}}); err != nil {
+		t.Fatalf("SaveContributions: %v", err)
+	}
+	storedNS := func() string {
+		t.Helper()
+		all, err := LoadAllContributions(hdb)
+		if err != nil {
+			t.Fatalf("LoadAllContributions: %v", err)
+		}
+		rrset := all[zone][sender][zone][dns.TypeNS]
+		var targets []string
+		for _, rr := range rrset.RRs {
+			targets = append(targets, rr.(*dns.NS).Ns)
+		}
+		slices.Sort(targets)
+		return strings.Join(targets, " ")
+	}
+
+	mpzd.restoreContributions(hdb, nil, false) // the snapshot could not be read
+	if _, err := mpzd.AddCombinerData(sender, nsContribution(zone, "ns2."+zone)); err == nil {
+		t.Error("an update before the store was read was accepted")
+	}
+	if got, want := storedNS(), "ns8."+zone; got != want {
+		t.Errorf("the update replaced the stored rows: %q, want %q", got, want)
+	}
+
+	if _, err := CombinerReapplyContributions(zone, hdb); err != nil {
+		t.Fatalf("CombinerReapplyContributions: %v", err)
+	}
+	if _, err := mpzd.AddCombinerData(sender, nsContribution(zone, "ns2."+zone)); err != nil {
+		t.Fatalf("an update after the re-apply: %v", err)
+	}
+	if got := storedNS(); !strings.Contains(got, "ns2."+zone) || !strings.Contains(got, "ns8."+zone) {
+		t.Errorf("after the re-apply the update was not saved beside the stored rows: %q", got)
 	}
 }
