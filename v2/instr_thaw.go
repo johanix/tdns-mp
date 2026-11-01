@@ -830,7 +830,11 @@ func (conf *Config) thawLine(zone string) string {
 		return v.line()
 	}
 	if st := conf.InternalMp.Instructions.Status(zone); st != nil && st.Active != nil && !st.DoneAt.IsZero() {
-		return fmt.Sprintf("at %d, done since %s", st.Active.Serial, st.DoneAt.Format(time.TimeOnly))
+		line := fmt.Sprintf("at %d, done since %s", st.Active.Serial, st.DoneAt.Format(time.TimeOnly))
+		if conf.safeToRemove(zone) {
+			line += "; safe to remove"
+		}
+		return line
 	}
 	b := &conf.InternalMp.thaws
 	b.mu.Lock()

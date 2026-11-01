@@ -547,10 +547,10 @@ func newLeavingRig(t *testing.T, zone string) *reconcileRig {
 
 // TestALeavingMemberThatDoesNotConfirmAStepIsExcusedFromThenOn, with
 // TestAnExcusedLeavingMemberIsNotWaitedFor: a leaving member that is heard
-// and does not confirm a step holds it up to no-role-timeout; one that has
-// not confirmed a step for leaving-timeout is excused, with a log line,
-// and kept so on disk.
+// and does not confirm a step holds it until it has not confirmed a step for
+// leaving-timeout; it is then excused, with a log line, and kept so on disk.
 func TestALeavingMemberThatDoesNotConfirmAStepIsExcusedFromThenOn(t *testing.T) {
+	defer withRunners()()
 	logs := captureLog(t)
 	r := newLeavingRig(t, "leaving.reconcile.example.")
 	r.partsTake()
@@ -623,6 +623,7 @@ func TestAChangeOfTheSetsLooksAgainAtTheCSYNCThatWaits(t *testing.T) {
 // auditor is not waited for, and its stamps never tell a step held, so a
 // step goes on without it and it is not excused (CodeRabbit on #327).
 func TestAVoterThatBecomesTheAuditorIsNotLeaving(t *testing.T) {
+	defer withRunners()()
 	logs := captureLog(t)
 	r := newReconcileRig(t, "toauditor.reconcile.example.", roleA)
 	r.n = freezeAt(t, 41, "n", "a,b,n", "")

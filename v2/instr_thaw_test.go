@@ -292,7 +292,7 @@ func TestNoThawWhileTheTransitionUnderWayIsNotDone(t *testing.T) {
 
 func TestNoThawOfARefusedTransition(t *testing.T) {
 	r := newThawRig(t, "refused.thaw.example.", roleA)
-	r.store.Note(r.zone, freezeAt(t, 42, "v", "a", ""), nil) // takes b's role: refused until S17b
+	r.store.Note(r.zone, freezeAt(t, 42, "v", "a,b,zulu", ""), nil) // gives a role to a label with no record
 	if _, ok := r.conf.thawView(r.zone, time.Now()); ok {
 		t.Fatal("a refused serial is agreed on")
 	}
@@ -419,6 +419,11 @@ func TestARefusedNewerSerialDoesNotReplaceTheSerialAgreedOn(t *testing.T) {
 	r.hold()
 	r.hear(roleB, r.agreeing(), true)
 	r.conf.thawTurn(r.zone)
+	st = status(t, r.store, r.zone)
+	if st.Active.Serial != 42 || st.Follows != "" {
+		t.Fatalf("43 taken during 42's transition: active %s, follows %q", serialOf(st.Active), st.Follows)
+	}
+	r.conf.transitionDone(r.zone, 42)
 	st = status(t, r.store, r.zone)
 	// TestARefusedNewerSerialIsJudgedAgainAfterDone
 	if st.Active.Serial != 43 || st.Follows == "" || st.Agreeing != nil {
