@@ -188,6 +188,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			// the leader's rolls of a zone's SIG(0) key: one waiting for
 			// its members, and one whose retry is due (plan S17a)
 			conf.rollsDue(ctx)
+			// a KEY held under another name than the leader's, until the
+			// combiner has dropped it (plan S17a)
+			conf.retryKEYPurges(zdr)
 			// what a zone kept, released when its freeze ended and the
 			// engine's queue had no room, or a restart came between
 			conf.releaseUnfrozen(ctx, zdr)
