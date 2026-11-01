@@ -72,7 +72,7 @@ func TestAPendingZoneFollowsNothingUntilDone(t *testing.T) {
 	if err := s.Know(storeZone, sd(seven), nil, true); err != nil {
 		t.Fatal(err)
 	}
-	s.Note(storeZone, readOf(t, instrBase[0], instrBase[1], `3600 IN HSYNCPARAM serial="8" servers="alpha" signers="alpha"`), nil)
+	s.Note(storeZone, readOf(t, instrBase[0], instrBase[1], `3600 IN HSYNCPARAM serial="8" servers="alpha,beta" signers="alpha,beta"`), nil)
 	if st := status(t, s, storeZone); st.Active.Serial != 7 || st.Follows != "" {
 		t.Fatalf("followed while it may be reconciling: %s", st.Line())
 	}
