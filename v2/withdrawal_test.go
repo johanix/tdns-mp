@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -502,11 +503,12 @@ func TestOnlyARefusalLogsRejectingAContribution(t *testing.T) {
 	send(goneOrigin, &Withdraw{Provider: goneOrigin, RRtype: "NS"}, core.RROperation{Operation: "replace", RRtype: "NS"})
 	send(goneOrigin, nil, add)
 	// a voting origin's edit behind them is kept for approval: once it is,
-	// the two before it have been handled
+	// the two before it have been handled. The withdrawal's own edit is listed
+	// too until it is applied, so look for that origin's.
 	send(csyncLeaderA, nil, add)
 	waitUntil(t, "the edit behind the two was not kept for approval", func() bool {
 		edits, _ := ListPendingEdits(hdb, mpzd.ZoneName)
-		return len(edits) > 0
+		return slices.ContainsFunc(edits, func(e *PendingEditRecord) bool { return e.SenderID == csyncLeaderA })
 	})
 	cancel()
 	<-done
