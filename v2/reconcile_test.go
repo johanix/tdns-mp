@@ -1005,6 +1005,30 @@ func TestADNSKEYDistributionGoesOnWithoutAMemberWithNoRoleAfterTheTimeOut(t *tes
 	}
 }
 
+// So does it for an auditor (design 4, amended 2026-11-02): one that cannot be
+// reached holds no key from going on.
+func TestADNSKEYDistributionGoesOnWithoutAnAuditorAfterTheTimeOut(t *testing.T) {
+	r := newReconcileRig(t, "auditor.dnskey.reconcile.example.", roleA)
+	activeAs(t, r.store, r.zone, freezeAt(t, 42, "v", "a,b", "n")) // n an auditor
+	tm := r.conf.InternalMp.MPTransport
+	tm.noRoleTimeout = time.Hour // the test ends the wait itself
+	tm.TrackDnskeyPropagation(t.Context(), ZoneName(r.zone), "d1", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.ProcessDnskeyConfirmation("d1", roleB, transport.ConfirmSuccess.String(), nil, nil)
+	waits := func() bool {
+		tm.dnskeyPropMu.Lock()
+		defer tm.dnskeyPropMu.Unlock()
+		_, waiting := tm.pendingDnskeyPropagations["d1"]
+		return waiting
+	}
+	if !waits() {
+		t.Fatal("the distribution did not wait for the auditor")
+	}
+	tm.dnskeyNoRoleTimedOut(t.Context(), "d1")
+	if waits() {
+		t.Error("the distribution still waits for the auditor after the time-out")
+	}
+}
+
 // A member that votes when a DNSKEY distribution starts and has no role
 // after a thaw while the distribution waits is not waited for past a
 // time-out: the look at the time-out is made, and made again.

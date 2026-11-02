@@ -740,6 +740,37 @@ func TestWithdrawalDoneReadsEveryRecipient(t *testing.T) {
 	}
 }
 
+// An auditor that has not confirmed is waited for up to the time-out, as a
+// member with no role is (design 4, amended 2026-11-02), and then the leader
+// goes on: one that cannot be reached does not hold a removal's step for good.
+func TestAWithdrawalWaitsForAnAuditorUpToTheTimeOut(t *testing.T) {
+	r := newReceiveRig(t, "auditor.done.withdraw.example.")
+	ar := r.conf.InternalMp.AgentRegistry
+	for _, a := range []AgentId{roleB, roleN} {
+		ar.S.Set(a, NewAgent(a))
+	}
+	r.heldForN(r.n, time.Now(), "ns1.n.example.")
+	r.leads(roleA)
+	activeAs(t, r.store, r.zone, freezeAt(t, 42, "v", "a,b", "n")) // n an auditor
+	tm := r.conf.InternalMp.MPTransport
+	tm.noRoleTimeout = 50 * time.Millisecond
+	distID, err := r.conf.sendWithdrawal(r.zdr, ZoneName(r.zone), roleN, "NS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	zone := ZoneName(r.zone)
+	for _, source := range []string{freezeCombiner, roleB} {
+		r.zdr.ProcessConfirmation(&ConfirmationDetail{DistributionID: distID, Zone: zone, Source: source, Status: "SUCCESS"}, r.conf.InternalMp.MsgQs)
+	}
+	if r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
+		t.Fatal("done before the time-out for the auditor")
+	}
+	time.Sleep(60 * time.Millisecond)
+	if !r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
+		t.Error("not done after the time-out for the auditor")
+	}
+}
+
 // The withdraw field travels on the sync wrapper, and the receiver names
 // the update's agent by it.
 func TestTheWithdrawFieldTravelsOnTheSyncWrapper(t *testing.T) {

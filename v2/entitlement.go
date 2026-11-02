@@ -10,6 +10,8 @@
 package tdnsmp
 
 import (
+	"errors"
+	"maps"
 	"slices"
 	"time"
 
@@ -66,8 +68,11 @@ func (conf *Config) sweep(zdr *ZoneDataRepo, zone ZoneName, in *Instructions) {
 	}
 	cur, ok := conf.InternalMp.Instructions.reconcileInputs(string(zone))
 	if !ok || cur.reconciling {
-		return
+		return // a sweep owed stays owed; that transition's "done" sweeps too
 	}
+	// This sweep answers for any owed: it marks the zone again if it must. If
+	// it stops below, the serial now active had its own sweep at its "done".
+	delete(zdr.sweepsOwed, zone)
 	by := []*Instructions{in}
 	if cur.active.Serial != in.Serial || cur.active.Digest != in.Digest() {
 		if cur.follows == "" || cur.active.Reading == nil {
@@ -96,10 +101,39 @@ func (conf *Config) sweep(zdr *ZoneDataRepo, zone ZoneName, in *Instructions) {
 			if slices.ContainsFunc(by, func(i *Instructions) bool { return entitled(i, origin, t, leader, leaderHolds) }) {
 				continue
 			}
+			// The combiner is asked first: what it could not be asked to drop
+			// stays here, the record of what is owed, and the tick runs this
+			// sweep again (retrySweeps).
+			if err := purgeAtCombiner(conf.InternalMp.MPTransport, zone, origin, t); err != nil {
+				lgEngine.Warn("the combiner could not be asked to drop a contribution its origin is not entitled to; it stays, and is asked for again", "zone", zone, "origin", origin, "rrtype", dns.TypeToString[t], "err", err)
+				if zdr.sweepsOwed == nil {
+					zdr.sweepsOwed = map[ZoneName]sweepOwed{}
+				}
+				zdr.sweepsOwed[zone] = sweepOwed{in: in, at: time.Now()}
+				continue
+			}
 			od.RRtypes.Delete(t)
 			zdr.removeTracking(zone, origin, t)
 			lgEngine.Info("swept a contribution its origin is not entitled to", "zone", zone, "origin", origin, "rrtype", dns.TypeToString[t])
-			purgeAtCombiner(conf.InternalMp.MPTransport, zone, origin, t)
+		}
+	}
+}
+
+// sweepOwed is a sweep to run again: a purge of it could not be queued. It runs
+// by the serial it ran by, so a followed serial still does not widen it.
+type sweepOwed struct {
+	in *Instructions
+	at time.Time
+}
+
+// retrySweeps: the tick's word on the sweeps owed: each runs again once
+// roll-retry has passed since it last ran. What has left since is not asked
+// for twice. On the engine's goroutine, which alone reads sweepsOwed.
+func (conf *Config) retrySweeps(zdr *ZoneDataRepo) {
+	every := rollRetryFor(conf.MpConfig())
+	for zone, owed := range maps.Clone(zdr.sweepsOwed) {
+		if time.Since(owed.at) >= every {
+			conf.sweep(zdr, zone, owed.in)
 		}
 	}
 }
@@ -109,14 +143,13 @@ func (conf *Config) sweep(zdr *ZoneDataRepo, zone ZoneName, in *Instructions) {
 // takes from its own agent only, whether or not the origin votes
 // (combinerTakesRemoval, S16). It goes to this agent's combiner and no
 // further. A test stands in for it.
-var purgeAtCombiner = func(tm *MPTransportBridge, zone ZoneName, origin AgentId, rrtype uint16) {
+var purgeAtCombiner = func(tm *MPTransportBridge, zone ZoneName, origin AgentId, rrtype uint16) error {
 	if tm == nil {
-		return
+		return errors.New("the transport is not available")
 	}
 	purge := (&Withdraw{Provider: string(origin), RRtype: dns.TypeToString[rrtype]}).update(zone)
-	if _, err := tm.EnqueueForCombiner(zone, purge, ""); err != nil {
-		lgEngine.Warn("the combiner could not be asked to drop a contribution its origin is not entitled to", "zone", zone, "origin", origin, "rrtype", dns.TypeToString[rrtype], "err", err)
-	}
+	_, err := tm.EnqueueForCombiner(zone, purge, "")
+	return err
 }
 
 // askSweep has the data engine sweep the zone by the instructions in, and

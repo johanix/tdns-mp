@@ -153,6 +153,114 @@ func TestTheKeyOffersPassWhileARolloverWaitsOnKeyPending(t *testing.T) {
 	}
 }
 
+// A step's own sync waits for the zone's key, before the freeze looks at it:
+// while one is asked the key's offers pass as a step (design 6), and held again
+// once the step is over.
+func TestTheKeyOffersPassWhileAStepsOwnSyncWaitsForTheKey(t *testing.T) {
+	r := newNotifyRig(t, "offers.step.example.", "UPDATE")
+	var polled atomic.Int32
+	r.conf.InternalMp.keyPoll = func(context.Context, ZoneName, string, uint16, uint8) { polled.Add(1) }
+	saved := stepSyncAsk
+	stepSyncAsk = func(*Config, string, string) {}
+	t.Cleanup(func() { stepSyncAsk = saved })
+	k := testSig0Key(t, r.mpzd.KeyDB, r.mpzd.ZoneName)
+	freezeServed(t, r.conf, r.mpzd)
+	z := ZoneName(r.mpzd.ZoneName)
+	r.conf.askStepSync(r.mpzd.ZoneName, "a removal's NS step")
+	if held := r.conf.ParentSyncAfterKeyPublication(r.ctx, z, r.mpzd.ZoneName, k.keyid, dns.ED25519); held || polled.Load() != 1 {
+		t.Errorf("the key's offer while a step's own sync waits: held %v, polled %d", held, polled.Load())
+	}
+	r.conf.InternalMp.reconciles.stepTaken(canonicalName(r.mpzd.ZoneName))
+	if held := r.conf.ParentSyncAfterKeyPublication(r.ctx, z, r.mpzd.ZoneName, k.keyid, dns.ED25519); !held || polled.Load() != 1 {
+		t.Errorf("the key's offer once the step is over: held %v, polled %d", held, polled.Load())
+	}
+}
+
+// The agent that led the zone leaves it, and this agent leads during the
+// removal. The freeze holds its key's publication, which holds the sync of the
+// removal's NS step, and that step is what the freeze waits for. It ends with
+// the step: the step's ask lets the key out, its poll ends, and the sync goes.
+// The two ways in: a key taken from the leaver and never polled here, and a key
+// this agent has on record as trusted, after a restart or with the lead back.
+func TestALeaderOfAZoneUnderRemovalGetsTheStepsSyncOut(t *testing.T) {
+	for name, state := range map[string]uint8{
+		"never polled here": edns0.KeyStateUnknown,
+		"trusted on record": edns0.KeyStateTrusted,
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newKeyHoldRig(t, "elected.removal.example.")
+			r.notifyRig.us.Bridge.combinerID = rigCombiner
+			tdns.UpdateParentState(r.mpzd.KeyDB, string(r.zone), r.key.keyid, state)
+			freezeServed(t, r.conf, r.mpzd)
+			if err := r.conf.leaderKeySetup(r.ctx, r.zone, true); !errors.Is(err, errHeldDuringTransition) {
+				t.Fatalf("the set-up during the freeze: %v\n%s", err, r.log)
+			}
+			if _, why := r.conf.keyHold(r.ctx, r.zone); why != "not published" {
+				t.Fatalf("the hold after the set-up: %q", why)
+			}
+			r.conf.askStepSync(string(r.zone), "a removal's NS step")
+			time.Sleep(200 * time.Millisecond)
+			if n := r.parent.updatesSeen(); n != 0 {
+				t.Fatalf("%d UPDATEs reached the parent with the key not published", n)
+			}
+			if !r.conf.wantsZoneKey(r.ctx, r.zone) {
+				t.Fatal("the key rounds do not look at a key not published")
+			}
+			r.conf.decideZoneKey(r.ctx, r.zone, nil) // the round the step's ask starts
+			select {
+			case <-r.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("the key's poll did not start as a step\n%s", r.log)
+			}
+			close(r.release)
+			waitUntil(t, "the key's hold ended with the poll", func() bool { return r.conf.keyHoldReason(r.ctx, r.zone) == "" })
+			// the step's next ask, at most a minute on
+			rb := &r.conf.InternalMp.reconciles
+			rb.mu.Lock()
+			rb.zone(canonicalName(string(r.zone))).syncAt = time.Time{}
+			rb.mu.Unlock()
+			r.conf.askStepSync(string(r.zone), "a removal's NS step")
+			waitUntil(t, "the step's sync went out\n"+r.log.String(), func() bool { return r.parent.updatesSeen() > 0 })
+		})
+	}
+}
+
+// A new leader that holds no key takes it during the removal, before any step
+// has asked the sync: the freeze holds the publication, and the round is over.
+// The step's ask opens the rounds again, and the key is published and polled.
+func TestAKeyTakenBeforeAStepAsksIsPublishedWhenItDoes(t *testing.T) {
+	r := newKeyRoundRig(t, "taken.removal.example.", "UPDATE")
+	r.conf.InternalMp.keyPoll = func(_ context.Context, _ ZoneName, _ string, keyid uint16, _ uint8) { r.polls <- keyid }
+	saved := stepSyncAsk
+	stepSyncAsk = func(*Config, string, string) {}
+	t.Cleanup(func() { stepSyncAsk = saved })
+	k := testSig0Key(t, newMPTestKeyDB(t), string(r.zone))
+	r.publish(t, k)
+	r.caughtUp()
+	freezeServed(t, r.conf, r.mpzd)
+	if !r.decide(map[AgentId]keyReply{r.them: {outcome: keyGot, data: keyData(k)}}) {
+		t.Fatal("the round did not end with the key taken")
+	}
+	r.notPolled(t, "the key taken during the freeze")
+	if !r.conf.keyToPublish(r.zone) {
+		t.Fatal("the key taken and held back does not count as not published")
+	}
+	r.conf.askStepSync(string(r.zone), "a removal's NS step")
+	r.tr.mu.Lock()
+	checked := r.tr.keyChecks[ZoneName(dns.Fqdn(string(r.zone)))]
+	r.tr.mu.Unlock()
+	if !checked {
+		t.Error("the step's ask did not open the key rounds")
+	}
+	r.decide(nil)
+	if keyid := r.polled(t, "the key taken, as a step"); keyid != k.keyid {
+		t.Errorf("key %d polled, want %d", keyid, k.keyid)
+	}
+	if r.conf.keyToPublish(r.zone) {
+		t.Error("the key published still counts as not published")
+	}
+}
+
 // Every sync the leader asks for, the election's included, waits until the
 // parent trusts the zone's key, and goes out when it does.
 func TestTheSyncIsHeldUntilTheKeyIsUsable(t *testing.T) {
