@@ -81,6 +81,42 @@ func TestAStandbyKeysAdditionIsNoRollover(t *testing.T) {
 	}
 }
 
+// A role's first key is no standby key, whatever the standby count: T9
+// promotes it once standby, under a hold too (Tick). It counts as before.
+func TestARolesFirstKeyIsNoAddition(t *testing.T) {
+	pol := driverPolicy
+	pol.StandbyKSK, pol.StandbyZSK = 1, 1
+	r := newDriverRig(t, "first.owned.example.", pol, "p2")
+	r.tick("the first keys minted")
+	keys := map[string]uint16{"KSK": r.onlyKey(KeyStateMpdist, "KSK"), "ZSK": r.onlyKey(KeyStateMpdist, "ZSK")}
+	r.confirmAll("applied", keys["KSK"], keys["ZSK"])
+	for _, hold := range []bool{false, true} {
+		r.l.SetHold(hold)
+		f, err := r.l.RolloverFlags()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for role, k := range keys {
+			if st := r.state(k); st != KeyStatePublished {
+				t.Fatalf("the first %s confirmed: %s, want published", role, st)
+			}
+			if f.Additions[k] {
+				t.Errorf("hold %v: the first %s named a standby key's addition", hold, role)
+			}
+		}
+		if !r.underWay() {
+			t.Errorf("hold %v: the role's first keys in published: not counted", hold)
+		}
+	}
+	r.clock.Advance(pol.PropagationDelay + r.wire.ttl + time.Second)
+	r.tick("T8 and T9, held")
+	for role, k := range keys {
+		if st := r.state(k); st != KeyStateActive {
+			t.Errorf("the first %s under a hold: %s, want active", role, st)
+		}
+	}
+}
+
 // A rollover's new key in published still counts, whichever asked for it,
 // and so does a key in published where only the rows can be read.
 func TestARolloversNewKeyInPublishedStillCounts(t *testing.T) {
