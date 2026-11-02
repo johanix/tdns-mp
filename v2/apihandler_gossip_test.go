@@ -3,42 +3,32 @@ package tdnsmp
 import (
 	"testing"
 	"time"
-
-	"github.com/miekg/dns"
 )
 
-func TestProviderGroupForGossipZone_fromGossipStateTable(t *testing.T) {
+// A zone's group is the group manager's alone (plan S22): a row of gossip
+// lists no zone, and a row that lists one, from an agent before S22, finds
+// no group for it.
+func TestTheGroupOfAZoneComesFromTheGroupManagerOnly(t *testing.T) {
+	const hash, zone = "abc123", "customer.example."
 	ar := &AgentRegistry{
-		GossipStateTable: NewGossipStateTable("auditor.example."),
+		ProviderGroupManager: NewProviderGroupManager("auditor.example."),
+		GossipStateTable:     NewGossipStateTable("auditor.example."),
 	}
-	hash := "abc123"
 	ar.GossipStateTable.mu.Lock()
 	ar.GossipStateTable.States[hash] = map[string]*MemberState{
-		"agent.hare.mp.axfr.net.": {
-			Identity:   "agent.hare.mp.axfr.net.",
-			Timestamp:  time.Now(),
-			Zones:      []string{"customer.mptest."},
-			PeerStates: map[string]string{"agent.fox.mp.axfr.net.": "OPERATIONAL"},
-		},
-		"agent.fox.mp.axfr.net.": {
-			Identity:  "agent.fox.mp.axfr.net.",
-			Timestamp: time.Now(),
-			Zones:     []string{"customer.mptest."},
-		},
+		"agent.a.example.": {Identity: "agent.a.example.", Timestamp: time.Now(), Zones: []string{zone}},
 	}
 	ar.GossipStateTable.mu.Unlock()
+	if pg, _, err := providerGroupForGossipZone(ar, zone); err == nil {
+		t.Fatalf("a group found from the rows: %+v", pg)
+	}
 
-	pg, gotHash, err := providerGroupForGossipZone(ar, "customer.mptest.")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gotHash != hash {
-		t.Fatalf("hash = %q, want %q", gotHash, hash)
-	}
-	if len(pg.Members) != 2 {
-		t.Fatalf("members = %v, want 2", pg.Members)
-	}
-	if dns.Fqdn(string(pg.Zones[0])) != "customer.mptest." {
-		t.Fatalf("zones = %v", pg.Zones)
+	ar.ProviderGroupManager.mu.Lock()
+	ar.ProviderGroupManager.Groups[hash] = &ProviderGroup{GroupHash: hash,
+		Members: []string{"agent.a.example.", "agent.b.example."}, Zones: []ZoneName{zone}}
+	ar.ProviderGroupManager.mu.Unlock()
+	pg, got, err := providerGroupForGossipZone(ar, "customer.example")
+	if err != nil || got != hash || len(pg.Members) != 2 {
+		t.Fatalf("the group: %+v %q %v, want %s with both members", pg, got, err, hash)
 	}
 }

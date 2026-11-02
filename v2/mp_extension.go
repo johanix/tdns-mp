@@ -94,10 +94,11 @@ type MPState struct {
 	// of followParentSyncParam. An option that comes on because a refresh
 	// names this agent where the last one did not is no give-back.
 	ParentSyncNamed bool
-	// SigningChanged: a refresh changed the zone's signing set
-	// (advanceSigningSet). Set by the pre-refresh callback, taken by the
-	// post-refresh one, which asks the leader's sync (afterSigningSetChange).
-	SigningChanged bool
+	// dsSignersSeen are the DS signers the last check for a change of them
+	// saw (dsSignersChanged), and dsSignersKnown that one was made. Guarded
+	// by the zone's lock.
+	dsSignersSeen  []Provider
+	dsSignersKnown bool
 
 	// absentForeign: the signer's foreign rows whose keys the last incoming
 	// zone lacked, kept because foreignKeyWithdrawn did not let them go
