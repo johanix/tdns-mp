@@ -157,7 +157,8 @@ func TestTheSweepRunsWhenDoneFollowsASerialNotBuilt(t *testing.T) {
 	r := newSweepRig(t, "followed.sweep.example.")
 	r.holds(roleN, dns.TypeNS, dns.TypeDNSKEY)
 	r.holds(roleB, dns.TypeNS)
-	r.store.Note(r.zone, removalAt(t, 43, "agent", "a,n", "a"), nil)
+	// pubkey is a kind with no step yet: refused as not built, so 43 is followed at done
+	r.store.Note(r.zone, jAt(t, 43, `servers="a,n" nsmgmt="agent" signers="a" pubkey`, freezeRecords...), nil)
 	r.run()
 	if st := status(t, r.store, r.zone); st.Active.Serial != 43 || st.Follows == "" {
 		t.Fatalf("43 is not followed at done: %s", st.Line())
