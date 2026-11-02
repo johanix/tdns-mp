@@ -165,7 +165,7 @@ func (conf *Config) wantedHandover(zone string) *ActingHandover {
 		}
 	}
 	_, _, h.Step = instrStore.Load().transition(zone)
-	h.MinSerial = conf.InternalMp.signerAdds.served(zone, h.Serial)
+	h.MinSerial, _ = conf.InternalMp.signerAdds.served(zone, h.Serial)
 	return h
 }
 

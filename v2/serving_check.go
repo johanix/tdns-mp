@@ -182,9 +182,9 @@ func signedByOneOf(rrset *core.RRset, keys []dns.RR, now time.Time) error {
 // servesOwnSignatures: each of the nameservers serves the zone from this
 // provider's own signer (design 5.1, plan S18b): a DNSKEY RRset with an RRSIG by
 // one of its KSKs among keys, in its validity period, that verifies, at an SOA
-// serial above the one they served (above; 0 says none is known). The RRset is
-// the zone's whole, and other signatures on it are not this check's.
-func servesOwnSignatures(ctx context.Context, zone string, nameservers []string, keys []dns.RR, above uint32, now time.Time) error {
+// serial above the one they served (above, when aboveKnown). The RRset is the
+// zone's whole, and other signatures on it are not this check's.
+func servesOwnSignatures(ctx context.Context, zone string, nameservers []string, keys []dns.RR, above uint32, aboveKnown bool, now time.Time) error {
 	if len(nameservers) == 0 {
 		return errors.New("multi-provider.local.nameservers names none")
 	}
@@ -197,7 +197,7 @@ func servesOwnSignatures(ctx context.Context, zone string, nameservers []string,
 	if len(ksks) == 0 {
 		return errors.New("no KSK of this provider's is known here")
 	}
-	if above != 0 {
+	if aboveKnown {
 		for _, ns := range nameservers {
 			served, err := highestServedSerial(ctx, zone, []string{ns})
 			if err != nil {
