@@ -117,6 +117,47 @@ func TestARolesFirstKeyIsNoAddition(t *testing.T) {
 	}
 }
 
+// The inventory a hand-over pushes confirms the hold, and reads the keys by
+// that same hold, though the machine hears of it only at its next tick: a due
+// key in published is an addition under the hold, and a rollover's without it.
+func TestTheInventoryReadsTheKeysByTheHoldItConfirms(t *testing.T) {
+	const zone = "due.hold.signer.example."
+	const lifetime = 30 * 24 * time.Hour
+	records := sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)
+	s := newSignerRig(t, zone, records...)
+	pol := driverPolicy
+	pol.StandbyZSK, pol.ZSKLifetime = 1, lifetime
+	clock, wire := &fakeClock{t: time.Now()}, newFakeWire("p2")
+	r := &driverRig{t: t, kdb: s.kdb, zd: s.mpzd, clock: clock, wire: wire, l: NewZoneKeyLifecycle(zone, s.kdb, clock, pol, wire)}
+	s.e.zones[zone] = r.l
+	bootstrapKSK(t, r)
+	r.tick("the standby minted")
+	r.confirmAll("applied", r.onlyKey(KeyStateMpdist, "ZSK"))
+	clock.Advance(lifetime + time.Hour)
+	marks := func() inventoryMarks {
+		inv, err := tdns.GetKeyInventory(s.kdb, zone)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s.conf.inventoryMarksOf(zone, inv)
+	}
+	if m := marks(); m.hold || !m.rollover {
+		t.Fatalf("a due ZSK's successor in published: hold %v, rollover %v", m.hold, m.rollover)
+	}
+	on := handoverFor(t, zone, records...)
+	on.Sets.Hold = true
+	s.hand(on, sigUs)
+	if m := marks(); !m.hold || m.rollover {
+		t.Errorf("handed the hold, no tick since: hold %v, rollover %v; want the hold and no rollover", m.hold, m.rollover)
+	}
+	off := handoverFor(t, zone, records...)
+	off.Made = on.Made.Add(time.Second)
+	s.hand(off, sigUs)
+	if m := marks(); m.hold || !m.rollover {
+		t.Errorf("handed the hold's end, no tick since: hold %v, rollover %v; want no hold and a rollover", m.hold, m.rollover)
+	}
+}
+
 // A rollover's new key in published still counts, whichever asked for it,
 // and so does a key in published where only the rows can be read.
 func TestARolloversNewKeyInPublishedStillCounts(t *testing.T) {
