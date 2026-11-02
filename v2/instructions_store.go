@@ -1060,7 +1060,8 @@ func (mpzd *MPZoneData) dsSignersChanged() bool {
 // with no key and no inventory changing, so it asks the leader's
 // delegation sync (plan S13): explicit, an update only where the parent
 // differs; an agent that does not lead, and a zone whose parent the owner
-// syncs, ask for nothing.
+// syncs, ask for nothing. The agent's data follows the sets' nsmgmt (plan
+// S19).
 func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack bool) {
 	if recompute && mpzd.Options[tdns.OptMultiProvider] {
 		// Computed on a wrapper of the zone as served, with a map of its own,
@@ -1097,6 +1098,7 @@ func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack b
 	if mpzd.dsSignersChanged() {
 		conf.requestDelegationSync(nil, mpzd.ZoneName, "the step's DS set changed")
 	}
+	conf.followNSmgmt(mpzd)
 	conf.handOverToParts(mpzd.ZoneName) // the agent's combiner and signer act by the sets too (S10, S11)
 	return givenBack
 }

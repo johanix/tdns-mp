@@ -694,6 +694,21 @@ func (t *stampTable) heard(identity string) *memberStamp {
 	return &c
 }
 
+// nameserversOf are the nameserver names identity tells in its stamp row
+// (rule 4), this agent's own for itself; nil with none.
+func (t *stampTable) nameserversOf(identity string) []string {
+	if t == nil {
+		return nil
+	}
+	if canonicalName(identity) == canonicalName(t.localID) {
+		return slices.Clone(t.nameservers)
+	}
+	if m := t.heard(identity); m != nil {
+		return m.Nameservers
+	}
+	return nil
+}
+
 // toldStamp is a member's latest first-hand stamp of one zone, as the thaw
 // reads it (plan S7): when it was heard, and whether the member's beats are
 // encrypted (memberStamp.encrypted).

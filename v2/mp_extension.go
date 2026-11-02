@@ -99,6 +99,10 @@ type MPState struct {
 	// by the zone's lock.
 	dsSignersSeen  []Provider
 	dsSignersKnown bool
+	// nsmgmtSeen is the nsmgmt the last look saw (nsmgmtChanged), and
+	// nsmgmtKnown that one was made. Guarded by the zone's lock.
+	nsmgmtSeen  uint8
+	nsmgmtKnown bool
 
 	// absentForeign: the signer's foreign rows whose keys the last incoming
 	// zone lacked, kept because foreignKeyWithdrawn did not let them go

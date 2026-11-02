@@ -709,8 +709,14 @@ func applyEditsToSDE(zd *tdns.ZoneData, agentRecords map[string]map[string][]str
 	}
 
 	zone := ZoneName(zd.ZoneName)
+	// under nsmgmt=owner what the combiner stores of NS is no agent's data
+	// (plan S19): a late contribution there does not come back here
+	nsOwner := nsLeftToOwner(zone)
 	leave := func(agent AgentId, rrtype uint16) bool {
 		if rrtype == dns.TypeDNSKEY && isAmong([]string{string(self)}, agent) {
+			return true
+		}
+		if rrtype == dns.TypeNS && nsOwner {
 			return true
 		}
 		return !zdr.mayApplyOwnRead(zone, agent, rrtype, sentAt)

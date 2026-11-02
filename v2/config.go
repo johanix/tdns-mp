@@ -382,4 +382,7 @@ type InternalMpConf struct {
 	// reconciles: what the agent and the auditor keep of their zones'
 	// reconciliations in memory (reconcile.go).
 	reconciles reconcileBook
+	// ownersNSLogged is when each report of the owner's NS RRset was last
+	// logged (nsmgmt.go); the data engine's.
+	ownersNSLogged map[string]time.Time
 }

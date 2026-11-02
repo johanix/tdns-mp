@@ -211,7 +211,7 @@ The sizes are estimates from reading the code, tests apart: files touched, and l
 | S17b | The removal, and the sweep | S13, S15, S16, S17a | 14 | 675 | 130 | Not started |
 | S18a | A record, a server role, a provider put back | S13, S15, S16 | 6 | 190 | 40 | Not started |
 | S18b | A signer added; a server becomes a signer | S18a, S11, S12; P5 | 6 | 290 | 75 | Not started |
-| S19 | NS management | S5a, S10, S12 | 5 | 130 | 40 | Not started |
+| S19 | NS management | S5a, S10, S12 | 5 | 130 | 40 | **Built** (2026-11-02), on main `4775cf26` (S5a, S10 and S12 merged): its pull request carries this cell. 13 files of Go, about 350 new lines with their comments and 5 changed; tests 7 files, about 790. Lifts S4's `not-built` for `nsmgmt`. The fleet check has not run |
 | S20 | Parent sync | S12, S14, S17a; P3 (#209 done) | 7 | 220 | 60 | Not started |
 | S21 | An upstream; `pubkey` and `pubcds` | S18a, S12; P6 (#167 done) | 7 | 170 | 40 | Not started |
 | S22 | Tellings by interest | S5a, S12 (membership step 8 done) | 5 | 90 | 60 | **Built** (2026-10-29), on main since S12 merged (#327, main `047dec2`), ahead of S13 and S15 to S21: its pull request carries this cell. 11 files, about 525 new and 100 changed lines, of which the optional part removes about 65; tests about 920. Amended 2026-10-30: a beat tells what fits (its status note, item 7), accepted by the project owner on 2026-11-02 as a stopgap until the beats are redesigned after the IETF (tdns-mp #356) |
@@ -1310,6 +1310,18 @@ The membership plan's step 10 (#158), under this design.
 **Done when** the fleet check passes.
 
 **Size.** 5 files, about 130 new and 40 changed lines.
+
+**Status (2026-11-02):** Built, on main `4775cf26`. Unit tests pass; the fleet check has not run. The runner is `v2/nsmgmt.go`. Where the text left a choice, its plain reading, for the project owner with the complete stack:
+
+1. **The combiner drops both ways.** The text has the drop under "to the agents", and says "when the handed role changes `nsmgmt`". Built as the words say: at any change between two hand-overs, so to the owner too. An agent's own read from its combiner then finds no NS under `owner`. A first hand-over changes no handed role and drops nothing. The drop runs before the hand-over is kept, so a stop between the two drops the rest at the next hand-over. One that cannot be persisted has the hand-over refused, and the agent hands it again.
+2. **The agent drops the NS of every origin, not only its own.** Its data also holds its peers' NS, and a resync hands those to its combiner, so a stale name would come back after a change to the agents. Treated as a bug. It runs at the change, either way. Under `owner` it also runs on the data engine's round (`ownReadInterval`, 30 seconds), for a message that arrives late or a request a full queue did not take.
+3. **An own read under `owner` takes no NS.** Not in the text. Without it a late contribution the combiner stored comes back into the agent's data at a restart. A zone whose instructions are not known here is not read as `owner`, whatever the default says: nothing is dropped or left out on a default.
+4. **"Whose role is not done".** Read as: a provider of the zone (an ON record under the active serial, in the sets held, or a removal under way) that the sets held or the active serial does not name in `servers=`. So a record with no role and a signer that serves nothing are reported, and an auditor is not. Its names are those it tells in its stamp row, and for a removal also those the removal keeps, which S17b's "the status says so" needs. A provider with no record for the zone is not checked, even when the owner's NS RRset names its servers.
+5. **The report in the status** is a `warning:` line of `agent parentsync status`, one per provider. It is not in `zone mplist`.
+6. **The step is held when the parts hold it.** There is no `holds` hook, as "done when the parts hold the serial" says. The agent's drop follows on the data engine's goroutine; the catch-up answer reads the sets, so it names no NS from the step on.
+7. **The parent.** Nothing new asks for a sync: the refresh that brings the new NS to the agent's copy asks, as for any change of the NS RRset (#248). Only the fleet check shows this end to end.
+8. **In a transition that also adds a provider,** the step comes after the additions' steps, by its kind (a role change), so "its first step" holds only with no addition. S18a's server role is the first case.
+9. **Tests.** `TestAMemberThatMovesStraightJudgesTheThawsPairNotItsOwn` used `nsmgmt` as its refused kind and now uses `parentsync`, which S20 has to change again. S10's fleet text also uses a change of `nsmgmt` as its refused serial: from this step it needs another kind. Three rigs whose agents hold NS (`newAnswerRig`, `newOwnRig`, `newReReadRigFor`) read as the default `owner` and now say `nsmgmt=agent`. The guide's section 6 no longer lists `nsmgmt` as refused and says what the change does.
 
 ### S20. Parent sync
 

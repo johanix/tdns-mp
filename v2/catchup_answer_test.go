@@ -36,6 +36,7 @@ func newAnswerRig(t *testing.T, zone string, signers []string) *answerRig {
 	asMPAgent(t)
 	mpzd := providersTestZone(t, zone, []string{"us", "p2", "p3"}, signers)
 	mpzd.Ready = true
+	nsToTheAgents(t, mpzd.ZoneData)
 	mpzd.EnsureMP()
 	mpzd.MP.MPdata = &MPdata{WeAreProvider: true, OurLabel: "us", WeAreSigner: slices.Contains(signers, "us"), ZoneSigned: len(signers) > 0}
 	conf := &Config{Config: &tdns.Config{}}

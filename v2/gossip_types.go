@@ -298,6 +298,9 @@ type ParentSyncStatus struct {
 	// (instr_freeze.go). Empty when it is not frozen and keeps nothing.
 	Frozen string `json:"frozen,omitempty"`
 	Kept   string `json:"kept,omitempty"`
+	// OwnersNS is the report of an owner's NS RRset that names the servers
+	// of a provider whose role is not done (plan S19).
+	OwnersNS []string `json:"owners_ns,omitempty"`
 	// Combiner is what the agent knows its combiner acts by for the zone
 	// (the hand-over, plan S10); empty when it hands it nothing.
 	Combiner string `json:"combiner,omitempty"`
