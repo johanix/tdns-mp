@@ -263,6 +263,28 @@ func signerActingLine(zone string) string {
 	return "waiting for its agent's hand-over"
 }
 
+// signerStartReport is one round of the start report: reported are the zones
+// that have reported. A withheld zone reports again whatever its copy says by
+// now: only its agent's word ends the withholding, and that answers a report.
+func (conf *Config) signerStartReport(reported map[string]bool) {
+	for _, zone := range conf.InternalMp.MPZoneNames {
+		mpzd, ok := Zones.Get(zone)
+		if !ok || mpzd == nil {
+			continue
+		}
+		withheld := mpzd.Withheld()
+		if !mpzd.Ready && !withheld {
+			continue
+		}
+		apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+		if reported[mpzd.ZoneName] && !withheld && !signerWaits(mpzd.ZoneName, apex) {
+			continue
+		}
+		reported[mpzd.ZoneName] = true
+		pushSignerInventory(conf, mpzd.ZoneName)
+	}
+}
+
 // signerReportEvery is how often the signer reports again the zones that
 // wait for their agents' hand-over.
 const signerReportEvery = 15 * time.Second
@@ -276,20 +298,7 @@ const signerReportEvery = 15 * time.Second
 // The agent hands a zone over whenever the signer does not hold what it wants.
 func (conf *Config) reportSignerStart(ctx context.Context) {
 	reported := map[string]bool{}
-	report := func() {
-		for _, zone := range conf.InternalMp.MPZoneNames {
-			mpzd, ok := Zones.Get(zone)
-			if !ok || mpzd == nil || !mpzd.Ready && !mpzd.Withheld() {
-				continue
-			}
-			apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-			if reported[mpzd.ZoneName] && !signerWaits(mpzd.ZoneName, apex) {
-				continue
-			}
-			reported[mpzd.ZoneName] = true
-			pushSignerInventory(conf, mpzd.ZoneName)
-		}
-	}
+	report := func() { conf.signerStartReport(reported) }
 	report()
 	ticker := time.NewTicker(signerReportEvery)
 	defer ticker.Stop()

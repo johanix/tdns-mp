@@ -15,7 +15,8 @@
  *     leader syncs under parentsync=agent, and the step waits until the parent
  *     serves it, whoever put it there.
  *  3. The caches' time. Its key machine waits the DS TTL at the parent before its
- *     KSK goes active (T9): the step waits until its key states show them active.
+ *     KSK goes active (T9), asking one server: the step waits until its key states
+ *     show them active, and for the DS TTL from when every server served its DS.
  *     Its agent asks its nameservers what they serve, once it serves at all, for
  *     the serial its signed copy must land above.
  *  4. Its own signatures. It enters Signing. Its signer starts signing, its agent
@@ -31,7 +32,9 @@ package tdnsmp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -146,11 +149,14 @@ func signerAddStepsOf(joiner Provider, first bool) []plannedStep {
 			return "the parent (" + id + "'s DS)"
 		}}
 	caches := plannedStep{key: key(signerAddCaches), provider: id, what: what(3, "the caches' time"),
-		wait: func(conf *Config, zone string, _ time.Time) string {
-			if conf.joinerKeysIn(zone, id, KeyStateActive) {
-				return ""
+		wait: func(conf *Config, zone string, since time.Time) string {
+			switch {
+			case !conf.joinerKeysIn(zone, id, KeyStateActive):
+				return id + " (its KSK and ZSK active)"
+			case time.Since(since) < conf.InternalMp.signerAdds.parentDSTTL(conf, zone):
+				return "the DS TTL at the parent, since every server there serves " + id + "'s DS"
 			}
-			return id + " (its KSK and ZSK active)"
+			return ""
 		}}
 	own := plannedStep{key: key(signerAddOwn), provider: id, what: what(4, "its own signatures served"),
 		sets: func(h Roles) Roles {
@@ -236,8 +242,8 @@ func (conf *Config) joinerKeys(zone, id string, each func(flags, keytag uint16, 
 	}
 }
 
-// joinerDSAtParent: the parent, as last looked at, serves the DS of a KSK of id
-// whose ds is set. A look is asked while the step waits, and under
+// joinerDSAtParent: the parent, as last looked at, serves at every server the DS
+// of a KSK of id whose ds is set. A look is asked while the step waits, and under
 // parentsync=agent the leader's sync asked again now and then: explicit, an
 // update only where the parent differs. Under parentsync=owner the owner adds
 // the DS, and the step's test is the same.
@@ -248,8 +254,8 @@ func (conf *Config) joinerDSAtParent(zone, id string) bool {
 			tags = append(tags, keytag)
 		}
 	})
-	served, known := conf.InternalMp.signerAdds.parentDS(conf, zone)
-	if known && slices.ContainsFunc(tags, func(t uint16) bool { return served[t] }) {
+	seen, known := conf.InternalMp.signerAdds.parentDS(conf, zone)
+	if known && slices.ContainsFunc(tags, func(t uint16) bool { return seen.tags[t] }) {
 		return true
 	}
 	if rolesForZone(ZoneName(zone)).ParentSync == core.HsyncParentSyncAgent && conf.InternalMp.signerAdds.syncDue(conf, zone) {
@@ -261,35 +267,64 @@ func (conf *Config) joinerDSAtParent(zone, id string) bool {
 // askJoinersDS asks the leader's delegation sync; a test stands in for it.
 var askJoinersDS = func(conf *Config, zone, why string) { conf.requestDelegationSync(nil, zone, why) }
 
-// parentDSLook asks the parent's servers for the zone's DS RRset: the key tags
-// it holds. A test stands in for it.
-var parentDSLook = func(conf *Config, zone string) (map[uint16]bool, error) {
+// parentDSSeen is what the parent serves of the zone's DS RRset: the key tags
+// that every server that answered holds, and the largest TTL they gave it.
+type parentDSSeen struct {
+	tags map[uint16]bool
+	ttl  time.Duration
+}
+
+// parentDSLook asks the parent's servers for the zone's DS RRset. A test stands
+// in for it.
+var parentDSLook = func(conf *Config, zone string) (parentDSSeen, error) {
 	mpzd, ok := Zones.Get(zone)
 	if !ok || mpzd == nil || mpzd.ZoneData == nil {
-		return nil, fmt.Errorf("zone %s is not here", zone)
+		return parentDSSeen{}, fmt.Errorf("zone %s is not here", zone)
 	}
 	if conf.Config == nil || conf.Config.Internal.ImrEngine == nil {
-		return nil, fmt.Errorf("no resolver to ask the parent of %s with yet", zone)
+		return parentDSSeen{}, fmt.Errorf("no resolver to ask the parent of %s with yet", zone)
 	}
 	if err := mpzd.FetchParentData(conf.Config.Internal.ImrEngine); err != nil {
-		return nil, err
+		return parentDSSeen{}, err
 	}
-	last := fmt.Errorf("no parent server is known for %s", zone)
-	for _, server := range mpzd.ParentServers {
-		rrs, err := tdns.AuthQuery(mpzd.ZoneName, server, dns.TypeDS)
+	return dsAtEveryServer(mpzd.ParentServers, func(server string) ([]dns.RR, error) {
+		return tdns.AuthQuery(mpzd.ZoneName, server, dns.TypeDS)
+	})
+}
+
+// dsAtEveryServer is parentDSSeen from asking each of servers. A validator may
+// be handed the DS RRset of any of them, and one without the joiner's DS finds
+// nothing to validate its signatures with, so a tag counts only if every server
+// that answers holds it. One that does not answer hands nothing to anyone; with
+// no answer at all nothing is known.
+func dsAtEveryServer(servers []string, ask func(server string) ([]dns.RR, error)) (parentDSSeen, error) {
+	var seen parentDSSeen
+	var last error
+	for _, server := range servers {
+		rrs, err := ask(server)
 		if err != nil {
 			last = err
 			continue
 		}
-		served := map[uint16]bool{}
+		tags := map[uint16]bool{}
 		for _, rr := range rrs {
 			if ds, ok := rr.(*dns.DS); ok {
-				served[ds.KeyTag] = true
+				tags[ds.KeyTag] = true
+				seen.ttl = max(seen.ttl, time.Duration(ds.Hdr.Ttl)*time.Second)
 			}
 		}
-		return served, nil
+		if seen.tags != nil {
+			maps.DeleteFunc(tags, func(tag uint16, _ bool) bool { return !seen.tags[tag] })
+		}
+		seen.tags = tags
 	}
-	return nil, last
+	if seen.tags != nil {
+		return seen, nil
+	}
+	if last == nil {
+		last = errors.New("no parent server is known")
+	}
+	return parentDSSeen{}, last
 }
 
 // --- This provider's part ---
@@ -402,8 +437,9 @@ type signerAddLooks struct {
 	own       bool
 	ownAt     time.Time
 	ownRun    bool
-	// the parent's DS RRset
-	parent    map[uint16]bool
+	// the parent's DS RRset, and the largest TTL it was seen with
+	parent    parentDSSeen
+	parentTTL time.Duration
 	parentOK  bool
 	parentAt  time.Time
 	parentRun bool
@@ -442,14 +478,15 @@ func lookCtx() (context.Context, context.CancelFunc) {
 }
 
 // served is the serial this provider's nameservers last served, under the active
-// serial; 0 when none is known.
-func (b *signerAddBook) served(zone string, active uint32) uint32 {
+// serial, and whether one is known. Serial 0 is a serial: StartSigning takes 0 as
+// none, and lands above what the zone itself served in any case.
+func (b *signerAddBook) served(zone string, active uint32) (uint32, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if l := b.zones[canonicalName(zone)]; l != nil && l.serial == active && l.knows {
-		return l.served
+		return l.served, true
 	}
-	return 0
+	return 0, false
 }
 
 // servedKnown: what its nameservers serve is known. They are asked again every
@@ -500,7 +537,8 @@ func (b *signerAddBook) ownServed(conf *Config, zone string) bool {
 			ctx, cancel := lookCtx()
 			defer cancel()
 			mp := conf.MpConfig()
-			err := servesOwnSignatures(ctx, zone, mp.Local.Nameservers, conf.signerKeys(zone, []string{mp.Identity}), b.served(zone, l.serial), time.Now())
+			above, known := b.served(zone, l.serial)
+			err := servesOwnSignatures(ctx, zone, mp.Local.Nameservers, conf.signerKeys(zone, []string{mp.Identity}), above, known, time.Now())
 			b.mu.Lock()
 			l.ownRun, l.ownAt, l.own = false, time.Now(), err == nil
 			b.mu.Unlock()
@@ -523,7 +561,7 @@ func (b *signerAddBook) ownHeld(conf *Config, zone string) bool {
 
 // parentDS is the parent's DS RRset as last looked at, and whether a look has
 // found out. Another is asked once the last is older than signerAddLookEvery.
-func (b *signerAddBook) parentDS(conf *Config, zone string) (map[uint16]bool, bool) {
+func (b *signerAddBook) parentDS(conf *Config, zone string) (parentDSSeen, bool) {
 	b.mu.Lock()
 	l := b.looksLocked(conf, zone)
 	due := !l.parentRun && time.Since(l.parentAt) >= signerAddLookEvery
@@ -533,11 +571,12 @@ func (b *signerAddBook) parentDS(conf *Config, zone string) (map[uint16]bool, bo
 	b.mu.Unlock()
 	if due {
 		b.run(func() {
-			served, err := parentDSLook(conf, zone)
+			seen, err := parentDSLook(conf, zone)
 			b.mu.Lock()
 			l.parentRun, l.parentAt = false, time.Now()
 			if err == nil {
-				l.parent, l.parentOK = served, true
+				l.parent, l.parentOK = seen, true
+				l.parentTTL = max(l.parentTTL, seen.ttl)
 			}
 			b.mu.Unlock()
 			if err != nil {
@@ -552,6 +591,15 @@ func (b *signerAddBook) parentDS(conf *Config, zone string) (map[uint16]bool, bo
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return l.parent, l.parentOK
+}
+
+// parentDSTTL is the largest TTL the parent was seen serving the zone's DS RRset
+// with under the active serial; 0 when no look has found out, as for a new leader,
+// which then has T9's wait alone.
+func (b *signerAddBook) parentDSTTL(conf *Config, zone string) time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.looksLocked(conf, zone).parentTTL
 }
 
 // syncDue: it is time to ask the leader's sync again for the zone.

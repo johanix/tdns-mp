@@ -54,6 +54,7 @@ type signerRig struct {
 	// answers
 	started  []uint32
 	startErr error
+	onStart  func() // runs inside the start, before it switches the option on
 }
 
 // newSignerRig is provider us's signer with zone loaded, its copy holding
@@ -96,10 +97,13 @@ func newSignerRig(t *testing.T, zone string, records ...string) *signerRig {
 	startSigning = func(_ context.Context, zd *tdns.ZoneData, minSerial uint32) error {
 		r.mu.Lock()
 		r.started = append(r.started, minSerial)
-		err := r.startErr
+		err, during := r.startErr, r.onStart
 		r.mu.Unlock()
 		if err != nil {
 			return err
+		}
+		if during != nil {
+			during()
 		}
 		zd.SetRuntimeOption(tdns.OptInlineSigning, true)
 		zd.ReleaseWithheld()

@@ -113,7 +113,7 @@ func (conf *Config) runSignerRoles(ctx context.Context) {
 func (conf *Config) signerRoleTurn(ctx context.Context, zone string) {
 	mpzd, ok := Zones.Get(zone)
 	mp := conf.MpConfig()
-	if !ok || mpzd == nil || mp == nil || !mpzd.Options[tdns.OptMultiProvider] || !mpzd.HasPublishedData() {
+	if !ok || mpzd == nil || mp == nil || !mpzd.HasPublishedData() {
 		return
 	}
 	var r Roles
@@ -127,9 +127,13 @@ func (conf *Config) signerRoleTurn(ctx context.Context, zone string) {
 	}
 	self := labelOfIdentity(r, ourHsyncIdentities(mp))
 	mpzd.Lock()
+	multiProvider := mpzd.Options[tdns.OptMultiProvider]
 	bound := mpzd.DnssecPolicy != nil
 	signs := bound && mpzd.Options[tdns.OptInlineSigning]
 	mpzd.Unlock()
+	if !multiProvider {
+		return
+	}
 	withheld := mpzd.Withheld()
 
 	switch {
@@ -138,6 +142,7 @@ func (conf *Config) signerRoleTurn(ctx context.Context, zone string) {
 		case err == nil:
 			conf.noRoleFailure(zone)
 			lgSigner.Info("the zone serves its own signatures now", "zone", zone, "above", minSerial)
+			conf.handedOtherwiseMeanwhile(mpzd, mp)
 			conf.tookRole(zone)
 			pushSignerInventory(conf, zone)
 		case errors.Is(err, tdns.ErrKeyGenerationDeferred), errors.Is(err, tdns.ErrSigningHeld):
@@ -157,6 +162,21 @@ func (conf *Config) signerRoleTurn(ctx context.Context, zone string) {
 	mpzd.ReleaseWithheld()
 	if withheld {
 		pushSignerInventory(conf, zone)
+	}
+}
+
+// handedOtherwiseMeanwhile: a start takes as long as signing the whole zone, and
+// holds no lock of ours, so a hand-over that no longer has this provider sign may
+// have been acted by while it ran, before it switched inline-signing on. That
+// hand-over stands: it is acted by again.
+func (conf *Config) handedOtherwiseMeanwhile(mpzd *MPZoneData, mp *MultiProviderConf) {
+	r, handed := actingHeld.Load().roles(mpzd.ZoneName)
+	if !handed {
+		return
+	}
+	if self := labelOfIdentity(r, ourHsyncIdentities(mp)); self == "" || !has(r.Signing, self) {
+		lgSigner.Info("the zone started signing as a hand-over took that back; acting by the hand-over", "zone", mpzd.ZoneName)
+		mpzd.actBySets(conf, r, conf.signerConfirmers(mpzd.ZoneName))
 	}
 }
 

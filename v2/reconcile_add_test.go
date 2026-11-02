@@ -25,8 +25,9 @@ import (
 // sync the leader asks are the rig's, and the agent's looks run in place.
 type signerAddRig struct {
 	*reconcileRig
-	parent map[uint16]bool
-	syncs  int
+	parent    map[uint16]bool
+	parentTTL time.Duration
+	syncs     int
 }
 
 const signerAddSelf = roleA
@@ -42,7 +43,9 @@ func newSignerAddRig(t *testing.T, zone, parentsync string) *signerAddRig {
 	r.v = jAt(t, 42, param("a,b"), freezeRecords...)
 	r.conf.InternalMp.signerAdds.start = func(look func()) { look() }
 	prevLook, prevAsk := parentDSLook, askJoinersDS
-	parentDSLook = func(*Config, string) (map[uint16]bool, error) { return r.parent, nil }
+	parentDSLook = func(*Config, string) (parentDSSeen, error) {
+		return parentDSSeen{tags: r.parent, ttl: r.parentTTL}, nil
+	}
 	askJoinersDS = func(*Config, string, string) { r.syncs++ }
 	t.Cleanup(func() { parentDSLook, askJoinersDS = prevLook, prevAsk })
 	mp := r.conf.MpConfig()
@@ -745,9 +748,21 @@ func TestAHandOverBringsAWithheldZoneToItsRole(t *testing.T) {
 	t.Run("not loaded", func(t *testing.T) {
 		const zone = "unloaded.withheld.signer.example."
 		r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)...)
+		r.hand(handoverFor(t, zone, sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)...), sigUs)
+		pushes := r.pushes()
+		// its first load has not published yet: that load reads what is held
+		fresh := &tdns.ZoneData{ZoneName: zone, ZoneStore: tdns.MapZone, ZoneType: tdns.Primary, Logger: r.mpzd.Logger,
+			Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}, KeyDB: r.kdb}
+		tdns.Zones.Set(zone, fresh)
+		Zones.Invalidate(zone)
+		r.roleTurn()
+		// and a zone no longer here has nothing to act on
 		tdns.Zones.Remove(zone)
 		Zones.Invalidate(zone)
-		r.roleTurn() // nothing to act on: its first load reads what is held
+		r.roleTurn()
+		if len(r.started) != 0 || r.pushes() != pushes || fresh.DnssecPolicy != nil {
+			t.Errorf("a zone not loaded: started %v, %d pushes, its policy %v; want nothing done", r.started, r.pushes()-pushes, fresh.DnssecPolicy)
+		}
 	})
 }
 
@@ -993,31 +1008,282 @@ func TestTheOwnSignatureCheckReadsTheDNSKEYSAndTheSerial(t *testing.T) {
 	stranger.Flags = 257
 	keys := []dns.RR{ksk}
 	for _, c := range []struct {
-		name  string
-		rrset *core.RRset
-		above uint32
-		ok    bool
+		name   string
+		rrset  *core.RRset
+		serial uint32
+		above  uint32
+		known  bool
+		ok     bool
 	}{
-		{"its own signature", signedDNSKEYs(t, zone, ksk, priv), 9, true},
-		{"unsigned", signedDNSKEYs(t, zone, ksk, nil), 9, false},
-		{"another's signature", signedDNSKEYs(t, zone, stranger, strangerPriv), 9, false},
-		{"at the serial they served", signedDNSKEYs(t, zone, ksk, priv), 10, false},
-		{"no serial known", signedDNSKEYs(t, zone, ksk, priv), 0, true},
+		{"its own signature", signedDNSKEYs(t, zone, ksk, priv), 10, 9, true, true},
+		{"unsigned", signedDNSKEYs(t, zone, ksk, nil), 10, 9, true, false},
+		{"another's signature", signedDNSKEYs(t, zone, stranger, strangerPriv), 10, 9, true, false},
+		{"at the serial they served", signedDNSKEYs(t, zone, ksk, priv), 10, 10, true, false},
+		{"at serial 0, which they served", signedDNSKEYs(t, zone, ksk, priv), 0, 0, true, false},
+		{"above serial 0", signedDNSKEYs(t, zone, ksk, priv), 1, 0, true, true},
+		{"no serial known", signedDNSKEYs(t, zone, ksk, priv), 10, 0, false, true},
 	} {
-		serving(t, soa(t, zone, 10, nil, nil), nil)
+		serving(t, soa(t, zone, c.serial, nil, nil), nil)
 		prev := servingKeysLookup
 		rrset := c.rrset
 		servingKeysLookup = func(context.Context, string, string) (*core.RRset, error) { return rrset, nil }
-		err := servesOwnSignatures(context.Background(), zone, srNameservers, keys, c.above, time.Now())
+		err := servesOwnSignatures(context.Background(), zone, srNameservers, keys, c.above, c.known, time.Now())
 		servingKeysLookup = prev
 		if (err == nil) != c.ok {
 			t.Errorf("%s: %v, want ok %v", c.name, err, c.ok)
 		}
 	}
-	if err := servesOwnSignatures(context.Background(), zone, nil, keys, 0, time.Now()); err == nil {
+	if err := servesOwnSignatures(context.Background(), zone, nil, keys, 0, false, time.Now()); err == nil {
 		t.Error("no nameservers named, and the check passes")
 	}
-	if err := servesOwnSignatures(context.Background(), zone, srNameservers, []dns.RR{testDnskey(t, zone, 256)}, 0, time.Now()); err == nil {
+	if err := servesOwnSignatures(context.Background(), zone, srNameservers, []dns.RR{testDnskey(t, zone, 256)}, 0, false, time.Now()); err == nil {
 		t.Error("no KSK known, and the check passes")
+	}
+}
+
+// A DS counts only once every parent server that answers holds it: a validator
+// may be handed the RRset of any of them, and one without the joiner's DS finds
+// nothing to validate its signatures with. One that does not answer hands nothing
+// to anyone. The largest TTL any of them gave is what caches may hold.
+func TestTheDSStepAsksEveryParentServer(t *testing.T) {
+	ds := func(tag uint16, ttl uint32) dns.RR {
+		return &dns.DS{Hdr: dns.RR_Header{Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: ttl}, KeyTag: tag}
+	}
+	boom := errors.New("no answer")
+	for _, c := range []struct {
+		name    string
+		answers map[string][]dns.RR
+		fails   []string
+		want    []uint16
+		ttl     time.Duration
+		err     bool
+	}{
+		{name: "both have it", answers: map[string][]dns.RR{"p1": {ds(1, 60), ds(2, 60)}, "p2": {ds(1, 90), ds(2, 90)}}, want: []uint16{1, 2}, ttl: 90 * time.Second},
+		{name: "the second lags", answers: map[string][]dns.RR{"p1": {ds(1, 60), ds(2, 60)}, "p2": {ds(1, 60)}}, want: []uint16{1}, ttl: time.Minute},
+		{name: "the first lags", answers: map[string][]dns.RR{"p1": {ds(1, 60)}, "p2": {ds(1, 60), ds(2, 60)}}, want: []uint16{1}, ttl: time.Minute},
+		{name: "one serves no DS", answers: map[string][]dns.RR{"p1": {ds(1, 60)}, "p2": {}}, ttl: time.Minute},
+		{name: "one does not answer", answers: map[string][]dns.RR{"p1": {ds(1, 60)}}, fails: []string{"p2"}, want: []uint16{1}, ttl: time.Minute},
+		{name: "none answers", fails: []string{"p1", "p2"}, err: true},
+		{name: "no server is known", err: true},
+	} {
+		var servers []string
+		for _, s := range []string{"p1", "p2"} {
+			if _, ok := c.answers[s]; ok || slices.Contains(c.fails, s) {
+				servers = append(servers, s)
+			}
+		}
+		seen, err := dsAtEveryServer(servers, func(server string) ([]dns.RR, error) {
+			if slices.Contains(c.fails, server) {
+				return nil, boom
+			}
+			return c.answers[server], nil
+		})
+		if (err != nil) != c.err {
+			t.Errorf("%s: %v, want an error %v", c.name, err, c.err)
+			continue
+		}
+		var tags []uint16
+		for tag := range seen.tags {
+			tags = append(tags, tag)
+		}
+		slices.Sort(tags)
+		if !slices.Equal(tags, c.want) || seen.ttl != c.ttl {
+			t.Errorf("%s: the tags %v, TTL %s; want %v, %s", c.name, tags, seen.ttl, c.want, c.ttl)
+		}
+	}
+}
+
+// T9 asks one parent server, so its wait can start before the last of them has
+// the DS: step 3 also waits the DS TTL from when every server served it, the DS
+// step's end, or a cache may still hold a DS RRset without it.
+func TestTheCachesTimeCountsFromWhenEveryParentServerServesTheDS(t *testing.T) {
+	r := newSignerAddRig(t, "ttl.parent.adding.example.", "owner").thawed()
+	serving(t, soa(t, r.zone, 5, nil, nil), nil)
+	r.at(r.next(), signerAddAccept)
+	r.at(r.next(), signerAddMint)
+	r.keys(KeyStatePublished, KeyStatePublished)
+	r.at(r.next(), signerAddDS)
+	tag := r.keys(KeyStateStandby, KeyStateActive)
+	r.parent[tag], r.parentTTL = true, time.Hour
+	r.parentLooks()
+	r.next()
+	r.keys(KeyStateActive, KeyStateActive)
+	st := r.next()
+	r.at(st, signerAddCaches)
+	if line := r.conf.reconcileLine(r.zone, time.Now()); !strings.Contains(line, "the DS TTL at the parent") {
+		t.Errorf("its keys active, the DS TTL not passed: the status says %q", line)
+	}
+	if err := r.store.update(r.zone, func(z *zoneSerials) error {
+		z.StepAt = time.Now().Add(-time.Hour - time.Second)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.at(r.next(), signerAddOwn)
+}
+
+// A hand-over that takes Signing back while a start runs, which holds no lock of
+// ours, was acted by before the start switched inline-signing on: it stands.
+func TestAHandOverTakenWhileTheZoneStartsSigningStands(t *testing.T) {
+	const zone = "meanwhile.withheld.signer.example."
+	records := sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)
+	r := newSignerRig(t, zone, records...)
+	r.mpzd.SetRuntimeOption(tdns.OptInlineSigning, false)
+	r.hand(handoverFor(t, zone, records...), sigUs)
+	r.onStart = func() {
+		r.hand(handoverFor(t, zone, sigRecords(`serial="6" servers="us,p2" signers="p2"`)...), sigUs)
+	}
+	r.roleTurn()
+	if len(r.started) != 1 {
+		t.Fatalf("started %v, want it started once", r.started)
+	}
+	if r.mpzd.Options[tdns.OptInlineSigning] {
+		t.Error("the zone signs, though the hand-over taken meanwhile has it not")
+	}
+	if d := r.mpzd.MP.MPdata; d == nil || d.WeAreSigner {
+		t.Errorf("it acts by %+v, want the hand-over's no role", d)
+	}
+}
+
+// The turn reads the zone's options under its lock, as a hand-over and a refresh
+// set them.
+func TestTheRoleTurnReadsTheOptionsUnderTheZonesLock(t *testing.T) {
+	const zone = "options.withheld.signer.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="p2"`)...)
+	r.hand(handoverFor(t, zone, sigRecords(`serial="5" servers="us,p2" signers="p2"`)...), sigUs)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for on := true; ; on = !on {
+			select {
+			case <-stop:
+				return
+			default:
+				r.mpzd.SetRuntimeOption(OptMPDisallowEdits, on)
+			}
+		}
+	}()
+	for range 200 {
+		r.roleTurn()
+	}
+	close(stop)
+	<-done
+}
+
+// A withheld zone reports at every round, whatever its copy says by now: only its
+// agent's word ends the withholding, and that answers a report. So the agent's
+// word that it has no copy goes again if it was lost. Another zone reports once,
+// and again only while it waits.
+func TestAWithheldZoneReportsAtEveryRound(t *testing.T) {
+	const zone = "rounds.withheld.signer.example."
+	records := sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)
+	r := newSignerRig(t, zone, records...)
+	r.firstLoad(t, records...)
+	r.conf.InternalMp.MPZoneNames = []string{zone}
+	reported := map[string]bool{}
+	for round := 1; round <= 3; round++ {
+		r.conf.signerStartReport(reported)
+		if r.pushes() != round {
+			t.Fatalf("at round %d, %d reports", round, r.pushes())
+		}
+	}
+
+	// a copy with no reading does not wait for its agent, and is no reason to stop
+	// while it is withheld
+	const none = "noreading.rounds.withheld.signer.example."
+	o := newSignerRig(t, none, sigRecords(`servers="us,p2" signers="us,p2"`)...)
+	o.conf.InternalMp.MPZoneNames = []string{none}
+	o.mpzd.Lock()
+	o.mpzd.Ready = false
+	o.mpzd.Unlock()
+	if err := o.mpzd.Withhold(); err != nil {
+		t.Fatal(err)
+	}
+	reported = map[string]bool{}
+	for round := 1; round <= 3; round++ {
+		o.conf.signerStartReport(reported)
+		if o.pushes() != round {
+			t.Fatalf("withheld with no reading, at round %d, %d reports", round, o.pushes())
+		}
+	}
+	o.mpzd.ReleaseWithheld()
+	o.mpzd.Lock()
+	o.mpzd.Ready = true
+	o.mpzd.Unlock()
+	o.conf.signerStartReport(reported)
+	if o.pushes() != 3 {
+		t.Errorf("no longer withheld, nothing to wait for: %d reports, want no more", o.pushes())
+	}
+}
+
+// The first signer's keys go out though the zone is not signed yet: the step that
+// names it recomputes its data at once (onSetsChanged), so its inventory finds it
+// holding keys, and the step's wait can see them at the other agents.
+func TestAFirstSignersKeysAreDistributedAtItsFirstStep(t *testing.T) {
+	r := newSignerAddRig(t, "first.adding.example.", "owner")
+	r.n = jAt(t, 41, `servers="a,b" nsmgmt="owner" suffix="n"`, freezeRecords...)
+	knownAs(t, r.store, r.zone, r.n)
+	r.v = jAt(t, 42, `servers="a,b" signers="a" nsmgmt="owner" suffix="n"`, freezeRecords...)
+	r.thawed()
+	r.at(r.next(), signerAddAccept)
+	mpzd, _ := Zones.Get(r.zone)
+	mpzd.Lock()
+	d := *mpzd.MP.MPdata
+	mpzd.Unlock()
+	if !d.WeHoldKeys || d.ZoneSigned {
+		t.Fatalf("at its first step its data is %+v, want keys held and the zone not signed yet", d)
+	}
+	r.keys(KeyStateMpdist, KeyStateMpdist)
+	changed, ds, err := mpzd.LocalDnskeysFromKeystate(AgentId(roleA), nil)
+	if err != nil || !changed || ds == nil || len(ds.LocalAdds) != 2 {
+		t.Errorf("its inventory distributes %+v (changed %v, %v), want its two keys", ds, changed, err)
+	}
+}
+
+// With a provider on its way in, its combiner serves the other signers' DNSKEYs,
+// and every other type as its upstream has it: a combine, and a cleanup of a
+// contribution that went, change nothing else in what its signer will relay.
+func TestAJoinersCombinerServesTheOtherSignersKeysAndTheUpstreamsRest(t *testing.T) {
+	const zone = "combine.adding.example."
+	_, mpzd := actingCombiner(t, zone, `3600 IN HSYNC3 ON alpha `+actUs+` .`, `3600 IN HSYNCPARAM serial="5" servers="alpha" signers="beta"`)
+	upstreamNS := mpzd.ZoneData
+	before, err := upstreamNS.GetRRset(zone, dns.TypeNS)
+	if err != nil || before == nil {
+		t.Fatalf("no NS at the start: %v", err)
+	}
+	mpzd.Lock()
+	mpzd.MP.MPdata = &MPdata{OurLabel: "alpha", ZoneSigned: true, WeHoldKeys: true, Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}}
+	mpzd.Unlock()
+	key := testDnskey(t, zone, 257)
+	ns, err := dns.NewRR(zone + " 3600 IN NS ns.contributed.example.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mpzd.AddCombinerData("agent.beta.example.", map[string][]core.RRset{zone: {
+		{Name: zone, RRtype: dns.TypeDNSKEY, Class: dns.ClassINET, RRs: []dns.RR{key}},
+		{Name: zone, RRtype: dns.TypeNS, Class: dns.ClassINET, RRs: []dns.RR{ns}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+		t.Fatal(err)
+	}
+	dnskeys, err := mpzd.GetRRset(zone, dns.TypeDNSKEY)
+	if err != nil || dnskeys == nil || !slices.ContainsFunc(dnskeys.RRs, func(rr dns.RR) bool { return dns.IsDuplicate(rr, key) }) {
+		t.Errorf("the other signer's key is not served: %+v (%v)", dnskeys, err)
+	}
+	after, err := mpzd.GetRRset(zone, dns.TypeNS)
+	if err != nil || after == nil || !rrsetEqual(*after, *before) {
+		t.Errorf("the combine changed the NS RRset: %+v, was %+v (%v)", after, before, err)
+	}
+	// the contribution of NS goes; its cleanup serves the upstream's, as it was
+	mpzd.MP.CombinerData.Remove(zone)
+	mpzd.MP.noteCleanup(zone, dns.TypeNS)
+	if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := mpzd.GetRRset(zone, dns.TypeNS); err != nil || again == nil || !rrsetEqual(*again, *before) {
+		t.Errorf("the cleanup changed the NS RRset: %+v, was %+v (%v)", again, before, err)
 	}
 }
