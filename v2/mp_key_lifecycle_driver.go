@@ -1198,7 +1198,6 @@ func (l *ZoneKeyLifecycle) Tick() error {
 		// T9's wait, O7)
 		alg := l.policyAlgorithm(role)
 		pipeline, policyKeys, active, activeOfAlg, algPending, standbys := 0, 0, 0, 0, false, []tdns.DnssecKeyWithTimestamps{}
-		var oldest *tdns.DnssecKeyWithTimestamps
 		for _, keyid := range keytagsOf(all) {
 			k := all[keyid]
 			if roleOf(k.Flags) != role {
@@ -1226,21 +1225,10 @@ func (l *ZoneKeyLifecycle) Tick() error {
 				}
 				policyKeys++
 				activeOfAlg++
-				kk := k
-				// the oldest of the policy's algorithm by active_at; a key
-				// with no stamp counts as the oldest, so a missing stamp
-				// never hides a due rollover
-				if oldest == nil || oldest.ActiveAt != nil && (k.ActiveAt == nil || k.ActiveAt.Before(*oldest.ActiveAt)) {
-					oldest = &kk
-				}
 			}
 		}
-		want := l.Policy.StandbyZSK
-		lifetime := l.Policy.ZSKLifetime
-		if role == "KSK" {
-			want, lifetime = l.Policy.StandbyKSK, l.Policy.KSKLifetime
-		}
-		due := lifetime > 0 && oldest != nil && (oldest.ActiveAt == nil || !l.Clock.Now().Before(oldest.ActiveAt.Add(lifetime)))
+		want := l.standbyCount(role)
+		due := l.lifetimeDue(role, all)
 		// under a hold nothing new starts (plan S6): no lifetime rollover,
 		// no standby key, no algorithm rollover not yet begun. A standby of
 		// a role the policy keeps none of was minted for a rollover that
@@ -1458,13 +1446,69 @@ func (l *ZoneKeyLifecycle) RolloverFlags() (rolloverFlags, error) {
 	if err != nil {
 		return rolloverFlags{}, err
 	}
-	f := rolloverFlags{Requested: len(l.rolls) > 0, AlgRoll: len(l.algRolloversOf(all)) > 0}
+	f := rolloverFlags{Requested: len(l.rolls) > 0, AlgRoll: len(l.algRolloversOf(all)) > 0, Additions: l.standbyAdditions(all)}
 	for _, d := range l.dist {
 		if confirmationsOutstandingFor(d) {
 			f.PropagationPending = true
 		}
 	}
 	return f, nil
+}
+
+// standbyAdditions are the keys in published that only add a standby key of
+// their role, which is no rollover (the project owner, 2026-11-02): the policy
+// keeps standby keys of the role, and no rollover of it is due that would
+// promote the key once standby. Under a hold a due one is not promoted (Tick),
+// so the key only becomes a standby key. In a role the policy keeps no standby
+// of, a key on its way in is a rollover's. A rollover asked for and an
+// algorithm rollover are flags of their own (RolloverFlags).
+func (l *ZoneKeyLifecycle) standbyAdditions(all map[uint16]tdns.DnssecKeyWithTimestamps) map[uint16]bool {
+	out := map[uint16]bool{}
+	for _, role := range []string{"KSK", "ZSK"} {
+		if l.standbyCount(role) == 0 || (!l.hold && l.lifetimeDue(role, all)) {
+			continue
+		}
+		alg := l.policyAlgorithm(role)
+		for keyid, k := range all {
+			if roleOf(k.Flags) == role && k.State == KeyStatePublished && k.Algorithm == alg {
+				out[keyid] = true
+			}
+		}
+	}
+	return out
+}
+
+// standbyCount is the policy's standby count for the role.
+func (l *ZoneKeyLifecycle) standbyCount(role string) int {
+	if role == "KSK" {
+		return l.Policy.StandbyKSK
+	}
+	return l.Policy.StandbyZSK
+}
+
+// lifetimeDue: the role's oldest active key of the policy's algorithm, by
+// active_at, is past the role's lifetime. A key with no stamp counts as the
+// oldest, so a missing stamp never hides a due rollover. A key of another
+// algorithm that still signs is waiting out T10b or T19, and its age is not
+// the lifetime's business.
+func (l *ZoneKeyLifecycle) lifetimeDue(role string, all map[uint16]tdns.DnssecKeyWithTimestamps) bool {
+	lifetime := l.Policy.ZSKLifetime
+	if role == "KSK" {
+		lifetime = l.Policy.KSKLifetime
+	}
+	alg := l.policyAlgorithm(role)
+	var oldest *tdns.DnssecKeyWithTimestamps
+	for _, keyid := range keytagsOf(all) {
+		k := all[keyid]
+		if roleOf(k.Flags) != role || k.State != KeyStateActive || k.Algorithm != alg {
+			continue
+		}
+		if oldest == nil || oldest.ActiveAt != nil && (k.ActiveAt == nil || k.ActiveAt.Before(*oldest.ActiveAt)) {
+			kk := k
+			oldest = &kk
+		}
+	}
+	return lifetime > 0 && oldest != nil && (oldest.ActiveAt == nil || !l.Clock.Now().Before(oldest.ActiveAt.Add(lifetime)))
 }
 
 // WaitsOn is, for each key in mpdist or mpremove, the other signers whose
