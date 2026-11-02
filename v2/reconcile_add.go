@@ -40,7 +40,6 @@ import (
 	"sync"
 	"time"
 
-	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -288,8 +287,27 @@ var parentDSLook = func(conf *Config, zone string) (parentDSSeen, error) {
 		return parentDSSeen{}, err
 	}
 	return dsAtEveryServer(mpzd.ParentServers, func(server string) ([]dns.RR, error) {
-		return tdns.AuthQuery(mpzd.ZoneName, server, dns.TypeDS)
+		return askParentDS(mpzd.ZoneName, server)
 	})
+}
+
+// askParentDS asks one parent server for the zone's DS RRset. NODATA and NXDOMAIN
+// are answers that hold none; any other rcode is no answer. tdns.AuthQuery makes
+// an error of NXDOMAIN.
+func askParentDS(zone, server string) ([]dns.RR, error) {
+	m := new(dns.Msg)
+	m.SetQuestion(zone, dns.TypeDS)
+	m.SetEdns0(dns.DefaultMsgSize, false)
+	res, err := dns.Exchange(m, server)
+	switch {
+	case err != nil:
+		return nil, err
+	case res.Rcode == dns.RcodeNameError:
+		return nil, nil
+	case res.Rcode != dns.RcodeSuccess:
+		return nil, fmt.Errorf("%s answers %s", server, dns.RcodeToString[res.Rcode])
+	}
+	return res.Answer, nil
 }
 
 // dsAtEveryServer is parentDSSeen from asking each of servers. A validator may

@@ -9,6 +9,7 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
+	"net"
 	"slices"
 	"strings"
 	"testing"
@@ -1285,5 +1286,55 @@ func TestAJoinersCombinerServesTheOtherSignersKeysAndTheUpstreamsRest(t *testing
 	}
 	if again, err := mpzd.GetRRset(zone, dns.TypeNS); err != nil || again == nil || !rrsetEqual(*again, *before) {
 		t.Errorf("the cleanup changed the NS RRset: %+v, was %+v (%v)", again, before, err)
+	}
+}
+
+// What one parent server's answer is, over the wire: NODATA and NXDOMAIN hold no
+// DS, so one that gives either keeps the joiner's DS from counting; a server that
+// refuses has given no answer, and doesn't.
+func TestAParentServersAnswerWithNoDSCountsAgainstTheDS(t *testing.T) {
+	const zone = "answers.adding.example."
+	server := func(answer func(m *dns.Msg)) string {
+		t.Helper()
+		pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, q *dns.Msg) {
+			m := new(dns.Msg)
+			m.SetReply(q)
+			answer(m)
+			_ = w.WriteMsg(m)
+		})}
+		go func() { _ = srv.ActivateAndServe() }()
+		t.Cleanup(func() { _ = srv.Shutdown() })
+		return pc.LocalAddr().String()
+	}
+	soa := &dns.SOA{Hdr: dns.RR_Header{Name: "adding.example.", Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 60},
+		Ns: "ns.adding.example.", Mbox: "hostmaster.adding.example.", Serial: 1, Refresh: 7200, Retry: 1800, Expire: 604800, Minttl: 60}
+	holds := server(func(m *dns.Msg) {
+		m.Answer = []dns.RR{&dns.DS{Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: 60}, KeyTag: 7, Algorithm: dns.ED25519, DigestType: dns.SHA256, Digest: "00"}}
+	})
+	nodata := server(func(m *dns.Msg) { m.Ns = []dns.RR{soa} })
+	nxdomain := server(func(m *dns.Msg) { m.Rcode, m.Ns = dns.RcodeNameError, []dns.RR{soa} })
+	refused := server(func(m *dns.Msg) { m.Rcode = dns.RcodeRefused })
+	for _, c := range []struct {
+		name    string
+		servers []string
+		tagged  bool
+	}{
+		{"the one that holds it", []string{holds}, true},
+		{"NODATA beside it", []string{holds, nodata}, false},
+		{"NODATA before it", []string{nodata, holds}, false},
+		{"NXDOMAIN beside it", []string{holds, nxdomain}, false},
+		{"a refusal beside it", []string{holds, refused}, true},
+	} {
+		seen, err := dsAtEveryServer(c.servers, func(s string) ([]dns.RR, error) { return askParentDS(zone, s) })
+		if err != nil || seen.tags[7] != c.tagged {
+			t.Errorf("%s: the tags %v (%v), want the DS counted %v", c.name, seen.tags, err, c.tagged)
+		}
+	}
+	if _, err := dsAtEveryServer([]string{refused}, func(s string) ([]dns.RR, error) { return askParentDS(zone, s) }); err == nil {
+		t.Error("a server that refuses, and no other: nothing should be known")
 	}
 }
