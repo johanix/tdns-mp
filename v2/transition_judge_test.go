@@ -220,7 +220,6 @@ func TestAMoveIntoSignersIsRefusedUntilItsStepExists(t *testing.T) {
 func TestAKindWithoutItsStepsIsRefused(t *testing.T) {
 	from := jAt(t, 41, jServers2, jAlpha, jBeta, jCharlie)
 	for _, c := range []struct{ param, reason string }{
-		{jServers2 + ` nsmgmt="agent"`, "changes nsmgmt"},
 		{jServers2 + ` parentsync="agent"`, "changes parentsync"},
 	} {
 		to := jAt(t, 42, c.param, jAlpha, jBeta, jCharlie)
@@ -240,6 +239,8 @@ func TestAKindWithoutItsStepsIsRefused(t *testing.T) {
 		wantRefusals(t, c.reason, judge(from, to, builtKinds&^kindPubkey, carriedKinds), Refusal{RefusedNotBuilt, c.reason + ": not built yet"})
 		wantRefusals(t, c.reason+", once built", judgeTransition(from, to))
 	}
+	// nsmgmt: its step is built (S19)
+	wantRefusals(t, "nsmgmt", judgeTransition(from, jAt(t, 42, jServers2+` nsmgmt="agent"`, jAlpha, jBeta, jCharlie)))
 	// the auditors and the suffix: nothing to carry out (design 5.6)
 	wantRefusals(t, "auditors and suffix", judgeTransition(from, jAt(t, 42, jServers2+` auditors="charlie" suffix="mp"`, jAlpha, jBeta, jCharlie)))
 }
@@ -363,7 +364,7 @@ func TestEveryAgentGivesTheSameReason(t *testing.T) {
 		noteKnown(t, c.s, storeZone, c.to)
 	}
 	a, b := heldAt(t, one, 42).Refused, heldAt(t, other, 42).Refused
-	if len(a) < 3 {
+	if len(a) < 2 { // 211-demo: nsmgmt and a role taken are built, so two reasons remain
 		t.Fatalf("refusals %v; want several", a)
 	}
 	wantRefusals(t, "the other agent", b, a...)

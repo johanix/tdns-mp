@@ -287,6 +287,15 @@ func (conf *Config) combinerTakeHandover(msg *AgentMsgPostPlus, localAgents map[
 	}
 	// what the combiner acted by before
 	pubkeyBefore := mpzd.hasPubkey()
+	// Before the hand-over is kept: a stop between the two finds the same
+	// change at the next hand-over, and drops what is left (design 5.4).
+	if store.changesNSmgmt(h) {
+		dropped, err := mpzd.dropStoredNS()
+		if err != nil {
+			return refuse(fmt.Sprintf("the stored NS could not be dropped: %v", err))
+		}
+		lgCombiner.Info("the hand-over changes nsmgmt: the stored NS of every origin is dropped", "zone", zone, "records", dropped)
+	}
 	prev, changed, err := store.take(h, sender)
 	switch {
 	case errors.Is(err, errHandoverOlder):

@@ -393,4 +393,7 @@ type InternalMpConf struct {
 	// transfers: the agent's transfer confirmations for a server role's
 	// step (server_role.go).
 	transfers transferBook
+	// ownersNSLogged is when each report of the owner's NS RRset was last
+	// logged (nsmgmt.go); the data engine's.
+	ownersNSLogged map[string]time.Time
 }

@@ -335,6 +335,9 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 	if s.Sets != "" {
 		fmt.Fprintf(w, "  sets:           %s\n", termSafe(s.Sets))
 	}
+	for _, line := range s.OwnersNS {
+		fmt.Fprintf(w, "  warning:        %s\n", termSafe(line))
+	}
 
 	switch {
 	case s.KeyAlgorithm == "" && s.ZoneKey != "":

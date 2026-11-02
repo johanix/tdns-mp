@@ -140,6 +140,9 @@ func (conf *Config) signsZone(zd *MPZoneData) bool {
 // it out of a replace would remove it at the asker. A record whose removal
 // the combiner refused is accepted again, and is named.
 //
+// Under nsmgmt=owner the NS set is empty whatever the data holds: no agent
+// contributes NS then (design 5.4).
+//
 // DNSKEY, the records and their key states, come from the signer's latest
 // inventory, never from the agent's own data, which can lack its own
 // DNSKEYs while an inventory is there. A provider not in signers= sends no
@@ -179,7 +182,11 @@ func (conf *Config) catchUpOperations(zdr *ZoneDataRepo, zone ZoneName, self Age
 		}
 		return op
 	}
-	ops := []core.RROperation{own(dns.TypeNS), own(dns.TypeCDS)}
+	ns := own(dns.TypeNS)
+	if nsLeftToOwner(zone) {
+		ns.Records = []string{}
+	}
+	ops := []core.RROperation{ns, own(dns.TypeCDS)}
 
 	if zd, ok := Zones.Get(string(zone)); ok && conf.signsZone(zd) {
 		op := core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: []string{}}

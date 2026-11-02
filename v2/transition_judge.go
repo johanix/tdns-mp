@@ -74,7 +74,7 @@ const (
 // needs P5. Each step that builds a kind adds it here; the judge reads no
 // config.
 const (
-	builtKinds   changeKind = kindServerRole | kindRolesTaken | kindUpstream | kindPubkey
+	builtKinds   changeKind = kindServerRole | kindRolesTaken | kindNSmgmt | kindUpstream | kindPubkey
 	carriedKinds changeKind = kindRolesTaken | kindServerRole | kindNSmgmt | kindParentSync | kindUpstream | kindPubkey
 )
 

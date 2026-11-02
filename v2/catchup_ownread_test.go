@@ -93,6 +93,7 @@ type ownRig struct {
 func newOwnRig(t *testing.T, zone string) *ownRig {
 	t.Helper()
 	zd := seedRoles(t, zone, []string{roleA, roleB}, nil, nil)
+	nsToTheAgents(t, zd)
 	zd.Logger = log.New(io.Discard, "", 0)
 	mpzd, _ := Zones.Get(zone)
 	zdr, err := NewZoneDataRepo()
@@ -320,6 +321,7 @@ func newReReadRigFor(t *testing.T, zone string, combiner *PeerConf, answer func(
 	ownReadInterval = 20 * time.Millisecond
 	t.Cleanup(func() { ownReadInterval = saved })
 	zd := seedRoles(t, zone, []string{roleA, roleB}, nil, nil)
+	nsToTheAgents(t, zd)
 	zd.Logger = log.New(io.Discard, "", 0)
 	zd.Options[tdns.OptMultiProvider] = true
 	mpzd, _ := Zones.Get(zone)
