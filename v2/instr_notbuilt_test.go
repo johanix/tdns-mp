@@ -17,8 +17,8 @@ func notBuiltFrom(t *testing.T, s *InstructionStore) {
 // status says why.
 func TestANotBuiltChangeIsFollowed(t *testing.T) {
 	for _, c := range []struct{ name, to, why string }{
-		{"a move into signers=", `3600 IN HSYNCPARAM serial="8" servers="alpha,beta" signers="alpha,beta"`, "moves"},                      // S18b
-		{"a change of parentsync", `3600 IN HSYNCPARAM serial="8" servers="alpha,beta" signers="alpha" parentsync="agent"`, "parentsync"}, // S20
+		{"a move into signers=", `3600 IN HSYNCPARAM serial="8" servers="alpha,beta" signers="alpha,beta"`, "moves"},  // S18b
+		{"a change of pubkey", `3600 IN HSYNCPARAM serial="8" servers="alpha,beta" signers="alpha" pubkey`, "pubkey"}, // S21
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := newStore(t)
