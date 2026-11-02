@@ -2715,7 +2715,8 @@ func (tm *MPTransportBridge) noRoleWait() time.Duration {
 }
 
 // dnskeyNoRoleTimedOut ends the wait of a DNSKEY distribution for the
-// members with no role that have not answered by the time-out (design 4):
+// members with no role and the auditors that have not answered by the
+// time-out (design 4):
 // each counts as answered, neither applying the keys nor rejecting them,
 // with one log line, and the distribution goes on without it. A voting
 // member is waited for as before, and looked at again after another
@@ -2723,6 +2724,19 @@ func (tm *MPTransportBridge) noRoleWait() time.Duration {
 func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(ctx context.Context, distID string) {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
+	distID, ok := tm.dnskeyNoRoleLookLocked(distID)
+	if !ok {
+		return
+	}
+	if _, waits := tm.pendingDnskeyPropagations[distID]; waits {
+		tm.noRoleAfter(ctx, distID)
+	}
+}
+
+// dnskeyNoRoleLookLocked is the look itself, with dnskeyPropMu held. Reported
+// is the distribution looked at, a resend that took distID over; false for
+// none.
+func (tm *MPTransportBridge) dnskeyNoRoleLookLocked(distID string) (string, bool) {
 	prop, ok := tm.pendingDnskeyPropagations[distID]
 	if !ok {
 		// folded into a resend (foldIntoResend), which a signer sends sooner
@@ -2734,10 +2748,10 @@ func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(ctx context.Context, distID st
 		}
 	}
 	if !ok {
-		return
+		return distID, false
 	}
 	for _, a := range slices.Sorted(maps.Keys(prop.ExpectedAgents)) {
-		if prop.ExpectedAgents[a] || !noRoleMember(prop.Zone, a) {
+		if prop.ExpectedAgents[a] || !memberWithTimeOut(prop.Zone, a) || stillConfirmsKeys(prop.Zone, a) {
 			continue
 		}
 		lgTransport.Warn("a member with no role did not confirm in time, going on", "zone", prop.Zone, "member", a, "what", "the DNSKEY distribution "+distID)
@@ -2746,8 +2760,23 @@ func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(ctx context.Context, distID st
 		}
 	}
 	tm.finishDnskeyPropagationLocked(distID, prop)
-	if _, waits := tm.pendingDnskeyPropagations[distID]; waits {
-		tm.noRoleAfter(ctx, distID)
+	return distID, true
+}
+
+// lookAgainAtDnskeyPropagations has every DNSKEY distribution of the zone
+// look again at who it waits for (S17b): a provider left the key confirmers,
+// and each that waits only for it goes on now.
+func (tm *MPTransportBridge) lookAgainAtDnskeyPropagations(zone ZoneName) {
+	tm.dnskeyPropMu.Lock()
+	defer tm.dnskeyPropMu.Unlock()
+	var ids []string
+	for id, prop := range tm.pendingDnskeyPropagations {
+		if sameName(string(prop.Zone), string(zone)) {
+			ids = append(ids, id)
+		}
+	}
+	for _, id := range ids {
+		tm.dnskeyNoRoleLookLocked(id)
 	}
 }
 

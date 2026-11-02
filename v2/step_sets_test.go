@@ -194,13 +194,13 @@ func TestALeavingSignerSignsAndAppliesUntilItsDNSKEYStep(t *testing.T) {
 	if p.canSubmit(dns.TypeDNSKEY) || p.canSubmit(dns.TypeCDS) || p.canSubmit(dns.TypeCSYNC) {
 		t.Error("the leaving provider's agent may submit keys: it must start nothing")
 	}
-	if r := originVoteRefusal(z, "agent.us.example.", true, ops, nil); r != nil {
+	if r := originVoteRefusal(z, "agent.us.example.", true, false, ops, nil); r != nil {
 		t.Errorf("the leaving provider's combiner refused its own agent: %s", r.Message)
 	}
-	if r := originVoteRefusal(z, "agent.us.example.", false, ops, nil); r == nil {
+	if r := originVoteRefusal(z, "agent.us.example.", false, false, ops, nil); r == nil {
 		t.Error("the leaving provider's agent was taken as an origin from outside: only its own combiner takes it")
 	}
-	if r := originVoteRefusal(z, "agent.p3.example.", false, ops, nil); r == nil {
+	if r := originVoteRefusal(z, "agent.p3.example.", false, false, ops, nil); r == nil {
 		t.Error("an origin with no role that is not this combiner's agent was taken")
 	}
 
@@ -208,7 +208,7 @@ func TestALeavingSignerSignsAndAppliesUntilItsDNSKEYStep(t *testing.T) {
 	if d := mpzd.MP.MPdata; d.WeAreSigner || d.Leaving {
 		t.Errorf("at its DNSKEY step: signer=%v leaving=%v, want neither", d.WeAreSigner, d.Leaving)
 	}
-	if r := originVoteRefusal(z, "agent.us.example.", true, ops, nil); r == nil {
+	if r := originVoteRefusal(z, "agent.us.example.", true, false, ops, nil); r == nil {
 		t.Error("after its DNSKEY step the combiner took its own agent's operations with no role")
 	}
 }

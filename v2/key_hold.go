@@ -347,9 +347,12 @@ func (conf *Config) rolloverInZone(zone string) bool {
 // under way in the zone waits for the parent to trust the key (keyPending):
 // the rollover's DS sync waits for the key, so holding its offers would
 // leave the rollover and the thaw waiting for each other (design 3.1, 6;
-// plan S14). Nor as the step that takes the parent sync up (design 6, plan
-// S20). Once a hand-over to the owner has come to the delete of the agents'
-// key at the parent, the key is offered no more, whatever waits for it.
+// plan S14). Nor as a step of the reconciliation (design 6): a step's own sync
+// waits for the key too (holdForZoneKey comes before the freeze), so a leader
+// elected during a removal would wait for the step, and the step for it; and
+// the step that takes the parent sync up publishes and offers it (plan S20).
+// Once a hand-over to the owner has come to the delete of the agents' key at
+// the parent, the key is offered no more, whatever waits for it.
 func (conf *Config) offerHeld(ctx context.Context, zone ZoneName) (held bool, why string) {
 	if conf.InternalMp.Instructions.tookStep(string(zone), parentSyncKeyKey) {
 		return true, "the parent sync goes to the zone's owner"
@@ -359,11 +362,23 @@ func (conf *Config) offerHeld(ctx context.Context, zone ZoneName) (held bool, wh
 			lgAgent.Info("the zone's SIG(0) key is offered during the transition: a rollover under way waits for the parent to trust it", "zone", zone)
 			return false, ""
 		}
-		if conf.parentSyncTakenUp(string(zone)) {
+		if conf.InternalMp.reconciles.asksSync(canonicalName(string(zone))) || conf.parentSyncTakenUp(string(zone)) {
+			lgAgent.Info("the zone's SIG(0) key is published and offered during the transition: a step's own sync waits for it", "zone", zone)
 			return false, ""
 		}
 	}
 	return conf.syncHeld(string(zone), syncOther)
+}
+
+// keyToPublish: this agent leads the zone, and its key's publication in this
+// lead failed or the freeze held it. The key rounds publish it when they may
+// (reofferZoneKey), also for a key the parent trusts, which nothing else would.
+func (conf *Config) keyToPublish(zone ZoneName) bool {
+	if lem := conf.InternalMp.LeaderElectionManager; lem == nil || !lem.IsLeader(zone) {
+		return false
+	}
+	_, unpublished, _ := conf.InternalMp.keyPolls.state(zone)
+	return unpublished
 }
 
 // zoneKeyLine is the status of the zone's SIG(0) key at the leader, for

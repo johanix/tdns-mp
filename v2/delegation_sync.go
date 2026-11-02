@@ -420,8 +420,8 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 	}
 	// No CSYNC is made while the zone is frozen (plan S6): the leader's
 	// CSYNC would be owed, and the sync that passes, a rollover's DS sync,
-	// must not wait for its confirmations. The take-up's own sync makes one:
-	// a parent that takes NOTIFY only follows it (S20)
+	// must not wait for its confirmations. A step's own sync makes one: a
+	// parent that takes NOTIFY only follows it (S17b, S20)
 	var csyncErr error
 	if len(conf.frozenForNotify(ds.ZoneName)) == 0 {
 		csyncErr = conf.delegationCsyncStep(runCtx, ds.ZoneName, syncstate)

@@ -575,8 +575,8 @@ On the combiner side, the equivalent recovery is:
 # Re-apply persisted contributions to in-memory zone
 tdns-mpcli combiner zone edits reapply -z example.com.
 
-# Purge everything attributed to one origin (e.g. departed
-# provider). Be sure before doing this.
+# Purge everything attributed to one origin, for stale state a
+# removal does not touch. Be sure before doing this.
 tdns-mpcli combiner zone edits purge -z example.com. \
     --origin agent.bravo.example.
 ```
@@ -585,6 +585,9 @@ tdns-mpcli combiner zone edits purge -z example.com. \
 the served zone has drifted from the contributions table.
 `purge` is destructive and needs care; see
 [Synchronization Model §6.3](synchronization-model.md#63-purging-by-origin).
+It is not part of removing a provider: each provider drops
+the contributions of one that left when the removal is
+done ([Changing the Set of Providers §4](provider-changes.md#4-removing-a-provider)).
 
 ## 6. End-to-End Walkthrough: Add an NS Record
 

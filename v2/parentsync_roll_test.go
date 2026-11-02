@@ -903,3 +903,56 @@ func TestTheLeaderDeletesARetiredKeyTheParentStillTrusts(t *testing.T) {
 		t.Errorf("a second sweep sent %d updates, want none more", n-1)
 	}
 }
+
+// The roll a removal owes is on disk from the first step. Its passes make the
+// key on the roll's own schedule and run as a step while the removal is under
+// way (plan S17b).
+func TestARollARemovalOwesIsMadeByItsPasses(t *testing.T) {
+	r := newRollRig(t, "owed.roll.example.")
+	r.conf.oweRoll(r.zone)
+	ro := r.roll(t)
+	if ro == nil || ro.phase != rollOwed || ro.newKeyid != 0 {
+		t.Fatalf("the roll owed: %+v", ro)
+	}
+	if line := r.conf.rollLine(r.mpzd.KeyDB, r.zone); line != "roll owed, the new key is not made yet" {
+		t.Errorf("the status: %q", line)
+	}
+	r.conf.oweRoll(r.zone) // a new leader's turn, or a restart's: no second
+	r.pass(t, syncStep)
+	ro = r.roll(t)
+	if ro == nil || ro.phase == rollOwed || ro.oldKeyid != r.old.keyid || ro.newKeyid == 0 {
+		t.Fatalf("the roll after a pass: %+v", ro)
+	}
+}
+
+// A new key that cannot be made now is tried again, on the roll's schedule:
+// the obligation stands.
+func TestARollOwedThatCannotBeMadeIsTriedAgain(t *testing.T) {
+	r := newRollRig(t, "owedagain.roll.example.")
+	tdns.UpdateParentState(r.mpzd.KeyDB, string(r.zone), r.old.keyid, edns0.KeyStateUnknown)
+	r.conf.oweRoll(r.zone)
+	r.pass(t, syncStep)
+	ro := r.roll(t)
+	if ro == nil || ro.phase != rollOwed || ro.failures != 1 || ro.nextTry.IsZero() {
+		t.Fatalf("the roll after a failed pass: %+v", ro)
+	}
+	trustKey(r.mpzd.KeyDB, string(r.zone), r.old.keyid)
+	r.due(t)
+	r.pass(t, syncStep)
+	if ro = r.roll(t); ro == nil || ro.phase == rollOwed {
+		t.Errorf("the roll once it can be made: %+v", ro)
+	}
+}
+
+// A roll that a pass finds owed in a zone that uses no key ends: the zone has
+// nothing to roll.
+func TestARollOwedInAZoneWithNoKeyEnds(t *testing.T) {
+	r := newKeyRoundRig(t, "nokey.roll.example.", "NOTIFY")
+	t.Cleanup(r.conf.InternalMp.sig0Rolls.wait)
+	r.caughtUp()
+	r.conf.oweRoll(r.zone)
+	waitUntil(t, "a pass of the roll still runs", func() bool { return r.conf.rollOnce(r.ctx, r.zone, syncStep) })
+	if ro, err := loadRoll(r.mpzd.KeyDB, r.zone); err != nil || ro != nil {
+		t.Errorf("the roll: %+v, %v", ro, err)
+	}
+}

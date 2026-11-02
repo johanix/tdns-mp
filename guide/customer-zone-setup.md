@@ -77,10 +77,11 @@ short and meaningful.
 `OFF` is useful when temporarily removing a provider:
 keep the HSYNC3 record so peers still know about the
 provider, but block coordination. Removing the HSYNC3
-record entirely takes the provider out of the group, at
-which point the other providers' combiners should be
-purged of contributions attributed to it (see
-[Synchronization Model §6.3](synchronization-model.md#63-purging-by-origin)).
+record entirely takes the provider out of the group. Each
+provider then drops what the provider contributed by
+itself, at the end of the removal (see
+[Changing the Set of Providers §4](provider-changes.md#4-removing-a-provider)):
+no purge by hand is needed.
 
 ### 2.2 HSYNCPARAM — roles
 

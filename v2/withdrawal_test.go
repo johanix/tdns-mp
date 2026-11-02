@@ -3,6 +3,8 @@ package tdnsmp
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -477,6 +479,54 @@ func TestAWithdrawalPassesTheCombinersOriginChecks(t *testing.T) {
 	}
 }
 
+// The combiner logs "rejecting contribution" for a refusal and for nothing
+// else. A removal it takes from an origin that does not vote logs no such
+// line at either of its two checks; a real refusal logs what it always did.
+func TestOnlyARefusalLogsRejectingAContribution(t *testing.T) {
+	mpzd, hdb := withdrawnAtCombiner(t, "log.combiner.withdraw.example.", "ns1")
+	mpzd.Options[OptMPManualApproval] = true
+	conf := &Config{Config: &tdns.Config{}}
+	conf.Config.Internal.KeyDB = hdb.KeyDB
+	conf.SetMpConfig(&MultiProviderConf{Role: "combiner", Identity: csyncCombinerID, Agents: []*PeerConf{{Identity: csyncOurAgent}}})
+	logbuf := &lockedBuffer{}
+	logTo(t, lgCombiner, slog.NewJSONHandler(logbuf, nil))
+	msgQs := &MsgQs{Msg: make(chan *AgentMsgPostPlus, 4)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); CombinerMsgHandler(ctx, conf, msgQs, nil, nil) }()
+	t.Cleanup(func() { cancel(); <-done })
+	send := func(origin string, w *Withdraw, op core.RROperation) {
+		msgQs.Msg <- &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: AgentMsgNotify, OriginatorID: AgentId(origin), DeliveredBy: csyncOurAgent,
+			Zone: ZoneName(mpzd.ZoneName), DistributionID: nextDistributionID(), Withdraw: w, Operations: []core.RROperation{op}}}
+	}
+	add := core.RROperation{Operation: "add", RRtype: "NS", Records: []string{mpzd.ZoneName + " 3600 IN NS ns.alpha.example."}}
+	send(goneOrigin, &Withdraw{Provider: goneOrigin, RRtype: "NS"}, core.RROperation{Operation: "replace", RRtype: "NS"})
+	send(goneOrigin, nil, add)
+	// a voting origin's edit behind them is kept for approval: once it is,
+	// the two before it have been handled. The withdrawal's own edit is listed
+	// too until it is applied, so look for that origin's.
+	send(csyncLeaderA, nil, add)
+	waitUntil(t, "the edit behind the two was not kept for approval", func() bool {
+		edits, _ := ListPendingEdits(hdb, mpzd.ZoneName)
+		return slices.ContainsFunc(edits, func(e *PendingEditRecord) bool { return e.SenderID == csyncLeaderA })
+	})
+	cancel()
+	<-done
+	if held := combinerHolds(mpzd, goneOrigin); len(held) != 0 {
+		t.Errorf("the origin's NS after the withdrawal: %v", held)
+	}
+	logged := logbuf.String()
+	if n := strings.Count(logged, `"msg":"rejecting contribution"`); n != 1 {
+		t.Errorf("%d lines of \"rejecting contribution\", want the one of the real refusal:\n%s", n, logged)
+	}
+	for _, want := range []string{`"level":"WARN"`, `"zone":"log.combiner.withdraw.example."`, `"sender":"` + goneOrigin + `"`,
+		`"reason":"origin ` + goneOrigin + ` is not a voting member of zone log.combiner.withdraw.example."`} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("the refusal's line lacks %s:\n%s", want, logged)
+		}
+	}
+}
+
 func TestTheCombinerTakesTheFlagFromItsOwnAgentOnly(t *testing.T) {
 	mpzd, hdb := withdrawnAtCombiner(t, "flag.combiner.withdraw.example.", "ns1")
 	msg := &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{OriginatorID: goneOrigin, Zone: ZoneName(mpzd.ZoneName),
@@ -661,7 +711,7 @@ func TestWithdrawalDoneReadsEveryRecipient(t *testing.T) {
 	r.heldForN(r.n, time.Now(), "ns1.n.example.")
 	r.leads(roleA)
 	tm := r.conf.InternalMp.MPTransport
-	tm.noRoleTimeout = 50 * time.Millisecond
+	tm.noRoleTimeout = time.Hour // the test ends the wait itself
 	distID, err := r.conf.sendWithdrawal(r.zdr, ZoneName(r.zone), roleN, "NS")
 	if err != nil {
 		t.Fatal(err)
@@ -682,13 +732,44 @@ func TestWithdrawalDoneReadsEveryRecipient(t *testing.T) {
 	if r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
 		t.Fatal("done before the time-out for n, which has no role")
 	}
-	time.Sleep(60 * time.Millisecond)
+	tm.noRoleTimeout = time.Nanosecond // the time-out has passed
 	if !r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
 		t.Error("not done after the time-out for n")
 	}
 	confirm(roleN)
 	if got := r.nsOf(roleN); len(got) != 0 {
 		t.Errorf("n's NS here once every recipient confirmed: %v", got)
+	}
+}
+
+// An auditor that has not confirmed is waited for up to the time-out, as a
+// member with no role is (design 4, amended 2026-11-02), and then the leader
+// goes on: one that cannot be reached does not hold a removal's step for good.
+func TestAWithdrawalWaitsForAnAuditorUpToTheTimeOut(t *testing.T) {
+	r := newReceiveRig(t, "auditor.done.withdraw.example.")
+	ar := r.conf.InternalMp.AgentRegistry
+	for _, a := range []AgentId{roleB, roleN} {
+		ar.S.Set(a, NewAgent(a))
+	}
+	r.heldForN(r.n, time.Now(), "ns1.n.example.")
+	r.leads(roleA)
+	activeAs(t, r.store, r.zone, freezeAt(t, 42, "v", "a,b", "n")) // n an auditor
+	tm := r.conf.InternalMp.MPTransport
+	tm.noRoleTimeout = time.Hour // the test ends the wait itself
+	distID, err := r.conf.sendWithdrawal(r.zdr, ZoneName(r.zone), roleN, "NS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	zone := ZoneName(r.zone)
+	for _, source := range []string{freezeCombiner, roleB} {
+		r.zdr.ProcessConfirmation(&ConfirmationDetail{DistributionID: distID, Zone: zone, Source: source, Status: "SUCCESS"}, r.conf.InternalMp.MsgQs)
+	}
+	if r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
+		t.Fatal("done before the time-out for the auditor")
+	}
+	tm.noRoleTimeout = time.Nanosecond // the time-out has passed
+	if !r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
+		t.Error("not done after the time-out for the auditor")
 	}
 }
 

@@ -292,8 +292,9 @@ func (conf *Config) withdraw(zdr *ZoneDataRepo, zone ZoneName, provider AgentId,
 // withdrawalDone: the withdrawal of provider's records of rrtype is done
 // here, by this agent's tracking. Every record of it this agent still
 // holds is pending removal, and every recipient that has not confirmed it
-// is a member with no role, after S12's time-out from the withdrawal's
-// start (design 4). A record that every recipient confirmed is gone.
+// is a member with no role or an auditor, after S12's time-out from the
+// withdrawal's start (design 4). A record that every recipient confirmed is
+// gone.
 func (conf *Config) withdrawalDone(zdr *ZoneDataRepo, zone ZoneName, provider AgentId, rrtype string) bool {
 	t := dns.StringToType[strings.ToUpper(rrtype)]
 	held := zdr.heldOf(zone, provider, t)
@@ -323,7 +324,7 @@ func (conf *Config) withdrawalDone(zdr *ZoneDataRepo, zone ZoneName, provider Ag
 			if c, ok := tr.Confirmations[r]; ok && c.Status != "pending" {
 				continue
 			}
-			if !noRoleMember(zone, AgentId(r)) || now.Sub(start) < wait {
+			if !memberWithTimeOut(zone, AgentId(r)) || now.Sub(start) < wait {
 				return false
 			}
 		}

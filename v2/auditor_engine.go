@@ -148,8 +148,13 @@ func (e *AuditorEngine) recordSyncMsg(msg *AgentMsgPostPlus) {
 		Details:     msg.DescribeSince(prev),
 	})
 	// The event logged, the auditor's task is done: its final word to the
-	// originator (#101).
-	auditorConfirms(e.msgQs, msg, senderID, zone)
+	// originator (#101), or to the leader that delivered a withdrawal, whose
+	// originator is the provider (as answerTo does at an agent).
+	answerTo := senderID
+	if msg.Withdraw != nil {
+		answerTo = deliveredBy
+	}
+	auditorConfirms(e.msgQs, msg, answerTo, zone)
 }
 
 func (e *AuditorEngine) runAux(ctx context.Context, msgQs *MsgQs) {

@@ -191,6 +191,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			// a KEY held under another name than the leader's, until the
 			// combiner has dropped it (plan S17a)
 			conf.retryKEYPurges(zdr)
+			// a sweep with a purge the combiner could not be asked for
+			// (plan S17b)
+			conf.retrySweeps(zdr)
 			// what a zone kept, released when its freeze ended and the
 			// engine's queue had no room, or a restart came between
 			conf.releaseUnfrozen(ctx, zdr)
@@ -591,6 +594,19 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				}
 				if sdcmd.Response != nil {
 					sdcmd.Response <- &r
+				}
+
+			case "plan-withdraw":
+				// a removal's withdrawal, and whether it is done (plan S17b)
+				if sdcmd.Withdraw != nil {
+					conf.planWithdraw(zdr, sdcmd.Zone, sdcmd.Withdraw)
+				}
+
+			case "sweep":
+				// the zone's transition is done (design 3.3, plan S17b)
+				conf.sweep(zdr, sdcmd.Zone, sdcmd.Sweep)
+				if sdcmd.Response != nil {
+					sdcmd.Response <- &SynchedDataCmdResponse{Msg: "swept"}
 				}
 
 			case "instr-activated":
