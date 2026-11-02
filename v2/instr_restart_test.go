@@ -316,7 +316,6 @@ func TestAMemberTakesNeitherOfTwoSerialsThatPass(t *testing.T) {
 // the sender's about the zone. Once the serial is taken, the agent talks by
 // it.
 func TestAMemberWhoseCopyGivesItNoRoleTakesTheSerialItFetches(t *testing.T) {
-	t.Skip("211-demo: with S15 a provider with a record and no role is a member in full, so the sender is not let in by the key-only path this test asserts; #360 and S15 need to agree on the case (S9 session)")
 	for _, c := range []struct {
 		zone    string
 		records []string
