@@ -738,13 +738,13 @@ func TestARestartedSignerThatWaitsTakesNoRoleFromARefusedCopy(t *testing.T) {
 func TestARestartedSignerThatWaitsKeepsTheRolesItActedBy(t *testing.T) {
 	records := sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)
 	for _, c := range []struct {
-		name string
-		copy []string
+		name, zone string
+		copy       []string
 	}{
-		{"its copy unchanged", records},
-		{"a copy that drops it", []string{`3600 IN HSYNC3 ON p2 agent.p2.example. .`, `3600 IN HSYNCPARAM serial="6" servers="p2" signers="p2"`}},
+		{"its copy unchanged", "unchanged.signs.waiting.signer.example.", records},
+		{"a copy that drops it", "dropped.signs.waiting.signer.example.", []string{`3600 IN HSYNC3 ON p2 agent.p2.example. .`, `3600 IN HSYNCPARAM serial="6" servers="p2" signers="p2"`}},
 	} {
-		zone := "signs.waiting.signer.example."
+		zone := c.zone
 		r := newSignerRig(t, zone, records...)
 		r.firstLoad(t, records...)
 		r.restart(t)
@@ -787,7 +787,8 @@ func TestAFirstLoadThatDoesNotListTheSignerIsWhatItActedBy(t *testing.T) {
 }
 
 // A hand-over takes over from what the signer kept: nothing is left of it on
-// disk, and after a restart the hand-over is what it acts by.
+// disk, and after a restart the hand-over is what it acts by. One with no
+// records hands no sets: the signer acts on by what it kept, which stays.
 func TestAHandOverEndsWhatTheSignerKept(t *testing.T) {
 	const zone = "ended.waiting.signer.example."
 	noRole := sigRecords(`serial="5" servers="us,p2" signers="p2"`)
@@ -795,6 +796,10 @@ func TestAHandOverEndsWhatTheSignerKept(t *testing.T) {
 	r.firstLoad(t, noRole...)
 	if _, kept := signerActed.Load().get(zone); !kept {
 		t.Fatal("the first load kept nothing")
+	}
+	r.hand(&ActingHandover{Zone: zone, Phase: PhaseSteady, Made: time.Now()}, sigUs)
+	if _, kept := signerActed.Load().get(zone); !kept {
+		t.Fatal("a hand-over with no records ended what the signer kept")
 	}
 	handed := sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)
 	r.hand(handoverFor(t, zone, handed...), sigUs)
