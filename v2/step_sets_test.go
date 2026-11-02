@@ -490,3 +490,19 @@ func TestAWaitingSignerReadsItsKeptDataUnderTheZonesLock(t *testing.T) {
 	close(stop)
 	<-done
 }
+
+// The origin check reads whether this provider is a leaving signer under the
+// zone's lock too (CodeRabbit on #352). It tells only under -race.
+func TestALeavingSignerIsReadUnderTheZonesLock(t *testing.T) {
+	const zone = "lockedleaving.steps.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)...)
+	kept, done := *r.mpzd.MP.MPdata, make(chan struct{})
+	go func() {
+		defer close(done)
+		r.mpzd.Lock()
+		r.mpzd.MP.MPdata = &kept
+		r.mpzd.Unlock()
+	}()
+	r.mpzd.leavingSigner()
+	<-done
+}

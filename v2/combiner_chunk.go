@@ -374,8 +374,11 @@ func originVoteRefusal(zone, origin string, local bool, ops []core.RROperation, 
 }
 
 // leavingSigner: this provider signs the zone by the step's sets though its
-// signers= no longer names it (plan S13).
+// signers= no longer names it (plan S13). A refresh or a hand-over swaps the
+// data in under the zone's lock.
 func (mpzd *MPZoneData) leavingSigner() bool {
+	mpzd.Lock()
+	defer mpzd.Unlock()
 	return mpzd.MP != nil && mpzd.MP.MPdata != nil && mpzd.MP.MPdata.Leaving
 }
 
