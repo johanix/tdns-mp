@@ -1457,15 +1457,17 @@ func (l *ZoneKeyLifecycle) RolloverFlags() (rolloverFlags, error) {
 
 // standbyAdditions are the keys in published that only add a standby key of
 // their role, which is no rollover (the project owner, 2026-11-02): the policy
-// keeps standby keys of the role, and no rollover of it is due that would
-// promote the key once standby. Under a hold a due one is not promoted (Tick),
-// so the key only becomes a standby key. In a role the policy keeps no standby
-// of, a key on its way in is a rollover's. A rollover asked for and an
-// algorithm rollover are flags of their own (RolloverFlags).
+// keeps standby keys of the role, a key of the role signs, and no rollover of
+// it is due that would promote the key once standby. With no key of the role
+// signing, T9 promotes the key once standby, under a hold too (Tick): it is
+// the role's first. Under a hold a due one is not promoted (Tick), so the key
+// only becomes a standby key. In a role the policy keeps no standby of, a key
+// on its way in is a rollover's. A rollover asked for and an algorithm
+// rollover are flags of their own (RolloverFlags).
 func (l *ZoneKeyLifecycle) standbyAdditions(all map[uint16]tdns.DnssecKeyWithTimestamps) map[uint16]bool {
 	out := map[uint16]bool{}
 	for _, role := range []string{"KSK", "ZSK"} {
-		if l.standbyCount(role) == 0 || (!l.hold && l.lifetimeDue(role, all)) {
+		if l.standbyCount(role) == 0 || !hasActiveKey(role, all) || (!l.hold && l.lifetimeDue(role, all)) {
 			continue
 		}
 		alg := l.policyAlgorithm(role)
@@ -1476,6 +1478,16 @@ func (l *ZoneKeyLifecycle) standbyAdditions(all map[uint16]tdns.DnssecKeyWithTim
 		}
 	}
 	return out
+}
+
+// hasActiveKey: a key of the role signs, of any algorithm, as Tick counts them.
+func hasActiveKey(role string, all map[uint16]tdns.DnssecKeyWithTimestamps) bool {
+	for _, k := range all {
+		if roleOf(k.Flags) == role && k.State == KeyStateActive {
+			return true
+		}
+	}
+	return false
 }
 
 // standbyCount is the policy's standby count for the role.
