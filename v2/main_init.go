@@ -811,7 +811,25 @@ func chunkQueryEndpoints(role string, mp *MultiProviderConf, chunkMode string) (
 	return endpoint, cep == "include", nil
 }
 
-// buildAgentChunkQueryEndpoint builds the CHUNK query endpoint (host:port) from agent DNS config.
+// reachableListenAddress says whether another host can reach a listen
+// address, given with or without its port. A wildcard or loopback address is
+// none: a receiver asked to fetch from it would ask itself.
+func reachableListenAddress(listen string) bool {
+	host := listen
+	if h, _, err := net.SplitHostPort(listen); err == nil {
+		host = h
+	}
+	if host == "" || sameName(host, "localhost") {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip == nil || !(ip.IsUnspecified() || ip.IsLoopback())
+}
+
+// buildAgentChunkQueryEndpoint builds the CHUNK query endpoint (host:port) from agent DNS config:
+// the first published address, else the first listen address another host
+// can reach. With neither there is no endpoint, and a receiver asks at the
+// address it has for this agent.
 func buildAgentChunkQueryEndpoint(mp *MultiProviderConf) string {
 	if mp == nil {
 		return ""
@@ -825,8 +843,13 @@ func buildAgentChunkQueryEndpoint(mp *MultiProviderConf) string {
 	if len(dnsConf.Addresses.Publish) > 0 {
 		host = strings.TrimSpace(dnsConf.Addresses.Publish[0])
 	}
-	if host == "" && len(dnsConf.Addresses.Listen) > 0 {
-		host = strings.TrimSpace(dnsConf.Addresses.Listen[0])
+	if host == "" {
+		for _, listen := range dnsConf.Addresses.Listen {
+			if listen = strings.TrimSpace(listen); reachableListenAddress(listen) {
+				host = listen
+				break
+			}
+		}
 	}
 	if host == "" {
 		return ""
