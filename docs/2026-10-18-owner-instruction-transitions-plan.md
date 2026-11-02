@@ -213,7 +213,7 @@ The sizes are estimates from reading the code, tests apart: files touched, and l
 | S18b | A signer added; a server becomes a signer | S18a, S11, S12; P5 | 6 | 290 | 75 | Not started |
 | S19 | NS management | S5a, S10, S12 | 5 | 130 | 40 | Not started |
 | S20 | Parent sync | S12, S14, S17a; P3 (#209 done) | 7 | 220 | 60 | Not started |
-| S21 | An upstream; `pubkey` and `pubcds` | S18a, S12; P6 (#167 done) | 7 | 170 | 40 | Not started |
+| S21 | An upstream; `pubkey` and `pubcds` | S18a, S12; P6 (#167 done) | 7 | 170 | 40 | **Built** (2026-11-02), on S18a's branch, with P6 on the pin: its pull request carries this cell. 11 files of Go, about 535 new lines with their comments and 30 changed; tests about 530 new and 6 changed. An upstream is a step held until the provider's servers serve the new upstream's copy; `pubkey` and `pubcds` a step each, which the combiners act on by the sets handed. The fleet check waits for a rig run |
 | S22 | Tellings by interest | S5a, S12 (membership step 8 done) | 5 | 90 | 60 | Not started |
 
 **Totals.** S1 to S22, in tdns-mp: about 8,520 new and 2,720 changed lines, in 25 pull requests, or 26 if S7's parent work goes first as a pull request of its own. Of that, the core (S1 to S9) is about 4,100 new and 1,305 changed; the parts (S10 to S13) about 1,860 and 565; the key, the switch and the kinds of change (S14 to S22) about 2,560 and 850. P1 to P3 and P6, in tdns and tdns-transport: about 155 new and 55 changed. Tests: two to three times the 11,240 lines of code, so about 22,500 to 33,700 lines. Membership decision 46 (2026-10-19) moved about 155 new and 45 changed lines of S14 into membership step 7b; they are counted there, not here.
@@ -1396,6 +1396,20 @@ Names as below, and also: log, info, logger `engine`, "a provider put back sends
 **Size.** 7 files, about 220 new and 60 changed lines.
 
 ### S21. An upstream; `pubkey` and `pubcds`
+
+**Status (2026-11-02):** Built, on S18a's branch, with P6 (tdns #962) on the pin. It lifts S4's rows for an upstream and for `pubkey` and `pubcds`: `builtKinds` holds `kindUpstream` and `kindPubkey`, and `carriedKinds` `kindUpstream`. Where the text left a choice, the plain reading was taken, each for the project owner when the whole stack is examined:
+
+1. **The serial "they served"** is the highest SOA serial the provider's own nameservers serve at the step's first check in which each of them answers, kept in memory for the step (`servedAtFirstCheck`). After a restart they are asked again, and a server that has moved by then passes on the new upstream's signatures.
+2. **Which providers have an upstream's step:** one whose record names another upstream under V, in V's `servers=` and in the sets held. A provider that enters `servers=` has its server role's step, which checks the upstream V names. A signer has none, since its servers serve its own signer's copy; a step for it would wait for good. A leader with no from-serial plans none: nothing says what moved.
+3. **What to point where** shows in the provider's own status from the step's start, not "past a time" as in S18a: nothing moves until its operator acts.
+4. **The kind and the number of steps:** an upstream, `pubkey` and `pubcds` are each a role change's step, and `pubkey` and `pubcds` changed in one edit are two steps, `pubkey` first.
+5. **The KEY:** turned on, the leader's step sends the zone's KEY again with its instruction (`sendZoneKey`, split out of `publishZoneKey`), at-ns now since `publishLocations` reads the step's sets, and every agent passes it on (#206). A key not published yet goes at its take-up, by the same sets. Turned off, no message goes: the combiner withdraws the KEY when it is handed the sets (S10, #167).
+6. **The CDS and CDNSKEY are the combiner's own work, not an instruction's.** They are the zone's apex as the combiner serves it, read when the sets handed say `pubcds`, and put at `_dsboot.<zone>._signal.<ns>` under the KEY's targets (`signalNSTargets`). `PublishInstruction.CDSRRs` stays unused. Only the combiner holds every signer's CDS, and a name that does not follow the apex goes stale at a key roll (P6's point 2), so `syncDsbootNames` runs after a hand-over, an update, a refresh and a first load. The provider zone's contributions, in the name of the agent that handed, are the ledger of what was published. A combiner handed nothing changes nothing (rule 5).
+7. **The CDNSKEY** is published only where the apex has one. tdns-mp has no producer for it, and the combiner's own types do not include it, so that is an owner's record in its copy.
+
+**The fleet check needs a config line:** a provider zone's `allowed-rrtypes` must list CDS and CDNSKEY for the `_dsboot` names to be served. Without them the combiner logs a warning, "the provider zone's allowed-rrtypes lacks a type of the zone's _dsboot names: it is not published", and serves none.
+
+Names as below. The KEY's publication log adds `ns`. Tests as named, and `TestTheDsbootNamesAreServedAgainAfterARestart` and `TestADsbootNameNeedsTheProviderZonesAllowedRRtypes`. `TestAnUpstreamChangeIsRefusedUntilItsStepExists` becomes `TestAnUpstreamChangeIsAgreedOnceItsStepExists`, and `TestAKindWithoutItsStepsIsRefused` no longer takes `pubkey` and `pubcds` as kinds not built.
 
 **Before it:** S18a (the serving check), S12. P6. PR #167, whose combiner reads `pubkey` (`lacksPubkeyConsent`). tdns-mp #206 fixed (S14).
 

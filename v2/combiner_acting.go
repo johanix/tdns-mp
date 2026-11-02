@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -125,6 +126,16 @@ func (s *actingStore) get(zone string) (heldHandover, bool) {
 		return *held, true
 	}
 	return heldHandover{}, false
+}
+
+// zoneNames are the zones the part holds a hand-over for, by their keys.
+func (s *actingStore) zoneNames() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Sorted(maps.Keys(s.zones))
 }
 
 // reading is the instructions the part was handed for the zone and acts by,
@@ -347,7 +358,14 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 	if mpzd.hasPubkey() != pubkeyBefore {
 		if err := mpzd.withdrawZoneSignalKeysWithoutConsent(NewHsyncDB(mpzd.KeyDB)); err != nil {
 			lgCombiner.Error("failed to load publish instructions; the zone's at-ns publication is not checked against the customer's consent", "zone", mpzd.ZoneName, "err", err)
+		} else if pubkeyBefore {
+			lg.Info("the zone's KEY at the _signal names withdrawn", "zone", mpzd.ZoneName)
 		}
+	}
+	// after the combine: the names carry the apex as it now reads. Failed,
+	// it is said as a failed combine is, and the agent hands it again.
+	if err := mpzd.syncDsbootNames(); err != nil && combineErr == nil {
+		combineErr = err
 	}
 	return combineErr
 }

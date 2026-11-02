@@ -10,6 +10,7 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 // leaderKeySetup runs when the local agent wins a zone's leader election,
@@ -136,7 +137,6 @@ func (conf *Config) makeZoneKey(hdb *HsyncDB, zone ZoneName, readEmpty bool) (ma
 // errLeadMoved.
 func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPollToken, made bool, madeKeyid uint16) error {
 	lem := conf.InternalMp.LeaderElectionManager
-	tm := conf.InternalMp.MPTransport
 	kdb := conf.zoneKeyDB(zone)
 	hdb := NewHsyncDB(kdb)
 	zd, ok := Zones.Get(string(zone))
@@ -170,7 +170,24 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 	held := *zk.held
 	keyRR := held.key
 	lgAgent.Info("publishing KEY to combiner with PublishInstruction", "zone", zone, "keyid", held.keyid)
+	if err := conf.sendZoneKey(zone, keyRR); err != nil {
+		return err
+	}
+	conf.InternalMp.keyPolls.published(zone)
 
+	// The KeyState inquiry and bootstrap with the parent (async), for the
+	// zone's key: the poll takes the set-up's count (keyPolls).
+	if zd.Options[tdns.OptParentSync] {
+		conf.launchKeyPoll(ctx, tk, zone, string(zone), held.keyid, keyRR.Algorithm)
+	}
+	return nil
+}
+
+// sendZoneKey sends the zone's KEY, with its publish instruction, to this
+// agent's combiner and to the zone's other agents: the locations by the sets
+// at the zone's step (publishLocations).
+func (conf *Config) sendZoneKey(zone ZoneName, keyRR dns.RR) error {
+	tm := conf.InternalMp.MPTransport
 	zu := &ZoneUpdate{
 		Zone: zone,
 		Operations: []core.RROperation{{
@@ -189,7 +206,6 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 		return err
 	}
 	lgAgent.Info("KEY + PublishInstruction sent to combiner", "zone", zone, "distID", distID)
-	conf.InternalMp.keyPolls.published(zone)
 
 	// The KEY is the group's: every provider's combiner publishes it where
 	// the instruction says, at-ns under its own nameservers too (#206)
@@ -204,12 +220,6 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 	}
 	if err := tm.EnqueueForZoneAgents(zone, agentUpdate, distID); err != nil {
 		lgAgent.Error("failed to enqueue KEY for remote agents", "zone", zone, "err", err)
-	}
-
-	// The KeyState inquiry and bootstrap with the parent (async), for the
-	// zone's key: the poll takes the set-up's count (keyPolls).
-	if zd.Options[tdns.OptParentSync] {
-		conf.launchKeyPoll(ctx, tk, zone, string(zone), held.keyid, keyRR.Algorithm)
 	}
 	return nil
 }
