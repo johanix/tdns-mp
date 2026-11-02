@@ -122,7 +122,7 @@ func TestNothingIsSweptWhileTheZoneIsFrozen(t *testing.T) {
 func TestTheSweepRunsBeforeAWaitingSerialIsAgreed(t *testing.T) {
 	r := newSweepRig(t, "waiting.sweep.example.")
 	r.holds(roleN, dns.TypeNS)
-	// 43 gives n a server role again: by V, n's NS goes still
+	// 43 changes no role, so it is agreed on after "done": by V, n's NS goes
 	savedSweep := askSweep
 	agreedAtSweep := false
 	askSweep = func(conf *Config, zone string, in *Instructions) {
@@ -145,6 +145,46 @@ func TestTheSweepRunsBeforeAWaitingSerialIsAgreed(t *testing.T) {
 	}
 	if v, ok := r.conf.thawView(r.zone, time.Now()); !ok || v.to != sd(w) {
 		t.Errorf("43 is not agreed on after done: %+v %v", v, ok)
+	}
+}
+
+// A newer serial refused only for kinds not built is followed in the very
+// store update that ends V's transition (#350's fallback; CodeRabbit on
+// #352). 43 gives n a server role again and takes b's, unenforced. The sweep
+// runs all the same: what neither entitles goes (n's DNSKEY), what 43 gives
+// stays (n's NS), and what only 43 takes away stays (b's NS).
+func TestTheSweepRunsWhenDoneFollowsASerialNotBuilt(t *testing.T) {
+	r := newSweepRig(t, "followed.sweep.example.")
+	r.holds(roleN, dns.TypeNS, dns.TypeDNSKEY)
+	r.holds(roleB, dns.TypeNS)
+	r.store.Note(r.zone, removalAt(t, 43, "agent", "a,n", "a"), nil)
+	r.run()
+	if st := status(t, r.store, r.zone); st.Active.Serial != 43 || st.Follows == "" {
+		t.Fatalf("43 is not followed at done: %s", st.Line())
+	}
+	if r.has(roleN, dns.TypeDNSKEY) {
+		t.Error("n's DNSKEY stays: no serial entitles it")
+	}
+	if !r.has(roleN, dns.TypeNS) {
+		t.Error("n's NS went: 43 gives n the role")
+	}
+	if !r.has(roleB, dns.TypeNS) {
+		t.Error("b's NS went: only 43 takes it away, unenforced")
+	}
+	if !slices.Equal(r.purged, []string{"n.role.example DNSKEY"}) {
+		t.Errorf("the purges: %v", r.purged)
+	}
+}
+
+// A sweep by a serial no longer active does nothing, unless the fallback
+// followed the active one.
+func TestASweepByAnotherSerialDoesNothing(t *testing.T) {
+	r := newSweepRig(t, "other.sweep.example.")
+	r.run()
+	r.holds(roleN, dns.TypeNS)
+	r.conf.sweep(r.zdr, ZoneName(r.zone), removalAt(t, 41, "agent", "a,b", "a"))
+	if !r.has(roleN, dns.TypeNS) || len(r.purged) != 0 {
+		t.Errorf("swept by 41 with 42 active: purged %v", r.purged)
 	}
 }
 

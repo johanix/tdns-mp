@@ -336,6 +336,7 @@ type reconcileInputs struct {
 	excused     []string
 	enforced    bool
 	reconciling bool
+	follows     string // why the not-built fallback follows the active serial
 }
 
 // reconcileInputs is what the store holds of zone, the zone named in any
@@ -351,7 +352,7 @@ func (s *InstructionStore) reconcileInputs(zone string) (reconcileInputs, bool) 
 		return reconcileInputs{}, false
 	}
 	in := reconcileInputs{name: name, active: *z.Active, removals: slices.Clone(z.Removals),
-		excused: slices.Clone(z.Excused), enforced: z.Enforced, reconciling: z.reconciling()}
+		excused: slices.Clone(z.Excused), enforced: z.Enforced, reconciling: z.reconciling(), follows: z.Follows}
 	if z.From != nil {
 		f := *z.From
 		in.from = &f
@@ -940,7 +941,8 @@ func (conf *Config) transitionDone(zone string, serial uint32) {
 	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil {
 		conf.onSetsChanged(mpzd, true)
 	}
-	// by V, before a newer serial that waited is judged, at the next turn
+	// by V, also when Done just followed a serial not built (sweep), and before
+	// a newer serial that waited is agreed on, at the next turn
 	askSweep(conf, zone, reading)
 	conf.askThaw(zone)
 }

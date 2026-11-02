@@ -56,14 +56,24 @@ func holdsContribution(ar *AgentRepo, origin AgentId, rrtype uint16) bool {
 // runs on the data engine, whose repo it changes. It does not run while the
 // zone reconciles, or once another serial is active: the sweep is V's, and it
 // runs at V's "done" also when a newer serial waits to be agreed on, before
-// that agreement starts (7.2).
+// that agreement starts (7.2). One serial does not stop it: one the not-built
+// fallback followed at that "done" (followNotBuilt). It is unenforced, so what
+// only it takes away stays and what it gives is not swept: the sweep drops what
+// neither serial entitles.
 func (conf *Config) sweep(zdr *ZoneDataRepo, zone ZoneName, in *Instructions) {
 	if zdr == nil || in == nil {
 		return
 	}
 	cur, ok := conf.InternalMp.Instructions.reconcileInputs(string(zone))
-	if !ok || cur.reconciling || cur.active.Serial != in.Serial || cur.active.Digest != in.Digest() {
+	if !ok || cur.reconciling {
 		return
+	}
+	by := []*Instructions{in}
+	if cur.active.Serial != in.Serial || cur.active.Digest != in.Digest() {
+		if cur.follows == "" || cur.active.Reading == nil {
+			return
+		}
+		by = append(by, cur.active.Reading)
 	}
 	ar, ok := zdr.Repo.Get(zone)
 	if !ok || ar == nil {
@@ -82,7 +92,8 @@ func (conf *Config) sweep(zdr *ZoneDataRepo, zone ZoneName, in *Instructions) {
 			if _, has := od.RRtypes.Get(t); !has {
 				continue
 			}
-			if entitled(in, origin, t, leader, leader != "" && holdsContribution(ar, leader, t)) {
+			leaderHolds := leader != "" && holdsContribution(ar, leader, t)
+			if slices.ContainsFunc(by, func(i *Instructions) bool { return entitled(i, origin, t, leader, leaderHolds) }) {
 				continue
 			}
 			od.RRtypes.Delete(t)
