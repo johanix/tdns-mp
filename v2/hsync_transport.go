@@ -2038,8 +2038,9 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		beatGossip = tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
 			string(agent.ID), tm.agentRegistry.ProviderGroupManager, tm.agentRegistry.LeaderElectionManager)
 	}
-	if e := tm.stamps.entryFor(string(agent.ID)); e != nil {
-		beatGossip = append(beatGossip, *e)
+	stampEntry := tm.stamps.entryFor(string(agent.ID))
+	if stampEntry != nil {
+		beatGossip = append(beatGossip, *stampEntry)
 	}
 	if len(beatGossip) > 0 {
 		gossipData, _ = json.Marshal(beatGossip)
@@ -2124,9 +2125,11 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		}
 	}
 	// A beat that succeeded, on one mechanism or both, is one successful
-	// beat to the peer for the catch-up tracker.
+	// beat to the peer for the catch-up tracker, and has told the zones its
+	// stamp entry carried (plan S22).
 	if (apiBeatEligible && beatSucceeded(apiResp, apiErr)) || (dnsBeatEligible && beatSucceeded(dnsResp, dnsErr)) {
 		tm.catchUp.PeerOperational(agent.ID)
+		tm.stamps.acknowledged(string(agent.ID), stampEntry)
 	}
 	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
 		for _, resp := range []*transport.BeatResponse{apiResp, dnsResp} {
@@ -2748,8 +2751,9 @@ func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(ctx context.Context, distID st
 	}
 }
 
-// signingAgents: those of a zone's agents whose provider signs the zone, by
-// the identities of the step's signing set. nil when the zone or its
+// signingAgents: those of a zone's agents whose confirmations a key's
+// distribution expects, by the identities of the step's KeyConfirmers (plan
+// S13): a leaving signer counts until it leaves them. nil when the zone or its
 // HSYNCPARAM is not here to ask; the tracker then takes every answer as it
 // comes.
 func signingAgents(zone ZoneName, agents []AgentId) map[AgentId]bool {
@@ -2760,7 +2764,7 @@ func signingAgents(zone ZoneName, agents []AgentId) map[AgentId]bool {
 	if in := mpzd.instructions(); in == nil || !in.HasParam {
 		return nil
 	}
-	signing := identities(mpzd.roles().Signing)
+	signing := identities(mpzd.roles().KeyConfirmers)
 	out := map[AgentId]bool{}
 	for _, a := range agents {
 		if isAmong(signing, a) {

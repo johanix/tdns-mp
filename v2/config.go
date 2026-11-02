@@ -95,7 +95,6 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 					conf.noteInstructions(mpzd)
 					givenBack := conf.onSetsChanged(mpzd, false)
 					mpzd.PostRefresh(tm, msgQs)
-					conf.afterSigningSetChange(mpzd)
 					if givenBack {
 						// after PostRefresh, which applies this refresh's
 						// HSYNC3 change and recomputes the groups: who leads

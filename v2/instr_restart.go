@@ -154,7 +154,7 @@ func (conf *Config) restartView(zone string, now time.Time) (restartView, bool) 
 		st, ok := told[canonicalName(id)]
 		switch {
 		case !ok:
-			v.waits = append(v.waits, id+" (not heard)")
+			v.waits = append(v.waits, id+" ("+conf.unheard(id)+")")
 			continue
 		case now.Sub(st.heard) > timeout:
 			v.waits = append(v.waits, id+" (not heard since "+st.heard.Format(time.TimeOnly)+")")
