@@ -312,7 +312,7 @@ func TestAZoneIsFrozenUntilItsActiveSerialIsKnown(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Know(storeZone, sd(eight), nil); err != nil {
+	if err := s.Know(storeZone, sd(eight), nil, false); err != nil {
 		t.Fatal(err)
 	}
 	if why := s.frozen(storeZone); len(why) != 1 || !strings.HasPrefix(why[0], "owner error") {

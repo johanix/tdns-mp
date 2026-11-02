@@ -226,7 +226,7 @@ type AgentDistribPost struct {
 	Force         bool   `json:"force,omitempty"`          // for purge
 	Op            string `json:"op,omitempty"`             // for op: operation name (e.g. "ping")
 	To            string `json:"to,omitempty"`             // for op: recipient identity (e.g. "combiner", "agent.delta.dnslab.")
-	PingTransport string `json:"ping_transport,omitempty"` // for op ping: "dns" (default) or "api"
+	PingTransport string `json:"ping_transport,omitempty"` // for op ping: "dns" (default) or "api"; anything else is refused
 	AgentId       string `json:"agent_id,omitempty"`       // for discover: agent identity to discover
 	Zone          string `json:"zone,omitempty"`           // for zone-agents: zone name to list agents for; for stamps: the zone shown
 }

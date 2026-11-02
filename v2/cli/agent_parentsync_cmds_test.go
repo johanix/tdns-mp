@@ -615,7 +615,7 @@ func TestTheAgentShowsAndForgetsTheZonesSerials(t *testing.T) {
 	if out, err := forget("-z", zone); err == nil || !strings.Contains(err.Error(), "not steady") {
 		t.Errorf("forget with no active serial known: %v, %q; want refused", err, out)
 	}
-	if err := store.Know(zone, tdnsmp.SerialDigest{Serial: 7, Digest: seven.Digest()}, nil); err != nil {
+	if err := store.Know(zone, tdnsmp.SerialDigest{Serial: 7, Digest: seven.Digest()}, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	out, _ = status("status", "-z", zone)

@@ -119,6 +119,8 @@ The leader under V carries out what the difference between N and V calls for, st
 - **The last step of every transition** is that every voting member's combiner and signer hold V. Members with no role are waited for within their time-out (section 4); excused leaving members are not waited for.
 - **Done.** The leader says so, first hand, and every agent's status and the auditor show the zone at V, done. Then each agent drops from its own stores what the active instructions do not entitle any provider to (the sweep), never while the zone is frozen and never towards its peers. A newer serial that waited is then agreed. The agent's own kept changes are handled by V, in order. (The distributions of others that were kept are handled at the activation, rule 6.) The owner can see that the next edit may follow.
 
+  *Amended 2026-10-29 (Johan):* when a newer serial waited, the zone goes from reconciling straight to agreeing on it, frozen throughout, and the agent's own kept changes go out after that serial's transition is done, by its instructions (plan S12, its status item 7).
+
 ### 3.4 After a start
 
 An agent that starts reads its stored serials. It votes, beats, gossips, catches up, and answers and asks for the zone's key, as always. It starts nothing for a zone until it knows the zone's active serial, and keeps what it receives meanwhile (rule 6):
