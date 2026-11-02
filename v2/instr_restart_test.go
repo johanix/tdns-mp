@@ -157,6 +157,11 @@ func TestALeaderWithNoRecordTakesWhatEveryVotingMemberWithARecordTells(t *testin
 	if line := r.conf.thawLine(r.zone); !strings.Contains(line, roleN+" (not heard)") {
 		t.Errorf("the status does not name the member not heard: %q", line)
 	}
+	// heard, but telling nothing of the zone (plan S22)
+	r.operational(roleN)
+	if line := r.conf.thawLine(r.zone); !strings.Contains(line, roleN+" (tells nothing of the zone)") {
+		t.Errorf("the status of a member heard that tells nothing of the zone: %q", line)
+	}
 	r.hear(roleN, tells(n, n), true)
 	r.conf.thawTurn(r.zone)
 	if r.known() != 41 {

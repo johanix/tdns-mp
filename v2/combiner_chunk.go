@@ -79,7 +79,7 @@ func (cs *CombinerState) SetGetPeerAddress(fn func(senderID string) (address str
 type editPolicy struct {
 	ZoneSigned  bool
 	WeAreSigner bool
-	Leaving     bool  // a signer out of signers= that signs on (#147): it applies, and submits no keys
+	Leaving     bool  // a signer out of signers= that the step's sets keep signing (plan S13): it applies, and submits no keys
 	NSmgmt      uint8 // core.HsyncNSmgmtOWNER or core.HsyncNSmgmtAGENT
 	ParentSync  uint8 // core.HsyncParentSyncOwner or core.HsyncParentSyncAgent
 }
@@ -346,9 +346,10 @@ func (mpzd *MPZoneData) checkMPauthorization() error {
 // takes by HSYNC or HSYNC2 records alone has no standings; both are left as
 // they are (votesInZone). What the combiner already stores of an origin
 // that stops voting stays (decision 37). One exception: while its provider
-// is out of signers= and signs on (#147), the combiner takes its own
-// agent's operations (local, one of its configured agents), so that what
-// it serves does not go stale. Nil when the origin may contribute.
+// is out of signers= and the step's sets keep it signing (plan S13), the
+// combiner takes its own agent's operations (local, one of its configured
+// agents), so that what it serves does not go stale. Nil when the origin
+// may contribute.
 func originVoteRefusal(zone, origin string, local bool, ops []core.RROperation, records map[string][]string) *CombinerSyncResponse {
 	if votesInZone(ZoneName(zone), AgentId(origin)) {
 		return nil
@@ -370,6 +371,15 @@ func originVoteRefusal(zone, origin string, local bool, ops []core.RROperation, 
 		}
 	}
 	return resp
+}
+
+// leavingSigner: this provider signs the zone by the step's sets though its
+// signers= no longer names it (plan S13). A refresh or a hand-over swaps the
+// data in under the zone's lock.
+func (mpzd *MPZoneData) leavingSigner() bool {
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	return mpzd.MP != nil && mpzd.MP.MPdata != nil && mpzd.MP.MPdata.Leaving
 }
 
 func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []string, localAgents map[string]bool, hdb *HsyncDB, tm *MPTransportBridge) *CombinerSyncResponse {
@@ -1325,6 +1335,39 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 						if existingIsLocal && !senderIsLocal {
 							lgCombiner.Debug("dedup: local contribution exists, remote is no-op",
 								"rrtype", op.RRtype, "zone", zonename, "local", existingSender, "remote", req.SenderID)
+							// the sender's REPLACE leaves it none of its own:
+							// a record it held before does not stay published
+							// beside the local one (tdns-mp #211, S14's fleet)
+							// one lock over the removal and its undoing: a
+							// newer REPLACE of the sender's is not undone
+							mpzd.Lock()
+							prior := slices.Clone(mpzd.MP.AgentContributions[req.SenderID][zonename][rrtype].RRs)
+							_, gone, dropped, derr := mpzd.replaceCombinerDataByRRtypeLocked(req.SenderID, zonename, rrtype, nil)
+							if derr != nil && len(prior) > 0 {
+								// its records go back, as the store still
+								// holds them, for the retry to remove again
+								mpzd.replaceCombinerDataByRRtypeLocked(req.SenderID, zonename, rrtype, prior)
+							}
+							mpzd.Unlock()
+							if derr != nil {
+								// refused as a failed REPLACE is, so that
+								// the sender sends it again
+								lgCombiner.Error("removing the sender's own contribution failed", "zone", zonename, "sender", req.SenderID, "rrtype", op.RRtype, "err", derr)
+								rejectedItems = append(rejectedItems, RejectedItem{
+									Record: fmt.Sprintf("(replace %s)", op.RRtype),
+									Reason: fmt.Sprintf("replace failed: %v", derr),
+								})
+								continue
+							}
+							if dropped {
+								// told to the sender whether or not this
+								// combiner serves the type, as the records
+								// are reported applied
+								removedRecords = append(removedRecords, gone...)
+								if policy.canApply(rrtype) {
+									dataChanged = true
+								}
+							}
 							for _, rr := range parsedRRs {
 								appliedRecords = append(appliedRecords, rr.String())
 							}

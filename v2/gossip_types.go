@@ -278,6 +278,11 @@ type ParentSyncStatus struct {
 	// KeyHold: the leader's sync waits for the zone's SIG(0) key, and why
 	// (step 7b). Empty when it does not.
 	KeyHold string `json:"key_hold,omitempty"`
+	// ZoneKey: at the leader, "LOST" when no agent asked holds the KEY the
+	// zone publishes; while the parent does not trust the key held, that
+	// the key was offered and not taken, or that the parent refuses it
+	// (plan S14). Empty otherwise.
+	ZoneKey string `json:"zone_key,omitempty"`
 	// DSSet is "known", or "unknown, waiting for" whom, for a zone that
 	// names a signer. Empty for one that names none.
 	DSSet string `json:"ds_set,omitempty"`
@@ -298,4 +303,7 @@ type ParentSyncStatus struct {
 	Combiner string `json:"combiner,omitempty"`
 	// Signer is the same of its signer (plan S11).
 	Signer string `json:"signer,omitempty"`
+	// Sets are the zone's sets per purpose as this agent acts by them: the
+	// step's, at rest the active serial's lists (plan S13).
+	Sets string `json:"sets,omitempty"`
 }

@@ -1,8 +1,8 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * Stamps in beats at the transport boundary (plan S5a), over both
- * mechanisms.
+ * Stamps in beats at the transport boundary (plans S5a and S22), over
+ * both mechanisms.
  */
 package tdnsmp
 
@@ -18,8 +18,9 @@ import (
 	"github.com/miekg/dns"
 )
 
-// Alice beats bob, over DNS and over HTTPS. Bob notes alice's stamp first
-// hand, with the beat's mechanism. Bob's answer carries a stamp of his own
+// Alice beats bob, over DNS and over HTTPS, a beat that tells every zone
+// (as the first after bob's start does, plan S22). Bob notes alice's stamp
+// first hand, with the beat's mechanism. Bob's answer carries a stamp of his own
 // that tells a newer serial under another digest: alice notes none of it,
 // marks no owner error and fetches nothing (design rule 4).
 func TestTransportBoundary_StampsInBeatsOverBothMechanisms(t *testing.T) {
@@ -48,6 +49,7 @@ func TestTransportBoundary_StampsInBeatsOverBothMechanisms(t *testing.T) {
 				pgm.RecomputeGroups()
 				p.Registry.GossipStateTable.RefreshLocalStates(p.Registry, pgm)
 			}
+			tellEveryZoneOnce(tables[env.Alice.Identity], bob)
 			fetched := 0
 			tables[env.Alice.Identity].fetch = func(zone string) (string, bool) {
 				fetched++
@@ -131,6 +133,56 @@ func TestTransportBoundary_StampsInBeatsOverBothMechanisms(t *testing.T) {
 			if fetched != 0 {
 				t.Errorf("the answer's newer serial was fetched %d times", fetched)
 			}
+			// the beat was acknowledged: the zone it told once is told
+			if got := zonesTold(tables[env.Alice.Identity].entryFor(bob), alice); len(got) != 0 {
+				t.Errorf("after the acknowledged beat alice still tells bob %v", got)
+			}
 		})
+	}
+}
+
+// The answer to a beat lists nothing by interest (plan S22): it carries no
+// stamp, even of a zone the beat would tell, and its rows list no zone.
+// Answers count for nothing (rule 4).
+func TestABeatAnswerListsNothingByInterest(t *testing.T) {
+	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true, ChunkMode: "edns0", ControlZoneIsIdentity: true})
+	alice, bob := dns.Fqdn(env.Alice.Identity), dns.Fqdn(env.Bob.Identity)
+	const zone = "answer.interest.example."
+	zd := seedZoneWithHSYNC3(t, zone, alice, bob)
+	addHSYNCPARAMServers(t, zd, shortLabel(alice), shortLabel(bob))
+	apex, err := zd.GetOwner(zone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := ReadInstructions(apex)
+	if err != nil || in == nil {
+		t.Fatalf("the zone's reading: %v %v", in, err)
+	}
+	s := newStore(t)
+	noteKnown(t, s, zone, in)
+	st := newStampTable(alice, s, 1, true, nil)
+	st.rollover = func(string) bool { return true }
+	tellEveryZoneOnce(st, bob)
+	env.Alice.Bridge.stamps = st
+	pgm := env.Alice.Registry.ProviderGroupManager
+	pgm.RecomputeGroups()
+	env.Alice.Registry.GossipStateTable.RefreshLocalStates(env.Alice.Registry, pgm)
+	if got := zonesTold(st.entryFor(bob), alice); !slices.Equal(got, []string{zone}) {
+		t.Fatalf("the beat to bob tells %v", got)
+	}
+
+	var answer []GossipMessage
+	if err := json.Unmarshal(env.Alice.Bridge.ChunkHandler.GossipForPeer(bob), &answer); err != nil || len(answer) == 0 {
+		t.Fatalf("the answer's gossip: %+v %v", answer, err)
+	}
+	for _, g := range answer {
+		if g.GroupHash == stampGroupHash {
+			t.Errorf("the answer carries a stamp entry: %+v", g)
+		}
+		for id, row := range g.Members {
+			if row != nil && len(row.Zones) != 0 {
+				t.Errorf("%s's row in the answer lists %v", id, row.Zones)
+			}
+		}
 	}
 }
