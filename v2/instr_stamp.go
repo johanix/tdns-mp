@@ -54,7 +54,8 @@ const fetchInterval = time.Minute
 // while none is due, and a zone something is going on in at least every
 // refresh plus ceil(2n/K) beats. A zone left out is heard no more until it
 // is told again, so the leaving and the no-role time-outs, which read how
-// fresh a telling is, must be well above that.
+// fresh a telling is, must be well above that. A stopgap until the beats are
+// redesigned after the IETF (tdns-mp #356).
 const stampEntryBudget = 16 << 10
 
 // stampTable is what this agent tells in its beats and what its members
