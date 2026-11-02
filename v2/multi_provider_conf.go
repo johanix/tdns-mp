@@ -143,9 +143,15 @@ type MultiProviderConf struct {
 	// a telling heard longer ago does not count for the thaw, and a leaving
 	// voting member whose telling has not met the thaw's conditions for this
 	// long, counted from when this agent first holds the serial agreed on,
-	// is excused. Zero or absent: 3600.
+	// is excused; and so is one that has not confirmed a step of the
+	// reconciliation for this long (plan S12). Zero or absent: 3600.
+	// NoRoleTimeout: how long a step, a distribution and the leader's
+	// NOTIFY for its CSYNC wait for a member with no role, on its way in or
+	// out, before they go on without it (design 4, plan S12). Zero or
+	// absent: 900.
 	Transitions struct {
 		LeavingTimeout int `yaml:"leaving-timeout" mapstructure:"leaving-timeout"`
+		NoRoleTimeout  int `yaml:"no-role-timeout" mapstructure:"no-role-timeout"`
 	} `yaml:"transitions" mapstructure:"transitions"`
 	Api LocalAgentApiConf
 	Dns LocalAgentDnsConf
