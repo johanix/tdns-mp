@@ -55,6 +55,14 @@ const fetchInterval = time.Minute
 // refresh plus ceil(2n/K) beats. A zone left out is heard no more until it
 // is told again, so the leaving and the no-role time-outs, which read how
 // fresh a telling is, must be well above that.
+//
+// All this holds for stamps of up to half the budget, about 24 providers on
+// one zone. A larger stamp breaks it: one over the budget takes its beat over
+// when it comes first, and a due one can wait while changed zones keep coming
+// (fillEntry). A stamp too large for a beat to carry would fail every beat to
+// the peer, and nothing caps a zone's providers yet (tdns-mp #356).
+//
+// A stopgap until the beats are redesigned after the IETF (tdns-mp #356).
 const stampEntryBudget = 16 << 10
 
 // stampTable is what this agent tells in its beats and what its members
@@ -206,8 +214,9 @@ func newStampTable(localID string, store *InstructionStore, epoch uint64, crypto
 // what it holds of a zone a newer beat no longer tells, but a stamp at rest
 // (keep). Nil when the two share no zone.
 //
-// The zones told fit stampEntryBudget (fillEntry, plan S22 amended
-// 2026-10-30), in four ranks. First the zones whose stamp changed since an
+// The zones told fit stampEntryBudget, unless the first alone is over it
+// (fillEntry, plan S22 amended 2026-10-30), in four ranks. First the zones
+// whose stamp changed since an
 // acknowledged beat to peer told it (acked): one told for the first time,
 // one that starts or takes a step, whose parts come to hold it, that is
 // done or comes to rest. Then those something is going on in that are due:
@@ -366,7 +375,12 @@ func stampHash(b []byte) uint64 {
 // whose stamp changed leave room for the zones that are due, up to half the
 // budget, so that changes hold them back for no more than that; a zone of
 // peer's new epoch alone waits until all those something is going on in
-// fit. One zone is told whatever its size. partial: a zone of the first
+// fit. The first zone of a beat is told whatever its size: a changed stamp
+// over the budget goes alone in its turn, and that beat is over the budget.
+// Any other waits when it has no room after those told before it. A due
+// stamp of up to half the budget always has room, which the changed zones
+// leave it. One larger has room only where they leave more: it waits while
+// they keep coming, and goes once they drain. partial: a zone of the first
 // three ranks was left out.
 func fillEntry(ranked [4][]toTell, cursor *[4]string) (told []toTell, size int, partial bool) {
 	due := 0
