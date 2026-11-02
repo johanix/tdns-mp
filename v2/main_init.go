@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -813,17 +814,22 @@ func chunkQueryEndpoints(role string, mp *MultiProviderConf, chunkMode string) (
 
 // reachableListenAddress says whether another host can reach a listen
 // address, given with or without its port. A wildcard or loopback address is
-// none: a receiver asked to fetch from it would ask itself.
+// none: a receiver asked to fetch from it would ask itself. Nor is an address
+// with a zone: a zone means something on this host only.
 func reachableListenAddress(listen string) bool {
 	host := listen
 	if h, _, err := net.SplitHostPort(listen); err == nil {
 		host = h
 	}
-	if host == "" || sameName(host, "localhost") {
+	if host = strings.Trim(host, "[]"); host == "" || sameName(host, "localhost") {
 		return false
 	}
-	ip := net.ParseIP(host)
-	return ip == nil || !(ip.IsUnspecified() || ip.IsLoopback())
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return true // a host name
+	}
+	addr = addr.Unmap()
+	return addr.Zone() == "" && !addr.IsUnspecified() && !addr.IsLoopback()
 }
 
 // buildAgentChunkQueryEndpoint builds the CHUNK query endpoint (host:port) from agent DNS config:
@@ -857,7 +863,7 @@ func buildAgentChunkQueryEndpoint(mp *MultiProviderConf) string {
 	if _, _, err := net.SplitHostPort(host); err == nil {
 		return host
 	}
-	return net.JoinHostPort(host, strconv.Itoa(int(port)))
+	return net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(int(port)))
 }
 
 // warnConfiguredAPIEndpoint says that a configured agent's api_base_url is
