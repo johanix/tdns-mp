@@ -639,6 +639,24 @@ func TestTheNsmgmtStepIsPlannedFromWhatIsInPlace(t *testing.T) {
 	}
 }
 
+// An edit that gives a provider a server role and changes nsmgmt plans the
+// role first, by kind (design 5): the owner's NS RRset, which may name the new
+// provider's servers, is served only once they serve the zone.
+func TestAServerRolesStepComesBeforeTheNsmgmtStep(t *testing.T) {
+	from := jAt(t, 41, `servers="a,b" nsmgmt="agent"`, freezeRecords...)
+	to := jAt(t, 42, `servers="a,b,n" nsmgmt="owner"`, freezeRecords...)
+	var keys []string
+	for _, st := range planSteps(planView{from: from, to: to, held: rolesFor(from, from, 0)}) {
+		keys = append(keys, st.key)
+	}
+	if want := []string{serverRoleKey + canonicalName(roleN), nsmgmtStepKey, lastStepKey}; !slices.Equal(keys, want) {
+		t.Errorf("the steps: %v, want %v", keys, want)
+	}
+	if rs := judgeTransition(from, to); len(rs) != 0 {
+		t.Errorf("the judge refuses the pair: %v", rs)
+	}
+}
+
 // The join: the leader's step, as its tracker hands it, is what has the
 // combiner drop what it stores and stop applying NS.
 func TestTheLeadersStepHandsTheCombinerTheRole(t *testing.T) {
