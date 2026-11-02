@@ -29,9 +29,18 @@ var sweepWait = 10 * time.Second
 // entitled: the instructions in entitle origin to contributions of rrtype. NS
 // needs nsmgmt=agent and the origin in servers=; DNSKEY and CDS the origin in
 // signers=. KEY and CSYNC are the leader's, once the leader's own is there:
-// until then any origin's stands (leaderHolds).
+// until then any origin's stands (leaderHolds). CDS, KEY and CSYNC need
+// parentsync=agent too: a combiner under parentsync=owner does not apply them,
+// and one kept would come back at a later take-up (plan S20), a CDS from before
+// a key roll with it.
 func entitled(in *Instructions, origin AgentId, rrtype uint16, leader AgentId, leaderHolds bool) bool {
 	label, on := in.labelOf(string(origin))
+	switch rrtype {
+	case dns.TypeCDS, dns.TypeKEY, dns.TypeCSYNC:
+		if in.ParentSync != core.HsyncParentSyncAgent {
+			return false
+		}
+	}
 	switch rrtype {
 	case dns.TypeNS:
 		return in.NSmgmt == core.HsyncNSmgmtAGENT && on && slices.Contains(in.Servers, label)
