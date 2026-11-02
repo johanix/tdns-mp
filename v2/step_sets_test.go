@@ -359,3 +359,216 @@ func TestTheStatusShowsTheStepsSetsPerPurpose(t *testing.T) {
 		t.Errorf("at a step the status says %q, want %q", got, want)
 	}
 }
+
+// A change of the sets computes the zone's data on a wrapper and swaps it in
+// under the zone's lock, as a refresh and a hand-over do: a reader under the
+// lock never races it (external review of #339). It tells only under -race.
+func TestAChangeOfTheSetsSwapsTheDataUnderTheZonesLock(t *testing.T) {
+	r := newComputedDSRig(t, "locked.steps.example.", []string{"us", "p2"})
+	r.mpzd.Options[tdns.OptMultiProvider] = true
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			r.mpzd.Lock()
+			if d := r.mpzd.MP.MPdata; d != nil {
+				_ = d.WeAreSigner
+			}
+			_ = r.mpzd.MPOptions[OptMPDisallowEdits]
+			r.mpzd.Unlock()
+		}
+	}()
+	for range 50 {
+		r.conf.onSetsChanged(r.mpzd, true)
+	}
+	close(stop)
+	<-done
+}
+
+// The signer's inventory is the owner's before what the signer holds is
+// learned from it: a step that learning finds held reads the DS set of
+// this inventory, not the one before (external review of #339).
+func TestTheInventoryIsTheOwnersBeforeTheSignersHoldIsLearned(t *testing.T) {
+	yes := true
+	r := newComputedDSRig(t, "inventoryfirst.steps.example.", []string{"us", "p2"})
+	z := r.mpzd.ZoneName
+	h := &ActingHandover{Zone: z, Serial: 1, Digest: "x", Records: []string{"r"}, Made: time.Now()}
+	tr := newHandoverTracker(AgentId("agent.us.example."), func(ZoneName, *ZoneUpdate, string) (string, error) { return "", nil })
+	tr.toSigner = true
+	tr.zones[handoverKey(z)] = &zoneHandover{want: h}
+	var told, inventoried bool
+	tr.onHeld = func(zone string) { told, inventoried = true, r.owner.inventoryOf(zone) != nil }
+	r.conf.InternalMp.SignerHandover = tr
+	r.conf.noteKeyInventory(r.ctx, r.mpzd, &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: z,
+		Inventory: []KeyInventoryItem{invItem(t, z, 257, KeyStateActive, &yes)}, Owned: true, Acting: h})
+	if !told {
+		t.Fatal("the signer's hold of the hand-over was not learned")
+	}
+	if !inventoried {
+		t.Error("the signer's hold was learned before its inventory was the owner's")
+	}
+}
+
+// The first data a change of the sets computes over the config parse's stub
+// is no change of the DS signers: the stub names none, and asks no sync
+// (external review of #339, N2).
+func TestTheFirstDataOverTheParsesStubAsksNoSync(t *testing.T) {
+	r := newComputedDSRig(t, "stub.steps.example.", []string{"us", "p2"})
+	r.mpzd.Options[tdns.OptMultiProvider] = true
+	r.leader("agent.us.example.")
+	s := withActiveStore(t, r.mpzd)
+	rest := r.mpzd.roles()
+	rest.ParentSync = core.HsyncParentSyncAgent // the agents sync the parent
+	stepAs(t, s, r.mpzd.ZoneName, 1, withSigners(rest, "us", "p2"))
+	r.mpzd.MP.MPdata = &MPdata{Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}} // as the parse leaves it
+	r.conf.onSetsChanged(r.mpzd, true)
+	if n := r.requests(t); n != 0 {
+		t.Errorf("the first data over the parse's stub asked for %d syncs", n)
+	}
+}
+
+// A step that gives the agents the parent sync and changes DSSigners asks
+// the leader's sync once the parentsync option follows the step: asked
+// before, it found the option off and asked nothing (CodeRabbit on #339).
+func TestAStepThatGivesTheAgentsTheParentSyncAsksItForTheDSSet(t *testing.T) {
+	asMPDaemon(t, AppTypeMPAgent)
+	r := newComputedDSRig(t, "toagents.steps.example.", []string{"us", "p2"})
+	z := r.mpzd.ZoneName
+	r.mpzd.Options[tdns.OptMultiProvider] = true
+	r.mpzd.Options[tdns.OptParentSync] = false // the owner syncs the parent
+	r.leader("agent.us.example.")
+	s := withActiveStore(t, r.mpzd)
+	rest := r.mpzd.roles()
+	rest.ParentSync = core.HsyncParentSyncOwner
+	stepAs(t, s, z, 1, withSigners(rest, "us", "p2"))
+	r.conf.onSetsChanged(r.mpzd, true)
+	if n := r.requests(t); n != 0 {
+		t.Fatalf("the owner syncs the parent, and %d syncs were asked for", n)
+	}
+	sets := withSigners(rest, "us", "p2", "p3")
+	sets.ParentSync = core.HsyncParentSyncAgent
+	stepAs(t, s, z, 2, sets)
+	r.conf.onSetsChanged(r.mpzd, true)
+	if !r.mpzd.Options[tdns.OptParentSync] {
+		t.Fatal("the step that gives the agents the parent sync did not turn the option on")
+	}
+	if n := r.requests(t); n != 1 {
+		t.Errorf("the step gave the agents the parent sync and changed the DS signers: %d syncs asked for, want 1", n)
+	}
+}
+
+// A signer that waits reads the data it last acted by under the zone's
+// lock, which a refresh or a hand-over swaps it in under (CodeRabbit on
+// #339). It tells only under -race.
+func TestAWaitingSignerReadsItsKeptDataUnderTheZonesLock(t *testing.T) {
+	const zone = "lockedsets.steps.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)...)
+	kept := r.mpzd.MP.MPdata
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			c := *kept
+			r.mpzd.Lock()
+			r.mpzd.MP.MPdata = &c
+			r.mpzd.Unlock()
+		}
+	}()
+	for range 200 {
+		signerSets(r.mpzd, r.conf.MpConfig())
+	}
+	close(stop)
+	<-done
+}
+
+// The origin check reads whether this provider is a leaving signer under the
+// zone's lock too (CodeRabbit on #352). It tells only under -race.
+func TestALeavingSignerIsReadUnderTheZonesLock(t *testing.T) {
+	const zone = "lockedleaving.steps.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)...)
+	kept, done := *r.mpzd.MP.MPdata, make(chan struct{})
+	go func() {
+		defer close(done)
+		r.mpzd.Lock()
+		r.mpzd.MP.MPdata = &kept
+		r.mpzd.Unlock()
+	}()
+	r.mpzd.leavingSigner()
+	<-done
+}
+
+// A refresh can publish a step's sets between the step and its recompute,
+// which then finds no difference from the data before it. The change of the
+// DS signers still asks the leader's sync, once: the check compares with
+// what the last check saw (CodeRabbit on #339).
+func TestADSChangeARefreshPublishedFirstStillAsksTheSync(t *testing.T) {
+	r := newComputedDSRig(t, "refreshfirst.steps.example.", []string{"us", "p2"})
+	z := r.mpzd.ZoneName
+	r.mpzd.Options[tdns.OptMultiProvider] = true
+	r.leader("agent.us.example.")
+	s := withActiveStore(t, r.mpzd)
+	rest := r.mpzd.roles()
+	rest.ParentSync = core.HsyncParentSyncAgent // the agents sync the parent
+	stepAs(t, s, z, 1, withSigners(rest, "us", "p2"))
+	r.conf.onSetsChanged(r.mpzd, true)
+	if n := r.requests(t); n != 0 {
+		t.Fatalf("no change of the DS signers, and %d syncs were asked for", n)
+	}
+	stepAs(t, s, z, 2, withSigners(rest, "us", "p2", "p3"))
+	r.mpzd.populateMPdata(r.conf.MpConfig(), r.mpzd.roles()) // as the refresh publishes it
+	r.conf.onSetsChanged(r.mpzd, true)
+	if n := r.requests(t); n != 1 {
+		t.Errorf("a refresh published the step's DS signers first: %d syncs asked for, want 1", n)
+	}
+	r.conf.onSetsChanged(r.mpzd, false)
+	if n := r.requests(t); n != 0 {
+		t.Errorf("the change was asked for again: %d more syncs", n)
+	}
+}
+
+// A step that gives the parent sync back to the agents runs the leader's
+// setup, which an election skipped while the owner synced the zone: a step
+// has no PostRefresh to wait for, as a refresh has, which runs it itself
+// (CodeRabbit on #339).
+func TestAStepThatGivesTheParentSyncBackRunsTheLeadersSetup(t *testing.T) {
+	asMPDaemon(t, AppTypeMPAgent)
+	r := newComputedDSRig(t, "giveback.steps.example.", []string{"us", "p2"})
+	z := r.mpzd.ZoneName
+	r.mpzd.Options[tdns.OptMultiProvider] = true
+	r.mpzd.Options[tdns.OptParentSync] = false // the owner syncs the parent
+	r.leader("agent.us.example.")
+	ran := make(chan ZoneName, 4)
+	r.lem.onLeaderElected = func(zone ZoneName) error {
+		ran <- zone
+		return nil
+	}
+	s := withActiveStore(t, r.mpzd)
+	rest := r.mpzd.roles()
+	rest.ParentSync = core.HsyncParentSyncOwner
+	stepAs(t, s, z, 1, withSigners(rest, "us", "p2"))
+	r.conf.onSetsChanged(r.mpzd, true)
+	sets := withSigners(rest, "us", "p2")
+	sets.ParentSync = core.HsyncParentSyncAgent
+	stepAs(t, s, z, 2, sets)
+	if givenBack := r.conf.onSetsChanged(r.mpzd, true); !givenBack {
+		t.Fatal("the step gave the parent sync back, and onSetsChanged does not say so")
+	}
+	select {
+	case zone := <-ran:
+		if zone != ZoneName(z) {
+			t.Errorf("the leader's setup ran for %s", zone)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("the step gave the parent sync back, and the leader's setup did not run")
+	}
+}
