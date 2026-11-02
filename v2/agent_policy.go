@@ -188,6 +188,19 @@ func noRoleEditRefusal(zone ZoneName) string {
 	return fmt.Sprintf("zone %s: this provider has no role in the zone (it is listed under neither servers= nor signers=); nothing is stored and nothing is sent", zone)
 }
 
+// addedKEYRefusal is the answer to an operator's add of a KEY: the zone's KEY
+// is the group's, and only its leader's publication puts one there (plan S14,
+// #340).
+func addedKEYRefusal(zone ZoneName) string {
+	return fmt.Sprintf("zone %s: a KEY is not added by hand: the zone's KEY is the group's, and its leader publishes it", zone)
+}
+
+// publishedKEYRefusal is the answer to an operator's delete, at the zone's
+// leader, of the KEY the leader publishes (#340).
+func publishedKEYRefusal(zone ZoneName) string {
+	return fmt.Sprintf("zone %s: this KEY is not removed by hand: it is the zone's KEY, which this agent publishes as the zone's leader", zone)
+}
+
 // noRoleLeadRefusal is the answer to the operator who asks a provider with
 // no role in the zone to lead it.
 func noRoleLeadRefusal(zone ZoneName) string {
