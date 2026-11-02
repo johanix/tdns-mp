@@ -564,6 +564,25 @@ func TestParentSyncStatusShowsTheCatchUp(t *testing.T) {
 	wantLines(t, "status, several KEYs", out,
 		"  KEY at apex:    several (2); an operator has to leave one",
 		"  parent sync:    held until the zone's SIG(0) key is held and bootstrapped (not held)")
+
+	// a key that no agent asked holds (plan S14)
+	report.ApexKeys, report.KeyAlgorithm, report.ZoneKey = 1, "", "LOST"
+	out, err = parentSyncCLI(t, agent(report))("status", "-z", zone)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	wantLines(t, "status, a lost key", out, "  SIG(0) key:     LOST")
+
+	// a key the parent has not taken: below the key's own line
+	report.KeyAlgorithm, report.KeyID = "ED25519", 5012
+	report.ZoneKey = "new key 5012 made and offered; the parent has not taken it yet"
+	out, err = parentSyncCLI(t, agent(report))("status", "-z", zone)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	wantLines(t, "status, a key not taken", out,
+		"  SIG(0) key:     ED25519, key id 5012",
+		"                  new key 5012 made and offered; the parent has not taken it yet")
 }
 
 // The zone's instructions, through the agent's real handler: `parentsync

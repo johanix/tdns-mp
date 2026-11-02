@@ -291,10 +291,16 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 		fmt.Fprintf(w, "  signer:         %s\n", termSafe(s.Signer))
 	}
 
-	if s.KeyAlgorithm == "" {
+	switch {
+	case s.KeyAlgorithm == "" && s.ZoneKey != "":
+		fmt.Fprintf(w, "  SIG(0) key:     %s\n", termSafe(s.ZoneKey))
+	case s.KeyAlgorithm == "":
 		fmt.Fprintln(w, "  SIG(0) key:     none active for the zone")
-	} else {
+	default:
 		fmt.Fprintf(w, "  SIG(0) key:     %s, key id %d\n", termSafe(s.KeyAlgorithm), s.KeyID)
+		if s.ZoneKey != "" {
+			fmt.Fprintf(w, "                  %s\n", termSafe(s.ZoneKey))
+		}
 		fmt.Fprintf(w, "  KEY record:     %s\n", termSafe(strings.Join(strings.Fields(s.KeyRR), " ")))
 		// 0 is what the keystore holds for a key the parent was never asked
 		// about, and it is also a KeyState code of its own. The report does
