@@ -546,3 +546,82 @@ func TestADsbootTypeNoLongerAllowedIsWithdrawn(t *testing.T) {
 		t.Errorf("the CDNSKEY no longer allowed is in the store a restart loads: %v", got)
 	}
 }
+
+// S17a's roll and a step meet in sendZoneKEY. A roll's new KEY goes where the
+// sets at the zone's step say, under the distribution it booked: at-apex
+// alone before the step that gives pubkey, at-ns after it, and at-apex alone
+// after the step that takes it. The step that gives pubkey during a roll
+// sends the new key, whatever the leader's copy still serves, with at-ns, and
+// leaves the roll's booking as it was.
+func TestARollsNewKEYAndAStepsLocationsBothHold(t *testing.T) {
+	const zone = "roll.signal.example."
+	r := signalLeader(t, zone, `servers="a,b" nsmgmt="agent" suffix="n"`, `servers="a,b" nsmgmt="agent" pubkey suffix="v"`, true)
+	z := ZoneName(zone)
+	mpzd, _ := Zones.Get(zone)
+	kdb := mpzd.KeyDB
+	if _, err := kdb.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "generate", Zone: zone,
+		Keyname: zone, Algorithm: dns.ED25519, State: tdns.Sig0StatePublished, Creator: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := sig0Rows(kdb, z, tdns.Sig0StatePublished)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("the new key: %v, %v", rows, err)
+	}
+	newKey := rows[0]
+	active, err := activeSig0Rows(kdb, z)
+	if err != nil || len(active) != 1 {
+		t.Fatalf("the old key: %v, %v", active, err)
+	}
+	tm := r.conf.InternalMp.MPTransport
+
+	if err := r.conf.publishRolledKEY(z, &newKey); err != nil {
+		t.Fatal(err)
+	}
+	sent := r.keySent()
+	if slices.Contains(sent.Locations, "at-ns") || !slices.Equal(sent.KEYRRs, []string{newKey.key.String()}) {
+		t.Errorf("the roll's KEY under the sets of step 0: %+v", sent)
+	}
+	booked, ok := tm.rollKEYs.state(z)
+	if !ok {
+		t.Fatal("the roll's KEY is not booked")
+	}
+	if err := saveRoll(kdb, &sig0Roll{zone: z, phase: rollPublished, oldKeyid: active[0].keyid, newKeyid: newKey.keyid, started: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+
+	st := r.takeNextStep()
+	if !slices.Equal(st.Taken, []string{pubkeyStepKey}) {
+		t.Fatalf("the step: %+v", st)
+	}
+	sent = r.keySent()
+	if !slices.Contains(sent.Locations, "at-ns") || !slices.Equal(sent.KEYRRs, []string{newKey.key.String()}) {
+		t.Errorf("the step's KEY during the roll: %+v, want the new key with at-ns", sent)
+	}
+	if again, ok := tm.rollKEYs.state(z); !ok || again.distID != booked.distID {
+		t.Errorf("the step's send moved the roll's booking: %+v, was %+v", again, booked)
+	}
+
+	if err := r.conf.publishRolledKEY(z, &newKey); err != nil {
+		t.Fatal(err)
+	}
+	if sent = r.keySent(); !slices.Contains(sent.Locations, "at-ns") {
+		t.Errorf("the roll's KEY after the step: %+v, want at-ns", sent)
+	}
+
+	off := signalLeader(t, "roll.signal.off.example.", `servers="a,b" nsmgmt="agent" pubkey suffix="n"`, `servers="a,b" nsmgmt="agent" suffix="v"`, true)
+	if st := off.takeNextStep(); !slices.Equal(st.Taken, []string{pubkeyStepKey}) {
+		t.Fatalf("the step that takes pubkey: %+v", st)
+	}
+	offZone := ZoneName("roll.signal.off.example.")
+	offMpzd, _ := Zones.Get(string(offZone))
+	offRows, err := activeSig0Rows(offMpzd.KeyDB, offZone)
+	if err != nil || len(offRows) != 1 {
+		t.Fatalf("the key: %v, %v", offRows, err)
+	}
+	if err := off.conf.publishRolledKEY(offZone, &offRows[0]); err != nil {
+		t.Fatal(err)
+	}
+	if sent := off.keySent(); slices.Contains(sent.Locations, "at-ns") {
+		t.Errorf("a roll's KEY after the step that takes pubkey: %+v", sent)
+	}
+}
