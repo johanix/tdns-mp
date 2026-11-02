@@ -1,6 +1,7 @@
 package tdnsmp
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -361,6 +362,89 @@ func TestTheSignerPushesAnInventoryWhenTheMarksChange(t *testing.T) {
 	if r, ok := recvWithin(got, time.Second); !ok || len(r) != 0 {
 		t.Errorf("pushed %v (%v), want a plain push", r, ok)
 	}
+}
+
+// The agent's cover for the word that ends a rollover not arriving: its
+// signer's last word is a rollover, a minute old, so it asks again.
+func TestAnOldRolloverMarkIsAskedAgain(t *testing.T) {
+	type rig struct {
+		*freezeRig
+		mpzd  *MPZoneData
+		asked int
+	}
+	newRig := func(t *testing.T, zone string) *rig {
+		t.Helper()
+		r := &rig{freezeRig: newFreezeRig(t, zone)}
+		r.conf.InternalMp.MPZoneNames = []string{zone}
+		r.mpzd, _ = Zones.Get(zone)
+		return r
+	}
+	told := func(r *rig, rollover bool, at time.Time) {
+		r.mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.zone, Rollover: rollover, Received: at})
+	}
+	pass := func(r *rig, at time.Time) int {
+		r.asked = 0
+		r.conf.askOnOldRolloverMarks(at, func(*MPZoneData) { r.asked++ })
+		return r.asked
+	}
+	answered := func(r *rig, rollover bool) {
+		r.conf.noteKeyInventory(context.Background(), r.mpzd, &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: r.zone, Rollover: rollover})
+	}
+	now := time.Now()
+
+	t.Run("the rollover's end was lost", func(t *testing.T) {
+		r := newRig(t, "lost.mark.freeze.example.")
+		told(r, true, now.Add(-rolloverMarkMaxAge))
+		if !r.conf.InternalMp.MPTransport.rolloverAt(r.zone) {
+			t.Fatalf("the signer's last word is a rollover: not read")
+		}
+		if n := pass(r, now); n != 1 {
+			t.Errorf("asked %d times, want once", n)
+		}
+		answered(r, false)
+		if r.conf.InternalMp.MPTransport.rolloverAt(r.zone) {
+			t.Errorf("the answer says none: a rollover under way")
+		}
+		if n := pass(r, time.Now().Add(rolloverMarkMaxAge)); n != 0 {
+			t.Errorf("no rollover told: asked %d times", n)
+		}
+	})
+
+	t.Run("an older word landed after the end", func(t *testing.T) {
+		r := newRig(t, "late.mark.freeze.example.")
+		told(r, false, now)
+		told(r, true, now)
+		if n := pass(r, now); n != 0 {
+			t.Errorf("the word just came: asked %d times", n)
+		}
+		if n := pass(r, now.Add(rolloverMarkMaxAge)); n != 1 {
+			t.Errorf("a minute on: asked %d times, want once", n)
+		}
+	})
+
+	t.Run("a rollover really under way", func(t *testing.T) {
+		r := newRig(t, "real.mark.freeze.example.")
+		told(r, true, now.Add(-rolloverMarkMaxAge))
+		answered(r, true)
+		fresh := time.Now()
+		if n := pass(r, fresh); n != 0 {
+			t.Errorf("just answered: asked %d times", n)
+		}
+		if n := pass(r, fresh.Add(rolloverMarkMaxAge)); n != 1 {
+			t.Errorf("a minute after the answer: asked %d times, want once", n)
+		}
+	})
+
+	t.Run("nothing to ask for", func(t *testing.T) {
+		r := newRig(t, "none.mark.freeze.example.")
+		if n := pass(r, now); n != 0 {
+			t.Errorf("no inventory: asked %d times", n)
+		}
+		told(r, false, now.Add(-time.Hour))
+		if n := pass(r, now); n != 0 {
+			t.Errorf("an old word of no rollover: asked %d times", n)
+		}
+	})
 }
 
 // A rollover's new key in published still counts, whichever asked for it,
