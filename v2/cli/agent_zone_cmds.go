@@ -381,8 +381,9 @@ func newAgentZoneAddRRCmd(kind string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "addrr",
 		Short: "Add a resource record to a zone and sync with peers and combiner",
-		Long: `Add a resource record to the specified zone. Supported RR types: NS, DNSKEY, CDS, CSYNC, KEY.
-The RR type is inferred from the --rr argument.
+		Long: `Add a resource record to the specified zone. Supported RR types: NS, DNSKEY, CDS, CSYNC.
+The RR type is inferred from the --rr argument. A KEY is refused: the zone's KEY is the group's,
+and its leader publishes it.
 
 This will:
 - Add the RR to the local synced data store
@@ -460,7 +461,8 @@ func newAgentZoneDelRRCmd(kind string) *cobra.Command {
 		Use:   "delrr",
 		Short: "Delete a resource record from a zone and sync with peers and combiner",
 		Long: `Delete a resource record from the specified zone. Supported RR types: NS, DNSKEY, CDS, CSYNC, KEY.
-The RR type is inferred from the --rr argument.
+The RR type is inferred from the --rr argument. A KEY is deleted from what this agent holds of its own;
+at the zone's leader, the KEY it publishes is refused.
 
 This will:
 - Remove the RR from the local synced data store
