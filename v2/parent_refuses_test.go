@@ -153,6 +153,13 @@ func TestASyncThatNeedsTheKeyStaysHeldWhileTheParentRefusesIt(t *testing.T) {
 func TestASyncThatNeedsNoKeyGoesAloneByNotifyWhileTheParentRefusesTheKey(t *testing.T) {
 	awaitedEvery(t, time.Hour)
 	h := newHoldRig(t, "both.refused.example.", "BOTH", true, repeat(time.Hour, 4)...)
+	// the operator prefers UPDATE: tdns's walk would try it first
+	cs, ps, prev := *tdns.ChildSyncConfig(), *tdns.ParentSyncConfig(), *tdns.ParentSyncConfig()
+	t.Cleanup(func() { _ = tdns.SetDelegationSyncConfig(cs, prev) })
+	ps.Schemes = []string{"update", "notify"}
+	if err := tdns.SetDelegationSyncConfig(cs, ps); err != nil {
+		t.Fatal(err)
+	}
 	z := h.mpzd.ZoneName
 	k := testSig0Key(t, h.mpzd.KeyDB, z)
 	tdns.UpdateParentState(h.mpzd.KeyDB, z, k.keyid, edns0.KeyStateRefused)
