@@ -1438,15 +1438,17 @@ func (l *ZoneKeyLifecycle) RolloverRequests() []string {
 
 // RolloverFlags are what the driver knows of the zone beside its key rows,
 // for rolloverUnderWay (plan S11): a rollover asked for, an algorithm
-// rollover under way, and a distribution that waits for confirmations.
-func (l *ZoneKeyLifecycle) RolloverFlags() (rolloverFlags, error) {
+// rollover under way, and a distribution that waits for confirmations. The
+// keys are read by the hold the caller confirms: the machine's own is its
+// tick's to set (tickOwned), and a reader doesn't change it.
+func (l *ZoneKeyLifecycle) RolloverFlags(hold bool) (rolloverFlags, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	all, err := l.rows()
 	if err != nil {
 		return rolloverFlags{}, err
 	}
-	f := rolloverFlags{Requested: len(l.rolls) > 0, AlgRoll: len(l.algRolloversOf(all)) > 0, Additions: l.standbyAdditions(all)}
+	f := rolloverFlags{Requested: len(l.rolls) > 0, AlgRoll: len(l.algRolloversOf(all)) > 0, Additions: l.standbyAdditions(all, hold)}
 	for _, d := range l.dist {
 		if confirmationsOutstandingFor(d) {
 			f.PropagationPending = true
@@ -1464,10 +1466,10 @@ func (l *ZoneKeyLifecycle) RolloverFlags() (rolloverFlags, error) {
 // only becomes a standby key. In a role the policy keeps no standby of, a key
 // on its way in is a rollover's. A rollover asked for and an algorithm
 // rollover are flags of their own (RolloverFlags).
-func (l *ZoneKeyLifecycle) standbyAdditions(all map[uint16]tdns.DnssecKeyWithTimestamps) map[uint16]bool {
+func (l *ZoneKeyLifecycle) standbyAdditions(all map[uint16]tdns.DnssecKeyWithTimestamps, hold bool) map[uint16]bool {
 	out := map[uint16]bool{}
 	for _, role := range []string{"KSK", "ZSK"} {
-		if l.standbyCount(role) == 0 || !hasActiveKey(role, all) || (!l.hold && l.lifetimeDue(role, all)) {
+		if l.standbyCount(role) == 0 || !hasActiveKey(role, all) || (!hold && l.lifetimeDue(role, all)) {
 			continue
 		}
 		alg := l.policyAlgorithm(role)

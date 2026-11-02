@@ -14,7 +14,7 @@ import (
 // underWay is rolloverUnderWay on the zone's rows and the machine's flags.
 func (r *driverRig) underWay() bool {
 	r.t.Helper()
-	f, err := r.l.RolloverFlags()
+	f, err := r.l.RolloverFlags(r.l.hold)
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestARolesFirstKeyIsNoAddition(t *testing.T) {
 	r.confirmAll("applied", keys["KSK"], keys["ZSK"])
 	for _, hold := range []bool{false, true} {
 		r.l.SetHold(hold)
-		f, err := r.l.RolloverFlags()
+		f, err := r.l.RolloverFlags(hold)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -155,6 +155,39 @@ func TestTheInventoryReadsTheKeysByTheHoldItConfirms(t *testing.T) {
 	s.hand(off, sigUs)
 	if m := marks(); m.hold || !m.rollover {
 		t.Errorf("handed the hold's end, no tick since: hold %v, rollover %v; want no hold and a rollover", m.hold, m.rollover)
+	}
+}
+
+// The machine's hold is its tick's to set. An inventory that read the zone's
+// hold before a hand-over kept a new one, and comes after the tick has set it,
+// leaves it: the tick that follows starts no due rollover.
+func TestAnInventoryLeavesTheMachinesHoldAlone(t *testing.T) {
+	const zone = "stale.hold.signer.example."
+	const lifetime = 30 * 24 * time.Hour
+	s := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)...)
+	pol := driverPolicy
+	pol.ZSKLifetime = lifetime
+	clock, wire := &fakeClock{t: time.Now()}, newFakeWire("p2")
+	r := &driverRig{t: t, kdb: s.kdb, zd: s.mpzd, clock: clock, wire: wire, l: NewZoneKeyLifecycle(zone, s.kdb, clock, pol, wire)}
+	s.e.zones[zone] = r.l
+	bootstrapKSK(t, r)
+	clock.Advance(lifetime + time.Hour)
+	r.l.SetHold(true)
+	inv, err := tdns.GetKeyInventory(s.kdb, zone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := s.conf.inventoryMarksOf(zone, inv); m.hold {
+		t.Fatalf("the zone's hold, as the inventory read it: %v, want none", m.hold)
+	}
+	r.tick("held")
+	if ks := r.keysIn(KeyStateMpdist, "ZSK"); len(ks) != 0 {
+		t.Errorf("after an inventory by an older hold, a tick under the hold minted %v", ks)
+	}
+	r.l.SetHold(false)
+	r.tick("let go")
+	if ks := r.keysIn(KeyStateMpdist, "ZSK"); len(ks) != 1 {
+		t.Errorf("the hold let go, the due rollover minted %v, want one ZSK", ks)
 	}
 }
 
