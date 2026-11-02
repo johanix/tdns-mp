@@ -537,6 +537,7 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 			status.Frozen, status.Kept = conf.freezeLines(string(amp.Zone))
 			status.Combiner = conf.InternalMp.Handover.statusLine(string(amp.Zone))
 			status.Signer = conf.InternalMp.SignerHandover.statusLine(string(amp.Zone))
+			status.Sets = zd.setsLine()
 			if tm := conf.InternalMp.MPTransport; tm != nil {
 				status.InstructionMembers = tm.stamps.members(string(amp.Zone))
 			}
