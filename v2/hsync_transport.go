@@ -44,8 +44,8 @@ type MPTransportBridge struct {
 	agentRegistry *AgentRegistry
 	msgQs         *MsgQs
 
-	// keyAsks: the zone SIG(0) key requests out, whose answers are let in
-	// (keyHandOverAdmits)
+	// keyAsks: the requests out for a zone's SIG(0) key or a serial of its
+	// instructions, whose answers are let in (keyHandOverAdmits)
 	keyAsks keyAskTable
 	// rollKEYs: the new KEY of each roll of a zone's SIG(0) key this agent
 	// runs, and its recipients' final words (plan S17a)

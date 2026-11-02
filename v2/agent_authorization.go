@@ -64,7 +64,7 @@ func (tm *MPTransportBridge) IsPeerAuthorized(senderID string, zone string) (boo
 		}
 		lgAgent.Debug("sender not in HSYNC3", "sender", senderID, "zone", zone, "reason", reason)
 		if tm.keyHandOverAdmits(senderID, zone) {
-			return true, fmt.Sprintf("authorized for the hand-over of zone %s's SIG(0) key only", zone)
+			return true, fmt.Sprintf("authorized for zone %s's SIG(0) key, or a serial asked for, only", zone)
 		}
 	} else {
 		// No specific zone - check if sender is in HSYNC3 for ANY zone we share
@@ -175,12 +175,21 @@ func (tm *MPTransportBridge) isInHSYNCAnyZone(senderID string) (bool, string) {
 // under the zone's other serial (transitionVoters, plan S14), with no
 // record under the active one.
 //
-// keyHandOverAdmits lets that answer in, and keyHandOverOnly lets nothing
-// else through that came in that way.
+// keyHandOverAdmits lets the answer to this agent's request in, and
+// keyHandOverOnly lets nothing else through that came in that way.
+//
+// The fetch of a serial of the zone's instructions goes the same way. An agent
+// that lost its record, and whose copy gives it no role, asks a member for the
+// serial the members tell active (design 3.4). The answer was refused at the
+// asker, by that copy, so it never held the serial or knew the active one, and
+// the members waited for it. The answer to its own request is let in too, and
+// is checked against the digest asked for. With the active serial known,
+// admission reads that.
 
 // keyHandOverAdmits: a message about zone from senderID that isInHSYNC
 // refuses is let in for the zone's SIG(0) key alone, when this agent has
-// asked the sender for the zone's key and the answer is due (keyAsks).
+// asked the sender for the zone's key, or for a serial of its instructions,
+// and the answer is due (keyAsks).
 func (tm *MPTransportBridge) keyHandOverAdmits(senderID, zone string) bool {
 	return tm.keyAsks.open(senderID, dns.Fqdn(zone))
 }
@@ -215,10 +224,11 @@ func (tm *MPTransportBridge) keyHandOverGate(ctx *transport.MessageContext, next
 }
 
 // keyHandOverOnly: a message that came in for the zone's SIG(0) key alone
-// (admittedForKeyOnly) is the answer to this agent's request for the key, or
-// the delivery confirmation of the request or of an answer. Anything else
-// that came in that way, a request among them, is not acted on: only an
-// agent this agent asked is let in that way (plan S15).
+// (admittedForKeyOnly) is the answer to this agent's request for the key, the
+// answer to a request for a serial of the zone's instructions, or the delivery
+// confirmation of the request or of an answer. Anything else that came in that
+// way, a request among them, is not acted on: only an agent this agent asked
+// is let in that way (plan S15).
 func (tm *MPTransportBridge) keyHandOverOnly(msg *transport.IncomingMessage) bool {
 	// The sender is the one admission judged: the transport's, never the
 	// author the payload names.
@@ -237,17 +247,18 @@ func (tm *MPTransportBridge) keyHandOverOnly(msg *transport.IncomingMessage) boo
 		}
 	case "config":
 		var p DnsConfigPayload
-		if err := json.Unmarshal(msg.Payload, &p); err == nil && p.Subtype == "sig0key" {
+		if err := json.Unmarshal(msg.Payload, &p); err == nil && (p.Subtype == "sig0key" || p.Subtype == "instructions") {
 			return true
 		}
 	}
-	lgAgent.Warn("a message let in for the zone's SIG(0) key alone is not about the key, refusing",
+	lgAgent.Warn("a message let in for the zone's SIG(0) key, or a serial asked for, is about neither, refusing",
 		"sender", sender, "zone", msg.Zone, "type", msg.Token())
 	return false
 }
 
-// keyAskTable is the requests for a zone's SIG(0) key this agent has out,
-// by peer and zone: an answer from that peer about that zone is due. And the
+// keyAskTable is the requests for a zone's SIG(0) key, or a serial of its
+// instructions, this agent has out, by peer and zone: an answer from that
+// peer about that zone is due. And the
 // distribution ids of the key exchange's own messages, by the peer they went
 // to, whose delivery confirmations are due (expectConfirm).
 type keyAskTable struct {

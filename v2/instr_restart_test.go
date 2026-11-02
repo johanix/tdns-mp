@@ -308,6 +308,80 @@ func TestAMemberTakesNeitherOfTwoSerialsThatPass(t *testing.T) {
 	}
 }
 
+// An agent that lost its store, and whose copy gives it no role, hears the
+// voting members tell the zone's active serial and asks one of them for it.
+// Its admission read that copy, so it refused the answer to its own request,
+// never held the serial and never took it, and the others waited for it with
+// no end. The answer is let in while the request is out, and nothing else of
+// the sender's about the zone. Once the serial is taken, the agent talks by
+// it.
+func TestAMemberWhoseCopyGivesItNoRoleTakesTheSerialItFetches(t *testing.T) {
+	for _, c := range []struct {
+		zone    string
+		records []string
+	}{
+		{"norecord.restart.example.", freezeRecords[1:]},
+		{"norole.restart.example.", freezeRecords},
+	} {
+		t.Run(c.zone, func(t *testing.T) {
+			r := newThawRig(t, c.zone, "")
+			// a zone they both hold a role in, so that b and n are no LEGACY peers
+			seedRoles(t, "shared."+c.zone, []string{roleA, roleB, roleN}, nil, nil)
+			active, newest := voters3(t, 41, "x"), jAt(t, 43, `servers="b,n" nsmgmt="agent" suffix="y"`, c.records...)
+			r.noRecord(newest)
+			withStore(t, r.store)
+			ar, msgQs, tm := r.conf.InternalMp.AgentRegistry, r.conf.InternalMp.MsgQs, r.conf.InternalMp.MPTransport
+			ar.MPTransport, tm.LocalID = tm, roleA
+			tm.getZone = func(name string) (*tdns.ZoneData, bool) { return tdns.Zones.Get(name) }
+			ar.S.Set(AgentId(roleB), NewAgent(AgentId(roleB)))
+			ar.S.Set(AgentId(roleN), NewAgent(AgentId(roleN)))
+
+			// The member answers, and its answer meets what admits a message
+			// at this agent, in the transport's order.
+			refused := make(chan string, 2)
+			prev := sendConfigRfi
+			t.Cleanup(func() { sendConfigRfi = prev })
+			sendConfigRfi = func(_ *AgentRegistry, agent *Agent, msg *AgentMsgPost) (*AgentMsgResponse, error) {
+				sender := string(agent.ID)
+				ok, why := tm.IsPeerAuthorized(sender, r.zone)
+				switch {
+				case !ok:
+					refused <- why
+				case !tm.keyHandOverOnly(configMessage(t, sender, ZoneName(r.zone), "instructions")):
+					refused <- "let in, and not let through"
+				case tm.keyHandOverOnly(configMessage(t, sender, ZoneName(r.zone), "upstream")):
+					refused <- "another answer of the sender's is let through"
+				case !tm.keyAsks.confirmExpected(sender, msg.DistributionID):
+					refused <- "the request's delivery confirmation is not let in"
+				default:
+					msgQs.configWaiters.deliver(rfiWaitKey(sender, r.zone, "instructions", msg.Nonce),
+						&ConfigResponseMsg{SenderID: sender, Zone: r.zone, Subtype: "instructions", ConfigData: instructionsAnswer(r.zone, active)})
+				}
+				return &AgentMsgResponse{}, nil
+			}
+
+			r.hear(roleB, tells(active, newest), true)
+			r.hear(roleN, tells(active, newest), true)
+			r.conf.thawTurn(r.zone)
+			waitUntil(t, "the serial asked for is not held", func() bool {
+				select {
+				case why := <-refused:
+					t.Fatalf("the answer to its own request: %s", why)
+				default:
+				}
+				return r.store.readingAt(r.zone, sd(active)) != nil
+			})
+			r.conf.thawTurn(r.zone)
+			if r.known() != 41 {
+				t.Fatalf("the serial fetched was not taken: %s", r.conf.thawLine(r.zone))
+			}
+			if ok, why := tm.IsPeerAuthorized(roleB, r.zone); !ok || tm.admittedForKeyOnly(roleB, r.zone) {
+				t.Errorf("not a member in full by the serial taken: %v, %s", ok, why)
+			}
+		})
+	}
+}
+
 // A leader with no record takes the active serial that every voting member
 // with a record tells.
 func TestALeaderWithNoRecordTakesWhatEveryVotingMemberWithARecordTells(t *testing.T) {
