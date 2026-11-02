@@ -1465,7 +1465,9 @@ func (l *ZoneKeyLifecycle) RolloverFlags(hold bool) (rolloverFlags, error) {
 // the role's first. Under a hold a due one is not promoted (Tick), so the key
 // only becomes a standby key. In a role the policy keeps no standby of, a key
 // on its way in is a rollover's. A rollover asked for and an algorithm
-// rollover are flags of their own (RolloverFlags).
+// rollover are flags of their own (RolloverFlags). A key that has gone on to
+// standby stays named: a reader's rows can be older than T8 (the inventory
+// reads them first), and rolloverUnderWay looks up only a key in published.
 func (l *ZoneKeyLifecycle) standbyAdditions(all map[uint16]tdns.DnssecKeyWithTimestamps, hold bool) map[uint16]bool {
 	out := map[uint16]bool{}
 	for _, role := range []string{"KSK", "ZSK"} {
@@ -1474,7 +1476,7 @@ func (l *ZoneKeyLifecycle) standbyAdditions(all map[uint16]tdns.DnssecKeyWithTim
 		}
 		alg := l.policyAlgorithm(role)
 		for keyid, k := range all {
-			if roleOf(k.Flags) == role && k.State == KeyStatePublished && k.Algorithm == alg {
+			if roleOf(k.Flags) == role && (k.State == KeyStatePublished || k.State == KeyStateStandby) && k.Algorithm == alg {
 				out[keyid] = true
 			}
 		}

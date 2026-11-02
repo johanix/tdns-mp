@@ -81,6 +81,60 @@ func TestAStandbyKeysAdditionIsNoRollover(t *testing.T) {
 	}
 }
 
+// The same for a KSK, where the policy keeps standby KSKs.
+func TestAStandbyKSKsAdditionIsNoRollover(t *testing.T) {
+	pol := driverPolicy
+	pol.StandbyKSK = 1
+	r := newDriverRig(t, "ksk.addition.owned.example.", pol, "p2")
+	bootstrapKSK(t, r)
+	r.tick("the standby minted")
+	k := r.onlyKey(KeyStateMpdist, "KSK")
+	r.confirmAll("applied", k)
+	if st := r.state(k); st != KeyStatePublished {
+		t.Fatalf("the standby KSK confirmed: %s, want published", st)
+	}
+	if r.underWay() {
+		t.Errorf("a standby KSK in published, waiting out T8: a rollover under way")
+	}
+	r.l.SetHold(true)
+	if r.underWay() {
+		t.Errorf("the same under a hold: a rollover under way")
+	}
+	r.clock.Advance(pol.PropagationDelay + r.wire.ttl + time.Second)
+	r.tick("T8")
+	if st, c := r.state(k), r.cols(k); st != KeyStateStandby || c != "101" {
+		t.Fatalf("after T8: %s %s, want standby 101", st, c)
+	}
+	if r.underWay() {
+		t.Errorf("a standby KSK: a rollover under way")
+	}
+}
+
+// An inventory reads the rows, then the flags, and T8 can come between them.
+// The key is still an addition: T8's own inventory may reach the agent first,
+// and this one must not leave it waiting on a rollover nobody has.
+func TestAnAdditionsT8BetweenTheRowsAndTheFlags(t *testing.T) {
+	pol := driverPolicy
+	pol.StandbyZSK = 1
+	r, k := standbyInPublished(t, "between.owned.example.", pol)
+	inv, err := tdns.GetKeyInventory(r.kdb, r.l.Zone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.clock.Advance(pol.PropagationDelay + r.wire.ttl + time.Second)
+	r.tick("T8")
+	if st := r.state(k); st != KeyStateStandby {
+		t.Fatalf("after T8: %s, want standby", st)
+	}
+	f, err := r.l.RolloverFlags(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rolloverUnderWay(inv, f) {
+		t.Errorf("rows from before T8, flags from after it: a rollover under way")
+	}
+}
+
 // A role's first key is no standby key, whatever the standby count: T9
 // promotes it once standby, under a hold too (Tick). It counts as before.
 func TestARolesFirstKeyIsNoAddition(t *testing.T) {
