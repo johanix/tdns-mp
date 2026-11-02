@@ -145,7 +145,7 @@ func TestAMemberWithNoRecordIgnoresAnotherMembersActive(t *testing.T) {
 
 // groupHashOf is the hash of the zone's group under in.
 func groupHashOf(in *Instructions) string {
-	m := zoneMakeUp(in)
+	m := zoneMakeUp("", in)
 	return ComputeGroupHash(m.voting, m.auditors, m.noRole)
 }
 

@@ -287,7 +287,7 @@ func (conf *Config) votersWord(v *restartView, told map[string]toldStamp, now ti
 // when every voting member under reading but local passes.
 func everyVoterTells(reading *Instructions, sd SerialDigest, local string, timeout time.Duration, told map[string]toldStamp, now time.Time) (restartView, bool) {
 	w := restartView{take: &sd}
-	_, voters := participantsOf(reading)
+	_, voters, _ := participantsOf(reading)
 	for _, id := range voters {
 		if core.EqualNames(id, local) {
 			continue
