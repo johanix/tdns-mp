@@ -581,6 +581,7 @@ func (z *zoneSerials) followNotBuilt() {
 // notBuiltOnly is the reasons of refused, joined, when every one is a kind
 // whose step is not built or cannot be carried out yet; "" otherwise.
 func notBuiltOnly(refused []Refusal) string {
+	return "" // TEST BRANCH, never merged: the fallback follows nothing (does the demo need #350?)
 	var why []string
 	for _, r := range refused {
 		if r.Code != RefusedNotBuilt && r.Code != RefusedStepMissing {
