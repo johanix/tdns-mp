@@ -157,13 +157,14 @@ func rollZones(kdb *tdns.KeyDB) []ZoneName {
 // rollingKey is the new key of the zone's roll, kept published at the
 // leader, while the roll is "added" or "published"; sent: its KEY has gone
 // out ("published"). In "added" the KEY may have gone out before the phase
-// was written, which the zone's copy shows.
-func rollingKey(kdb *tdns.KeyDB, zone ZoneName) (key *sig0Row, sent bool) {
+// was written, which the zone's copy shows. A roll that cannot be read is an
+// error: it says nothing of which key is the zone's.
+func rollingKey(kdb *tdns.KeyDB, zone ZoneName) (key *sig0Row, sent bool, err error) {
 	r, err := loadRoll(kdb, zone)
 	if err != nil || r == nil || (r.phase != rollAdded && r.phase != rollPublished) {
-		return nil, false
+		return nil, false, err
 	}
-	return sig0RowByID(kdb, zone, tdns.Sig0StatePublished, r.newKeyid), r.phase == rollPublished
+	return sig0RowByID(kdb, zone, tdns.Sig0StatePublished, r.newKeyid), r.phase == rollPublished, nil
 }
 
 func sig0RowByID(kdb *tdns.KeyDB, zone ZoneName, state string, keyid uint16) *sig0Row {
@@ -413,10 +414,13 @@ func (conf *Config) startSig0Roll(ctx context.Context, zone ZoneName, alg uint8)
 	}
 	var newKeyid, oldKeyid uint16
 	err := conf.keySetupLocked(zone, func() error {
-		if r, err := loadRoll(kdb, zone); err == nil && r != nil {
+		r, err := loadRoll(kdb, zone)
+		switch {
+		case err != nil:
+			return fmt.Errorf("the roll of the SIG(0) key of %s cannot be read: %w", zone, err)
+		case r != nil:
 			return fmt.Errorf("a roll of the SIG(0) key of %s is under way (%s, new key %d)", zone, r.phase, r.newKeyid)
 		}
-		var err error
 		if oldKeyid, newKeyid, err = makeRolledKey(kdb, zone, alg); err != nil {
 			return err
 		}
@@ -445,7 +449,7 @@ func makeRolledKey(kdb *tdns.KeyDB, zone ZoneName, alg uint8) (oldKeyid, newKeyi
 	case len(zk.active) != 1:
 		return 0, 0, fmt.Errorf("zone %s has %d active SIG(0) keys", zone, len(zk.active))
 	case zk.held.parentState != edns0.KeyStateTrusted:
-		return 0, 0, fmt.Errorf("the parent does not trust the SIG(0) key %d of zone %s yet", zk.held.keyid, zone)
+		return 0, 0, fmt.Errorf("this agent has no record that the parent trusts the SIG(0) key %d of zone %s", zk.held.keyid, zone)
 	}
 	resp, err := sig0KeyMgmtRetried(kdb, tdns.KeystorePost{
 		Command:    "sig0-mgmt",
@@ -717,6 +721,9 @@ func (conf *Config) publishRolledKEY(zone ZoneName, newKey *sig0Row) error {
 		tm.rollKEYs.forget(zone)
 		return fmt.Errorf("the new KEY could not be sent: %w", err)
 	}
+	// the zone's key is published: an earlier publication that failed, or
+	// was held, no longer holds the zone. No set-up runs during the roll
+	conf.InternalMp.keyPolls.published(zone)
 	return nil
 }
 
