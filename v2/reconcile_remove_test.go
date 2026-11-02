@@ -35,7 +35,7 @@ type leaverRig struct {
 
 func removalAt(t *testing.T, serial uint32, nsmgmt, servers, signers string) *Instructions {
 	t.Helper()
-	param := fmt.Sprintf(`servers="%s" nsmgmt="%s"`, servers, nsmgmt)
+	param := fmt.Sprintf(`servers="%s" nsmgmt="%s" parentsync="agent"`, servers, nsmgmt)
 	if signers != "" {
 		param += fmt.Sprintf(` signers="%s"`, signers)
 	}

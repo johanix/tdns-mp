@@ -444,6 +444,66 @@ func TestTheKEYStaysUntilTheKeyIsDeletedAtTheParent(t *testing.T) {
 	}
 }
 
+// A combiner under parentsync=owner does not apply the agents' CDS, KEY or
+// CSYNC, and one kept would come back at a later take-up: a CDS from before a
+// key roll, for a parent that follows it. The sweep at the hand-over's "done"
+// takes them away, here and at the combiner, and what is not the agents' to give
+// up stays.
+func TestAHandOverLeavesNoCDSToComeBackAtATakeUp(t *testing.T) {
+	r := newParentSyncRig(t, "sweep.parentsync.example.", "agent", "owner")
+	ar, err := NewAgentRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	zdr, err := NewZoneDataRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	zdr.Repo.Set(ZoneName(r.zone), ar)
+	r.conf.InternalMp.ZoneDataRepo = zdr
+	saved, savedSweep := purgeAtCombiner, askSweep
+	t.Cleanup(func() { purgeAtCombiner, askSweep = saved, savedSweep })
+	var purged []string
+	purgeAtCombiner = func(_ *MPTransportBridge, _ ZoneName, origin AgentId, rrtype uint16) error {
+		purged = append(purged, strings.TrimSuffix(string(origin), ".")+" "+dns.TypeToString[rrtype])
+		return nil
+	}
+	askSweep = func(conf *Config, zone string, in *Instructions) { conf.sweep(zdr, ZoneName(zone), in) }
+	sr := &sweepRig{leaverRig: &leaverRig{reconcileRig: r.reconcileRig}, zdr: zdr, ar: ar}
+	sr.holds(roleA, dns.TypeNS, dns.TypeCDS, dns.TypeKEY, dns.TypeCSYNC)
+	sr.holds(roleB, dns.TypeNS, dns.TypeCDS)
+
+	r.agree()
+	r.thawNow()
+	r.toStep(psStep2)
+	r.passTTL()
+	r.toStep(psStep4)
+	if !sr.has(roleA, dns.TypeCDS) || !sr.has(roleA, dns.TypeKEY) || len(purged) != 0 {
+		t.Fatalf("swept before \"done\": %v", purged)
+	}
+	r.next() // the last step
+	r.next() // done
+	if line := r.conf.reconcileLine(r.zone, time.Now()); line != "" {
+		t.Fatalf("the transition is not done: %q", line)
+	}
+	for _, c := range []struct {
+		id     AgentId
+		rrtype uint16
+	}{{roleA, dns.TypeCDS}, {roleA, dns.TypeKEY}, {roleA, dns.TypeCSYNC}, {roleB, dns.TypeCDS}} {
+		if sr.has(c.id, c.rrtype) {
+			t.Errorf("%s's %s stays, to come back at a take-up", c.id, dns.TypeToString[c.rrtype])
+		}
+	}
+	if !sr.has(roleA, dns.TypeNS) || !sr.has(roleB, dns.TypeNS) {
+		t.Error("the sweep took the agents' NS: nsmgmt did not change")
+	}
+	slices.Sort(purged)
+	want := []string{"a.role.example CDS", "a.role.example CSYNC", "a.role.example KEY", "b.role.example CDS"}
+	if !slices.Equal(purged, want) {
+		t.Errorf("the combiner's purges:\n got %v\nwant %v", purged, want)
+	}
+}
+
 // "Done" waits until the leader has nothing in flight.
 func TestParentsyncToOwnerIsDoneOnlyWhenNothingIsInFlight(t *testing.T) {
 	r := newParentSyncRig(t, "inflight.parentsync.example.", "agent", "owner")
