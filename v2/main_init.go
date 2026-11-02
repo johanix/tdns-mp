@@ -582,15 +582,9 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 		chunkMode = "edns0"
 	}
 
-	var chunkQueryEndpoint string
-	var chunkQueryEndpointInNotify bool
-	if chunkMode == "query" {
-		cep := strings.TrimSpace(mp.Dns.ChunkQueryEndpoint)
-		if cep != "include" && cep != "none" {
-			return fmt.Errorf("agent.dns.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", mp.Dns.ChunkQueryEndpoint)
-		}
-		chunkQueryEndpointInNotify = (cep == "include")
-		chunkQueryEndpoint = buildAgentChunkQueryEndpoint(mp)
+	chunkQueryEndpoint, chunkQueryEndpointInNotify, err := chunkQueryEndpoints("agent", mp, chunkMode)
+	if err != nil {
+		return err
 	}
 
 	// Initialize PayloadCrypto for secure CHUNK transport (optional)
@@ -734,15 +728,9 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 		chunkMode = "edns0"
 	}
 
-	var chunkQueryEndpoint string
-	var chunkQueryEndpointInNotify bool
-	if chunkMode == "query" {
-		cep := strings.TrimSpace(mp.Dns.ChunkQueryEndpoint)
-		if cep != "include" && cep != "none" {
-			return fmt.Errorf("auditor.dns.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", mp.Dns.ChunkQueryEndpoint)
-		}
-		chunkQueryEndpointInNotify = (cep == "include")
-		chunkQueryEndpoint = buildAgentChunkQueryEndpoint(mp)
+	chunkQueryEndpoint, chunkQueryEndpointInNotify, err := chunkQueryEndpoints("auditor", mp, chunkMode)
+	if err != nil {
+		return err
 	}
 
 	var payloadCrypto *transport.PayloadCrypto
@@ -803,6 +791,24 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 	conf.InternalMp.AgentRegistry.MPTransport = tm
 
 	return nil
+}
+
+// chunkQueryEndpoints is where this agent or auditor answers CHUNK queries,
+// and whether every NOTIFY names it. The endpoint is set in every chunk
+// mode: in edns0 mode a NOTIFY whose payload does not fit one DNS message
+// goes by query and names it (tdns-transport #50), so that the receiver need
+// not look the sender's address up. Whether every NOTIFY names it is the
+// query-mode setting chunk_query_endpoint, "include" or "none".
+func chunkQueryEndpoints(role string, mp *MultiProviderConf, chunkMode string) (endpoint string, inNotify bool, err error) {
+	endpoint = buildAgentChunkQueryEndpoint(mp)
+	if chunkMode != "query" {
+		return endpoint, false, nil
+	}
+	cep := strings.TrimSpace(mp.Dns.ChunkQueryEndpoint)
+	if cep != "include" && cep != "none" {
+		return "", false, fmt.Errorf("%s.dns.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", role, mp.Dns.ChunkQueryEndpoint)
+	}
+	return endpoint, cep == "include", nil
 }
 
 // buildAgentChunkQueryEndpoint builds the CHUNK query endpoint (host:port) from agent DNS config.
