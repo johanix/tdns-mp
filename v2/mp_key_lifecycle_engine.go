@@ -100,8 +100,15 @@ func signerSets(mpzd *MPZoneData, mp *MultiProviderConf) (self string, r Roles) 
 	if handed, ok := actingHeld.Load().roles(mpzd.ZoneName); ok {
 		return labelOfIdentity(handed, ours), handed
 	}
-	if signerWaits(mpzd.ZoneName, apex) && mpzd.MP != nil && mpzd.MP.MPdata.computed() {
-		r = mpzd.MP.MPdata.Sets
+	// the data a refresh or a hand-over swaps in under the zone's lock
+	mpzd.Lock()
+	var kept *MPdata
+	if mpzd.MP != nil {
+		kept = mpzd.MP.MPdata
+	}
+	mpzd.Unlock()
+	if signerWaits(mpzd.ZoneName, apex) && kept.computed() {
+		r = kept.Sets
 		return labelOfIdentity(r, ours), r
 	}
 	if _, label, err := mpzd.matchHsyncIdentity(ours); err == nil {
