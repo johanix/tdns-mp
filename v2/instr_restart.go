@@ -270,7 +270,7 @@ func (conf *Config) votersWord(v *restartView, told map[string]toldStamp, now ti
 		if reading == nil {
 			continue
 		}
-		if _, voters := participantsOf(reading); isAmong(voters, AgentId(st.identity)) {
+		if _, voters, _ := participantsOf(reading); isAmong(voters, AgentId(st.identity)) {
 			readings[sd] = reading
 		}
 	}

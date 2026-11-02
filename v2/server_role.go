@@ -78,7 +78,7 @@ func serverRoleHolds(conf *Config, zone string, step InstrStep) bool {
 	if mp := conf.MpConfig(); !ok || mp == nil || !core.EqualNames(id, mp.Identity) {
 		return true
 	}
-	return conf.InternalMp.transfers.confirmed(conf, zone, step)
+	return conf.InternalMp.transfers.confirmed(conf, zone, step, func(context.Context) (uint32, error) { return copySerial(zone), nil })
 }
 
 // serverRoleStatus is what a server role's step waits for, at every agent
@@ -101,10 +101,16 @@ func serverRoleStatus(conf *Config, zone string, step heldStep, now time.Time) s
 	}
 	line := fmt.Sprintf("waiting for %s's nameservers to serve the zone from its upstream at serial %d or later", id, copySerial(zone))
 	if self && now.Sub(step.at) >= transferHelpAfter {
-		line += fmt.Sprintf("; its operator must point %s at %s for the zone's transfer",
-			strings.Join(mp.Local.Nameservers, ", "), strings.Join(upstreamOf(instructionsFor(ZoneName(zone)), id), " or "))
+		line += operatorMustPoint(mp, zone, id)
 	}
 	return line
+}
+
+// operatorMustPoint is what the provider id's status adds for its operator:
+// what to point where, for the zone's transfer from its upstream.
+func operatorMustPoint(mp *MultiProviderConf, zone, id string) string {
+	return fmt.Sprintf("; its operator must point %s at %s for the zone's transfer",
+		strings.Join(mp.Local.Nameservers, ", "), strings.Join(upstreamOf(instructionsFor(ZoneName(zone)), id), " or "))
 }
 
 // toldStepHeld: id's first-hand stamp tells that it holds step.
@@ -197,6 +203,7 @@ type transferCheck struct {
 	ok      bool
 	at      time.Time // when the latest check ended
 	running bool
+	served  *uint32 // what the nameservers served at the step's first check (an upstream's step)
 }
 
 // stepName names a step for the book: the zone's active serial, the step's
@@ -214,9 +221,10 @@ func (conf *Config) stepName(zone string, step InstrStep) string {
 }
 
 // confirmed is whether this agent's nameservers serve the zone as step
-// needs; a check starts when none runs and the latest is older than
-// transferRecheck. Once confirmed it stays so for the step.
-func (b *transferBook) confirmed(conf *Config, zone string, step InstrStep) bool {
+// needs, at the serial floor gives or later; a check starts when none runs
+// and the latest is older than transferRecheck. Once confirmed it stays so
+// for the step.
+func (b *transferBook) confirmed(conf *Config, zone string, step InstrStep, floor func(context.Context) (uint32, error)) bool {
 	name := conf.stepName(zone, step)
 	b.mu.Lock()
 	if b.zones == nil {
@@ -234,7 +242,7 @@ func (b *transferBook) confirmed(conf *Config, zone string, step InstrStep) bool
 	start := b.start
 	b.mu.Unlock()
 	if kick {
-		check := func() { conf.checkTransfer(zone, name) }
+		check := func() { conf.checkTransfer(zone, name, floor) }
 		if start == nil {
 			go check()
 		} else {
@@ -253,15 +261,17 @@ func (b *transferBook) held(zone, name string) bool {
 }
 
 // checkTransfer checks that this provider's nameservers serve the zone from
-// its upstream (servingChainOK): at an SOA serial no lower than the zone's
-// as this agent holds it, signed by its upstream's keys. The outcome is
-// logged when it changes.
-func (conf *Config) checkTransfer(zone, name string) {
+// its upstream (servingChainOK): at an SOA serial no lower than floor gives,
+// signed by its upstream's keys. The outcome is logged when it changes.
+func (conf *Config) checkTransfer(zone, name string, floor func(context.Context) (uint32, error)) {
 	ctx, cancel := context.WithTimeout(context.Background(), transferCheckTimeout)
 	defer cancel()
 	mp := conf.MpConfig()
-	min := copySerial(zone)
-	served, err := servingChainOK(ctx, zone, mp.Local.Nameservers, conf.signerKeys(zone, upstreamOf(instructionsFor(ZoneName(zone)), mp.Identity)), min, time.Now())
+	var served uint32
+	min, err := floor(ctx)
+	if err == nil {
+		served, err = servingChainOK(ctx, zone, mp.Local.Nameservers, conf.signerKeys(zone, upstreamOf(instructionsFor(ZoneName(zone)), mp.Identity)), min, time.Now())
+	}
 	b := &conf.InternalMp.transfers
 	b.mu.Lock()
 	c := b.zones[canonicalName(zone)]

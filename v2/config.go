@@ -204,6 +204,9 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 					lgCombiner.Info("applied local changes after the first load", "zone", zd.ZoneName)
 				}
 			}
+			if err := w.syncDsbootNames(); err != nil {
+				lgCombiner.Error("the zone's _dsboot names could not follow its first load; the next hand-over or update tries again", "zone", zd.ZoneName, "err", err)
+			}
 		})
 
 		if GetProviderZoneRRtypes(zoneName) != nil {
