@@ -74,7 +74,7 @@ const (
 // needs P5, an upstream its agent's check of the new transfer (S21). Each
 // step that builds a kind adds it here; the judge reads no config.
 const (
-	builtKinds   changeKind = kindServerRole
+	builtKinds   changeKind = kindServerRole | kindRolesTaken
 	carriedKinds changeKind = kindRolesTaken | kindServerRole | kindNSmgmt | kindParentSync | kindPubkey
 )
 

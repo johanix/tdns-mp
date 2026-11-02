@@ -172,9 +172,7 @@ func TestASignerMovedToServersOnlyIsRefused(t *testing.T) {
 func TestASignerLeavingBothListsWithItsRecordKeptIsAgreed(t *testing.T) {
 	from := jAt(t, 41, `servers="alpha,beta,charlie" signers="alpha,charlie"`, jAlpha, jBeta, jCharlie)
 	to := jAt(t, 42, jServers2, jAlpha, jBeta, jCharlie)
-	// nothing refuses it but that its steps are not built (S17b)
-	wantRefusals(t, "before S17b", judgeTransition(from, to), Refusal{RefusedNotBuilt, "takes a role from agent.charlie.example.: not built yet"})
-	wantRefusals(t, "once S17b has built it", judge(from, to, builtKinds|kindRolesTaken, carriedKinds))
+	wantRefusals(t, "a removal, its steps built (S17b)", judgeTransition(from, to))
 }
 
 func TestEmptyingSignersIsRefused(t *testing.T) {
@@ -226,12 +224,15 @@ func TestAKindWithoutItsStepsIsRefused(t *testing.T) {
 		{jServers2 + ` parentsync="agent"`, "changes parentsync"},
 		{jServers2 + ` pubkey`, "changes pubkey"},
 		{jServers2 + ` pubcds`, "changes pubcds"},
-		{`servers="alpha" signers="alpha"`, "takes a role from agent.beta.example."},
 	} {
 		to := jAt(t, 42, c.param, jAlpha, jBeta, jCharlie)
 		wantRefusals(t, c.reason, judgeTransition(from, to), Refusal{RefusedNotBuilt, c.reason + ": not built yet"})
 		wantRefusals(t, c.reason+", once built", judge(from, to, allKinds, allKinds))
 	}
+	// a role taken away: its steps are built (S17b)
+	wantRefusals(t, "a role taken", judgeTransition(from, jAt(t, 42, `servers="alpha" signers="alpha"`, jAlpha, jBeta, jCharlie)))
+	wantRefusals(t, "a role taken, not built", judge(from, jAt(t, 42, `servers="alpha" signers="alpha"`, jAlpha, jBeta, jCharlie), 0, allKinds),
+		Refusal{RefusedNotBuilt, "takes a role from agent.beta.example.: not built yet"})
 	// the auditors and the suffix: nothing to carry out (design 5.6)
 	wantRefusals(t, "auditors and suffix", judgeTransition(from, jAt(t, 42, jServers2+` auditors="charlie" suffix="mp"`, jAlpha, jBeta, jCharlie)))
 }

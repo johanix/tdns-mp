@@ -187,6 +187,26 @@ func syncCauseOf(st tdns.DelegationSyncStatus) syncCause {
 	return syncOther
 }
 
+// syncCauseFor is the cause of a sync of the zone with the status st: a
+// step's own while the step held asks it (S17b: a removal's NS and DS steps);
+// otherwise by what differs.
+func (conf *Config) syncCauseFor(zone string, st tdns.DelegationSyncStatus) syncCause {
+	if conf.InternalMp.reconciles.asksSync(canonicalName(zone)) {
+		return syncStep
+	}
+	return syncCauseOf(st)
+}
+
+// frozenForNotify is why a NOTIFY to the zone's parent is held by the freeze:
+// nothing while the step held asks the sync, as a parent that takes NOTIFY
+// only follows the step's CSYNC and CDS (S17b).
+func (conf *Config) frozenForNotify(zone string) []string {
+	if conf.InternalMp.reconciles.asksSync(canonicalName(zone)) {
+		return nil
+	}
+	return conf.zoneFrozen(zone)
+}
+
 // onFreeze is the store's word that a zone is frozen, or no longer is, or
 // that the serial it agrees on moved while it stays frozen. The hold is a
 // field of the hand-over (plan S11): the parts are handed the zone again,

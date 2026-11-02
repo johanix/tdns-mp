@@ -698,6 +698,37 @@ type toldStamp struct {
 	encrypted bool
 }
 
+// toldNameservers are the NS names the member tells in its beats.
+func (t *stampTable) toldNameservers(id string) []string {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, m := range t.kept {
+		if core.EqualNames(m.Identity, id) {
+			return slices.Clone(m.Nameservers)
+		}
+	}
+	return nil
+}
+
+// othersNameservers are the NS names every other member tells in its beats.
+func (t *stampTable) othersNameservers(id string) []string {
+	if t == nil {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []string
+	for _, m := range t.kept {
+		if !core.EqualNames(m.Identity, id) {
+			out = append(out, m.Nameservers...)
+		}
+	}
+	return out
+}
+
 // firstHand is what each member this agent has heard tells of zone (folded),
 // by its identity folded, with when each was heard.
 func (t *stampTable) firstHand(zone string) map[string]toldStamp {

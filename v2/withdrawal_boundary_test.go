@@ -10,6 +10,7 @@ package tdnsmp
 import (
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,5 +143,81 @@ func TestTransportBoundary_AWithdrawalReachesTheRecipientsCombiner(t *testing.T)
 		Mechanism: transport.MechanismDNS, Zone: zone, Payload: upd, ReceivedAt: time.Now(), SourceAddr: "127.0.0.1:0"})
 	if amp, ok := recvMsgWithin(t, r.us.MsgQs.Msg, 10*time.Second); !ok || amp.OriginatorID != gone || amp.Withdraw == nil {
 		t.Errorf("an update with the withdraw field, as routed: %+v", amp)
+	}
+}
+
+// Each of the removal's three withdrawals goes over the wire and reaches a
+// member: it leaves the member's data, its combiner gets it, and the
+// confirmation goes back to the leader.
+func TestTransportBoundary_ARemovalsWithdrawalsReachEveryMember(t *testing.T) {
+	const gone = "agent.gone.boundary.example."
+	for _, c := range []struct{ rrtype, rdata string }{
+		{"NS", "ns1.gone.boundary.example."},
+		{"CDS", "4711 15 2 0000000000000000000000000000000000000000000000000000000000000000"},
+		{"DNSKEY", "257 3 15 11qYAYKxCrfVS/7TyWQHOg7nGkjJ3KgP9h8fZqXsIY8="},
+	} {
+		t.Run(c.rrtype, func(t *testing.T) {
+			zone := strings.ToLower(c.rrtype) + ".removal.boundary.example."
+			var in Instructions
+			r := newNotifyRigWith(t, zone, "NOTIFY", true, func(r *notifyRig) {
+				apex, err := r.mpzd.OwnerForAnalysis(zone)
+				if err != nil || apex == nil {
+					t.Fatalf("apex: %v", err)
+				}
+				base, err := ReadInstructions(apex)
+				if err != nil || base == nil {
+					t.Fatalf("the zone's reading: %v %v", base, err)
+				}
+				in = *base
+				in.Records = append(slices.Clone(base.Records), InstrRecord{Label: "gone", Identity: gone})
+				store := newStore(t)
+				store.Note(zone, &in, nil)
+				enforced(t, store, zone)
+				kept, err := loadKeptLists(nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r.conf.InternalMp.Instructions, r.conf.InternalMp.Kept = store, kept
+				r.us.Bridge.stamps = newStampTable(r.us.Identity, store, 1, false, nil)
+			}, repeat(time.Minute, 4)...)
+			peer := r.peer.Identity
+			r.us.Registry.S.Set(AgentId(peer), NewAgent(AgentId(peer)))
+			r.leader(AgentId(peer))
+			t2 := dns.StringToType[c.rrtype]
+			rr, err := dns.NewRR(zone + " 3600 IN " + c.rrtype + " " + c.rdata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := rr.String()
+			held := make(chan *AgentMsgResponse, 1)
+			r.us.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{Zone: ZoneName(zone), AgentId: gone, UpdateType: "remote",
+				Update:            &ZoneUpdate{Zone: ZoneName(zone), AgentId: gone, Operations: []core.RROperation{{Operation: "replace", RRtype: c.rrtype, Records: []string{rec}}}},
+				OriginatingDistID: nextDistributionID(), OriginatingTime: time.Now(), DeliveredBy: gone, Mechanism: "DNS", Response: held}
+			r.combinerTakes(r.heldBy(t, gone, t2, rec).DistributionID, rec)
+
+			before := r.combinerDists()
+			distID := nextDistributionID()
+			body, err := json.Marshal(DnsSyncPayload{MessageType: "sync", OriginatorID: peer, YourIdentity: r.us.Identity, Zone: zone,
+				Operations: []core.RROperation{{Operation: "replace", RRtype: c.rrtype}}, Time: time.Now().Format(time.RFC3339Nano), Timestamp: time.Now().Unix(),
+				DistributionID: distID, Instr: msgStampAt(&in), Withdraw: &Withdraw{Provider: gone, RRtype: c.rrtype}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.us.Bridge.routeIncomingMessage(&transport.IncomingMessage{TypeToken: "sync", DistributionID: distID, SenderID: peer,
+				TransportSender: peer, Mechanism: transport.MechanismDNS, Zone: zone, Payload: body, ReceivedAt: time.Now(), SourceAddr: "127.0.0.1:0"})
+			amp, ok := recvMsgWithin(t, r.us.MsgQs.Msg, 10*time.Second)
+			if !ok {
+				t.Fatal("the transport did not queue the withdrawal")
+			}
+			r.us.Registry.MsgHandler(amp, r.us.MsgQs.SynchedDataUpdate, r.us.MsgQs.SynchedDataCmd)
+			toCombiner := r.newCombinerDist(before, 10*time.Second)
+			if toCombiner == "" {
+				t.Fatalf("the withdrawal of %s did not go to the agent's combiner\n%s", c.rrtype, r.log)
+			}
+			r.us.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(toCombiner, rigCombiner, transport.ConfirmSuccess, zone, nil, []string{rec}, nil, nil, false, ""))
+			if a := r.answered(t, distID); a.Status != "SUCCESS" || !slices.Contains(a.RemovedRecords, rec) {
+				t.Errorf("the leader's final confirmation: %+v, want a success that names %s as removed", *a, rec)
+			}
+		})
 	}
 }

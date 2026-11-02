@@ -894,6 +894,20 @@ func (s *InstructionStore) transition(zone string) (from, to *Instructions, step
 	return from, z.Active.Reading, z.Step
 }
 
+// lastFromReading is the reading of the zone's last thaw's from-serial, kept
+// after "done" until the next thaw; nil with none.
+func (s *InstructionStore) lastFromReading(zone string) *Instructions {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, z := s.zoneLocked(zone); z != nil && z.LastFrom != nil {
+		return z.LastFrom.Reading
+	}
+	return nil
+}
+
 // removal is the zone's removal under way of the provider with the label or
 // the identity, if the store holds one (S12, S17b fill them): a provider
 // whose removal is under way is resolved through its stored identity

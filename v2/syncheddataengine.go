@@ -593,6 +593,19 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					sdcmd.Response <- &r
 				}
 
+			case "plan-withdraw":
+				// a removal's withdrawal, and whether it is done (plan S17b)
+				if sdcmd.Withdraw != nil {
+					conf.planWithdraw(zdr, sdcmd.Zone, sdcmd.Withdraw)
+				}
+
+			case "sweep":
+				// the zone's transition is done (design 3.3, plan S17b)
+				conf.sweep(zdr, sdcmd.Zone, sdcmd.Sweep)
+				if sdcmd.Response != nil {
+					sdcmd.Response <- &SynchedDataCmdResponse{Msg: "swept"}
+				}
+
 			case "instr-activated":
 				// the zone's active serial changed, became known or went:
 				// what it kept of others goes on, and what waits for the

@@ -156,6 +156,8 @@ type SynchedDataCmd struct {
 	CatchUp *CatchUp `json:"catch_up,omitempty"`
 	// Withdraw: for "withdraw", the leader's withdrawal to send (plan S16)
 	Withdraw *Withdraw
+	// Sweep: for "sweep", the instructions it sweeps by (plan S17b)
+	Sweep    *Instructions
 	Response chan *SynchedDataCmdResponse
 	// ownRead: for "own-read", what a re-read of the zone brought
 	// (own_read.go)

@@ -225,6 +225,7 @@ func (conf *Config) distributeCsync(ctx context.Context, zone string, csync *dns
 				Records:   []string{csync.String()},
 			}},
 		},
+		Step:     conf.InternalMp.reconciles.asksSync(canonicalName(zone)),
 		Response: answer,
 	}
 	var stopped <-chan struct{}
