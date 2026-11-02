@@ -185,6 +185,12 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			// this goroutine: the test reads the keystore and asks the
 			// resolver
 			conf.retestKeyHoldsInBackground(ctx)
+			// the leader's rolls of a zone's SIG(0) key: one waiting for
+			// its members, and one whose retry is due (plan S17a)
+			conf.rollsDue(ctx)
+			// a KEY held under another name than the leader's, until the
+			// combiner has dropped it (plan S17a)
+			conf.retryKEYPurges(zdr)
 			// what a zone kept, released when its freeze ended and the
 			// engine's queue had no room, or a restart came between
 			conf.releaseUnfrozen(ctx, zdr)
@@ -1308,7 +1314,7 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		// published here: the word is PARTIAL and names the keys that are
 		// held, as on the other paths (heldSuccess).
 		var message string
-		status, message, appliedRecords = zdr.heldSuccess(prc.Zone, AgentId(prc.OriginatingSender), prc.DnskeyOps, status, detail.Message, appliedRecords)
+		status, message, appliedRecords = zdr.heldSuccess(prc.Zone, prc.Origin, prc.DnskeyOps, status, detail.Message, appliedRecords)
 
 		lgEngine.Info("triggering remote confirmation", "source", source, "originDistID", prc.OriginatingDistID, "to", prc.OriginatingSender, "status", status, "applied", len(appliedRecords), "ignored", len(ignoredRecords))
 		remoteDetail := &RemoteConfirmationDetail{
@@ -1549,7 +1555,7 @@ func (zdr *ZoneDataRepo) heldRecords(zone ZoneName, agentId AgentId, ops []core.
 // confirmation (SUCCESS or IGNORED) with no record lists.
 func (zdr *ZoneDataRepo) reconstructRecordsFromRepo(prc *PendingRemoteConfirmation) []string {
 	var records []string
-	agentId := AgentId(prc.OriginatingSender)
+	agentId := prc.Origin
 	if agentRepo, ok := zdr.Repo.Get(prc.Zone); ok {
 		if nod, ok := agentRepo.Get(agentId); ok {
 			for _, rrtype := range nod.RRtypes.Keys() {
@@ -1616,7 +1622,7 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 	// active instructions do not list for its type (plan S16).
 	if synchedDataUpdate.Withdraw != nil {
 		if why := conf.acceptWithdrawal(synchedDataUpdate); why != "" {
-			refuseWithdrawal(synchedDataUpdate, why, msgQs)
+			refuseWithdrawal(synchedDataUpdate, withdrawalRefused, why, msgQs)
 			return
 		}
 	}
@@ -1666,9 +1672,15 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 		// the first sign of a new zone key: the leader's replace
 		// reaches every member. The key is checked (step 7b); the
 		// rounds run on the tracker's goroutine.
-		if err == nil && change && synchedDataUpdate.Update != nil &&
+		if err == nil && synchedDataUpdate.Update != nil &&
 			slices.Contains(updateRRtypes(synchedDataUpdate.Update), dns.TypeKEY) {
-			conf.InternalMp.CatchUp.keyCheck(synchedDataUpdate.Zone)
+			if change {
+				conf.InternalMp.CatchUp.keyCheck(synchedDataUpdate.Zone)
+			}
+			// the leader's KEY, and no other (plan S17a), also when the
+			// leader's publication changed nothing here; what came here
+			// is the leader's (refuseCsyncNotFromLeader)
+			conf.dropOtherKEYs(zdr, synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
 		}
 		// The operations as they arrived, stale replaces too:
 		// the confirmation to the sender names what the repo
@@ -1738,6 +1750,14 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 		staleIgnored := recordsOfTypes(staleHeld, ignoredSets)
 		staleHeld = recordsNotOfTypes(staleHeld, failedSets)
 		synchedDataUpdate.dropStaleOperations()
+		// A withdrawal older than the provider's own replace applied here
+		// is refused, not confirmed and not passed on: the provider's
+		// records stay, and the leader's removal stays open, and it sends
+		// the withdrawal again (plan S16).
+		if err == nil && synchedDataUpdate.Withdraw != nil && synchedDataUpdate.Update != nil && len(synchedDataUpdate.Update.Operations) == 0 {
+			refuseWithdrawal(synchedDataUpdate, staleWithdrawal, "older than the provider's own records applied here", msgQs)
+			return
+		}
 		if err == nil && !change && synchedDataUpdate.Update != nil {
 			fresh := updateRRtypes(synchedDataUpdate.Update)
 			inFlight := zdr.setsNotHandedOver(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, fresh, false)
@@ -1829,6 +1849,7 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 						zdr.PendingRemoteConfirms[distID] = &PendingRemoteConfirmation{
 							OriginatingDistID: synchedDataUpdate.OriginatingDistID,
 							OriginatingSender: string(synchedDataUpdate.answerTo()),
+							Origin:            synchedDataUpdate.AgentId,
 							Mechanism:         synchedDataUpdate.Mechanism,
 							Zone:              synchedDataUpdate.Zone,
 							CreatedAt:         time.Now(),

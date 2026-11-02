@@ -48,6 +48,29 @@ type sentWithdrawal struct {
 // under rule 6 and the start of its time-out read it.
 const withdrawalsKept = 24 * time.Hour
 
+const (
+	// withdrawalRefused opens the text of a refusal that is final.
+	withdrawalRefused = "a withdrawal is refused"
+	// staleWithdrawal opens the text of a refusal of a withdrawal older
+	// than the provider's own replace held at the member, made under the
+	// same serial. Its sender reads it as "not yet", though the two stamps
+	// agree, and sends it again with a later time (notYetWait).
+	staleWithdrawal = "stale-withdrawal"
+	// withdrawalRetryWait is how long such a withdrawal waits to go again:
+	// no activation fires it, only this agent's clock passing the
+	// provider's. The data engine's tick sends it.
+	withdrawalRetryWait = 30 * time.Second
+)
+
+// notYetWait is how long a distribution answered "not yet" with the text
+// message waits before it is sent again, once the two are in step.
+func notYetWait(message string) time.Duration {
+	if strings.HasPrefix(message, staleWithdrawal+":") {
+		return withdrawalRetryWait
+	}
+	return 0
+}
+
 // update is the withdrawal as an update: one empty replace of its type, in
 // the provider's name.
 func (w *Withdraw) update(zone ZoneName) *ZoneUpdate {
@@ -115,10 +138,11 @@ func (conf *Config) acceptWithdrawal(u *SynchedDataUpdate) string {
 }
 
 // refuseWithdrawal refuses u, a withdrawal, with a final REJECTED to the
-// leader that sent it.
-func refuseWithdrawal(u *SynchedDataUpdate, why string, msgQs *MsgQs) {
+// leader that sent it, whose text opens with word: withdrawalRefused, or
+// staleWithdrawal for one the leader is to send again.
+func refuseWithdrawal(u *SynchedDataUpdate, word, why string, msgQs *MsgQs) {
 	lgEngine.Info("a withdrawal is refused", "zone", u.Zone, "provider", u.Withdraw.Provider, "rrtype", u.Withdraw.RRtype, "why", why)
-	text := "a withdrawal is refused: " + why
+	text := word + ": " + why
 	if u.OriginatingDistID != "" && msgQs != nil && msgQs.OnRemoteConfirmationReady != nil {
 		msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 			OriginatingDistID: u.OriginatingDistID,
@@ -360,7 +384,13 @@ func (conf *Config) debugWithdraw(amp *AgentMgmtPost, resp *AgentMgmtResponse) {
 		return
 	}
 	answer := make(chan *SynchedDataCmdResponse, 1)
-	msgQs.SynchedDataCmd <- &SynchedDataCmd{Cmd: "withdraw", Zone: amp.Zone, Withdraw: &Withdraw{Provider: string(amp.AgentId), RRtype: rrtype}, Response: answer}
+	deadline := time.After(debugWithdrawWait) // for the send and the answer alike
+	select {
+	case msgQs.SynchedDataCmd <- &SynchedDataCmd{Cmd: "withdraw", Zone: amp.Zone, Withdraw: &Withdraw{Provider: string(amp.AgentId), RRtype: rrtype}, Response: answer}:
+	case <-deadline:
+		resp.Error, resp.ErrorMsg = true, "the data engine did not take the withdrawal in time"
+		return
+	}
 	select {
 	case a := <-answer:
 		if a.Error {
@@ -368,7 +398,11 @@ func (conf *Config) debugWithdraw(amp *AgentMgmtPost, resp *AgentMgmtResponse) {
 			return
 		}
 		resp.Msg = a.Msg
-	case <-time.After(10 * time.Second):
+	case <-deadline:
 		resp.Error, resp.ErrorMsg = true, "the data engine did not answer in time"
 	}
 }
+
+// debugWithdrawWait is how long agent debug withdraw waits for the data
+// engine.
+var debugWithdrawWait = 10 * time.Second

@@ -18,6 +18,26 @@ import (
 	"github.com/miekg/dns"
 )
 
+// A member's refusal of a withdrawal as older than the provider's own
+// replace reaches the leader's confirmation callback with both stamps at
+// one serial, and is booked to go again, after a wait.
+func TestTransportBoundary_ARefusalAsOlderIsBookedToGoAgain(t *testing.T) {
+	zone := "older.boundary.example."
+	r, in := serialsRig(t, zone, true)
+	distID := nextDistributionID()
+	r.peer.Bridge.stamps.sent(distID, r.us.Identity, zone, msgStampAt(in[42]))
+	r.peer.Bridge.ChunkHandler.OnConfirmationReceived(&transport.IncomingConfirmation{DistributionID: distID, PeerID: r.us.Identity,
+		Status: transport.ConfirmRejected, Zone: zone, Message: staleWithdrawal + ": older than the provider's own records applied here",
+		App: r.us.Bridge.stamps.confirmAppFor(zone)})
+	open := r.peer.Bridge.notYets.forZone(ZoneName(zone))
+	if len(open) != 1 || open[0].distID != distID {
+		t.Fatalf("the leader's book of what goes again: %+v", open)
+	}
+	if !open[0].notBefore.After(open[0].at) {
+		t.Errorf("it goes at %v, booked at %v: want a wait", open[0].notBefore, open[0].at)
+	}
+}
+
 // The peer leads the zone, and gone, which has a record and no role, has
 // NS records at the agent. The peer's withdrawal of them reaches the agent
 // over the wire and is taken: they leave the agent's data, the agent hands
@@ -107,5 +127,20 @@ func TestTransportBoundary_AWithdrawalReachesTheRecipientsCombiner(t *testing.T)
 		Mechanism: transport.MechanismDNS, Zone: zone, Payload: rfi, ReceivedAt: time.Now(), SourceAddr: "127.0.0.1:0"})
 	if amp, ok := recvMsgWithin(t, r.us.MsgQs.Msg, 10*time.Second); !ok || amp.OriginatorID != AgentId(peer) || amp.Withdraw != nil {
 		t.Errorf("an RFI with the withdraw field, as routed: %+v", amp)
+	}
+
+	// an agent's update to its combiner, in the provider's name, keeps the
+	// field: it is the combiner's flag
+	upd, err := json.Marshal(DnsSyncPayload{MessageType: "update", OriginatorID: gone, YourIdentity: r.us.Identity, Zone: zone,
+		Operations: []core.RROperation{{Operation: "replace", RRtype: "NS"}}, Time: time.Now().Format(time.RFC3339Nano),
+		DistributionID: nextDistributionID(), Withdraw: &Withdraw{Provider: gone, RRtype: "NS"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the sender the transport takes from such a payload is the provider
+	r.us.Bridge.routeIncomingMessage(&transport.IncomingMessage{TypeToken: "update", SenderID: gone, TransportSender: peer,
+		Mechanism: transport.MechanismDNS, Zone: zone, Payload: upd, ReceivedAt: time.Now(), SourceAddr: "127.0.0.1:0"})
+	if amp, ok := recvMsgWithin(t, r.us.MsgQs.Msg, 10*time.Second); !ok || amp.OriginatorID != gone || amp.Withdraw == nil {
+		t.Errorf("an update with the withdraw field, as routed: %+v", amp)
 	}
 }

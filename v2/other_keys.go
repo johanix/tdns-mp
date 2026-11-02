@@ -170,8 +170,11 @@ func publishedOrWithdrawn(on bool) string {
 
 // sendKeyForSignalNames is the leader's own action at the step that gives
 // pubkey: the zone's KEY goes again, now with at-ns, to its combiner and the
-// zone's other agents. A key not published yet goes with its take-up when
-// the transition is done, by the same sets.
+// zone's other agents. During a roll that is the new key from when its KEY
+// was sent, whatever the leader's copy still serves (readZoneKey), and it goes
+// under a distribution of its own: the roll waits for the one it booked. A key
+// not published yet goes with its take-up when the transition is done, or with
+// the roll's own send, by the same sets.
 func (conf *Config) sendKeyForSignalNames(zone string) {
 	z := ZoneName(zone)
 	kdb := conf.zoneKeyDB(z)
@@ -183,11 +186,11 @@ func (conf *Config) sendKeyForSignalNames(zone string) {
 		lgAgent.Error("the zone's KEY could not be read for the _signal names", "zone", zone, "err", err)
 		return
 	}
-	if zk.held == nil || zk.held.key == nil || len(zk.published) != 1 || !sameKey(zk.published[0], zk.held.key) {
-		lgAgent.Info("the zone's KEY is not published yet: it goes to the _signal names with its take-up", "zone", zone)
+	if zk.held == nil || zk.held.key == nil || (!zk.rolling && (len(zk.published) != 1 || !sameKey(zk.published[0], zk.held.key))) {
+		lgAgent.Info("the zone's KEY is not published yet: it goes to the _signal names when it is", "zone", zone)
 		return
 	}
-	if err := conf.sendZoneKey(z, zk.held.key); err != nil {
+	if _, _, _, err := sendZoneKEY(conf.InternalMp.MPTransport, z, zk.held.key, ""); err != nil {
 		lgAgent.Error("the zone's KEY could not be sent for the _signal names", "zone", zone, "err", err)
 	}
 }
