@@ -62,6 +62,28 @@ func TestAFollowedSerialIsNotReportedOnceTheCopyMoves(t *testing.T) {
 	}
 }
 
+// A zone that may be reconciling is not steady, with no from-serial too: one
+// that knew its active serial by another's word (Pending) follows nothing
+// until its transition is done.
+func TestAPendingZoneFollowsNothingUntilDone(t *testing.T) {
+	s := newStore(t)
+	seven := readOf(t, instrBase[0], instrBase[1], `3600 IN HSYNCPARAM serial="7" servers="alpha,beta" signers="alpha"`)
+	s.Note(storeZone, seven, nil)
+	if err := s.Know(storeZone, sd(seven), nil, true); err != nil {
+		t.Fatal(err)
+	}
+	s.Note(storeZone, readOf(t, instrBase[0], instrBase[1], `3600 IN HSYNCPARAM serial="8" servers="alpha" signers="alpha"`), nil)
+	if st := status(t, s, storeZone); st.Active.Serial != 7 || st.Follows != "" {
+		t.Fatalf("followed while it may be reconciling: %s", st.Line())
+	}
+	if err := s.Done(storeZone); err != nil {
+		t.Fatal(err)
+	}
+	if st := status(t, s, storeZone); st.Active.Serial != 8 || st.Follows == "" {
+		t.Errorf("not followed once done: %s", st.Line())
+	}
+}
+
 // An owner error is still held: after the zone followed a not-built change
 // to 8, the owner's edit of 8 without a raised serial is not acted on.
 func TestAnOwnerErrorIsHeldAfterTheNotBuiltFallback(t *testing.T) {
