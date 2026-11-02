@@ -691,6 +691,63 @@ func TestAMemberWithNoRoleIsWaitedForWithATimeOut(t *testing.T) {
 	}
 }
 
+// A member with no role that tells no active serial, or one above V, cannot
+// hold a step of V, so no step waits for it (plan S12, status item 9): the
+// transition goes on to done. One that tells V or a serial below it can come
+// to hold the step, and is waited for.
+func TestAMemberWithNoRoleThatCannotHoldTheStepIsNotWaitedFor(t *testing.T) {
+	for _, c := range []struct {
+		name, zone string
+		tells      func(r *reconcileRig, st *InstrStamp)
+		waits      bool
+	}{
+		{"it knows no active serial", "unknown.norole.reconcile.example.", func(_ *reconcileRig, st *InstrStamp) {
+			st.Known, st.Active, st.ActiveDigest, st.Reconciling, st.Step, st.StepHeld = false, 0, "", false, nil, false
+		}, false},
+		{"it tells a serial above V", "above.norole.reconcile.example.", func(r *reconcileRig, st *InstrStamp) {
+			st.Active, st.ActiveDigest, st.Step, st.StepHeld = r.v.Serial+2, "above", nil, false
+		}, false},
+		{"it tells V, the step not held", "atv.norole.reconcile.example.", func(_ *reconcileRig, st *InstrStamp) {
+			st.StepHeld = false
+		}, true},
+		{"it tells a serial below V", "below.norole.reconcile.example.", func(r *reconcileRig, st *InstrStamp) {
+			st.Active, st.ActiveDigest, st.Reconciling, st.Step, st.StepHeld = r.n.Serial, r.n.Digest(), false, nil, false
+		}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newReconcileRig(t, c.zone, roleA)
+			r.agree()
+			r.thawNow()
+			r.partsTake()
+			r.holdsToo(roleB)
+			st := r.own()
+			c.tells(r, &st)
+			r.hear(roleN, st, true)
+			r.turn(time.Now())
+			step, _ := r.step()
+			if c.waits {
+				if step.Number != 0 {
+					t.Fatalf("went on without n: %+v", step)
+				}
+				if line := r.conf.thawLine(r.zone); !strings.HasSuffix(line, "waiting for "+roleN+" (no role)") {
+					t.Errorf("the status: %q", line)
+				}
+				return
+			}
+			if step.Number != 1 {
+				t.Fatalf("step 0 waited for n: %+v, status %q", step, r.conf.thawLine(r.zone))
+			}
+			r.partsTake()
+			r.holdsToo(roleB)
+			r.hear(roleN, st, true)
+			r.turn(time.Now())
+			if s := status(t, r.store, r.zone); s.Phase != PhaseSteady {
+				t.Errorf("not done: %+v, status %q", s, r.conf.thawLine(r.zone))
+			}
+		})
+	}
+}
+
 // TestTheAuditorIsNotWaitedFor: n is the auditor under 42.
 func TestTheAuditorIsNotWaitedFor(t *testing.T) {
 	r := newReconcileRig(t, "auditor.reconcile.example.", roleA)
