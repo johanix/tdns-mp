@@ -513,3 +513,36 @@ func TestADsbootNameNeedsTheProviderZonesAllowedRRtypes(t *testing.T) {
 		t.Errorf("the type not allowed: %v", got)
 	}
 }
+
+// A type its allowed-rrtypes no longer allow, once published, goes: the
+// combine alone would leave it served, and its contribution held and saved.
+// The other type stays. allowed-rrtypes are read at a start; a file written
+// by an earlier run can bring such a name back, and only this takes it out.
+func TestADsbootTypeNoLongerAllowedIsWithdrawn(t *testing.T) {
+	const zone = "disallowed.dsboot.example."
+	const params = `servers="alpha" signers="alpha" nsmgmt="agent" parentsync="agent" pubcds`
+	d := newDsbootCombiner(t, zone, params, okCDNSKEY)
+	d.hand(params, 0, false, true)
+	d.cds(okCDS)
+	if got := d.served(consentNS1, dns.TypeCDNSKEY); len(got) != 1 {
+		t.Fatalf("the CDNSKEY while allowed: %v", got)
+	}
+	RegisterProviderZoneRRtypes(ProviderZoneConf{Zone: consentProviderZone, AllowedRRtypes: []string{"KEY", "CDS"}})
+	mpzd, _ := Zones.Get(zone)
+	if err := mpzd.syncDsbootNames(); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.served(consentNS1, dns.TypeCDNSKEY); got != nil {
+		t.Errorf("the CDNSKEY no longer allowed is still served: %v", got)
+	}
+	if got := d.served(consentNS1, dns.TypeCDS); len(got) != 1 {
+		t.Errorf("the CDS, still allowed: %v", got)
+	}
+	all, err := LoadAllContributions(d.hdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := all[consentProviderZone][consentAgent][dsbootOwnerName(zone, consentNS1)][dns.TypeCDNSKEY].RRs; len(got) != 0 {
+		t.Errorf("the CDNSKEY no longer allowed is in the store a restart loads: %v", got)
+	}
+}

@@ -118,15 +118,17 @@ func (mpzd *MPZoneData) syncDsbootNames() error {
 }
 
 // settleDsboot brings one provider zone to what want says for its owners:
-// whatever the zone holds under prefix and want does not goes, from every
-// origin, and what want says is held in the name of by. It publishes when
-// anything is wanted or has gone: a zone whose names are in place publishes
-// nothing, and one that lost them to a failed publish gets them now.
+// whatever the zone holds under prefix that want does not say, or that its
+// allowed-rrtypes no longer allow, goes, from every origin, and what want
+// says is held in the name of by. It publishes when anything is wanted or has
+// gone: a zone whose names are in place publishes nothing, and one that lost
+// them to a failed publish gets them now.
 func (provider *MPZoneData) settleDsboot(zone, prefix, by string, owners []string, want map[string]map[uint16][]dns.RR) (published, withdrawn bool, err error) {
 	type contribution struct {
 		origin, owner string
 		rrtype        uint16
 	}
+	allowed := GetProviderZoneRRtypes(provider.ZoneName)
 	var stale []contribution
 	provider.Lock()
 	for origin, ownerMap := range provider.MP.AgentContributions {
@@ -135,7 +137,7 @@ func (provider *MPZoneData) settleDsboot(zone, prefix, by string, owners []strin
 				continue
 			}
 			for rrtype := range rrtypeMap {
-				if origin != by || want[owner][rrtype] == nil {
+				if origin != by || want[owner][rrtype] == nil || !allowed[rrtype] {
 					stale = append(stale, contribution{origin, owner, rrtype})
 				}
 			}
@@ -151,7 +153,6 @@ func (provider *MPZoneData) settleDsboot(zone, prefix, by string, owners []strin
 		}
 		withdrawn = withdrawn || changed
 	}
-	allowed := GetProviderZoneRRtypes(provider.ZoneName)
 	wanted := false
 	for _, owner := range owners {
 		for _, rrtype := range dsbootTypes {
