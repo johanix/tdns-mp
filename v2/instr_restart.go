@@ -140,7 +140,7 @@ func (conf *Config) restartView(zone string, now time.Time) (restartView, bool) 
 	}
 	if !v.leads {
 		conf.leadersWord(&v, newest, told)
-		if v.take == nil {
+		if v.take == nil && len(v.fetch) == 0 {
 			conf.votersWord(&v, told, now)
 		}
 		return v, true
@@ -245,42 +245,43 @@ func (conf *Config) leadersWord(v *restartView, newest *heldSerial, told map[str
 }
 
 // votersWord is the other way a member with no record, or the auditor, knows
-// the active serial (design 3.4, amended 2026-11-02; tdns-mp #353). It is
-// placed by its newest serial, and when that has another make-up it holds no
-// group of the serial active: no election record can name that group's leader,
-// so leadersWord cannot take the word. It takes a serial it holds when every
-// other voting member under it is heard first hand and fresh and tells it
-// active, or tells none: at least one tells it, and a member with no record
-// is no objection, as for a leader with no record. Of two serials that pass,
-// which takes voting members with nobody in common but this agent, it takes
-// neither.
+// the active serial (design 3.4, amended 2026-11-02; tdns-mp #353), with no
+// serial told left to fetch. It is placed by its newest serial, and when that
+// has another make-up it holds no group of the serial active: no election
+// record can name that group's leader, so leadersWord cannot take the word. It
+// takes a serial it holds when every other voting member under it is heard
+// first hand and fresh and tells it active, or tells none: at least one tells
+// it, and a member with no record is no objection, as for a leader with no
+// record. A voting member that tells another serial it votes under differs
+// too, whoever votes under the first, so with two such serials it takes
+// neither: the older may be one a leaving member has not moved on from.
 func (conf *Config) votersWord(v *restartView, told map[string]toldStamp, now time.Time) {
 	s := conf.InternalMp.Instructions
 	mp := conf.MpConfig()
 	local, timeout := dns.Fqdn(mp.Identity), leavingTimeoutFor(mp)
-	var passed []restartView
-	seen := map[SerialDigest]bool{}
+	readings := map[SerialDigest]*Instructions{}
 	for _, key := range slices.Sorted(maps.Keys(told)) {
 		st := told[key]
-		sd := SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}
-		if !st.Known || st.ActiveDigest == "" || seen[sd] {
+		if !st.Known || st.ActiveDigest == "" || now.Sub(st.heard) > timeout {
 			continue
 		}
-		seen[sd] = true
+		sd := SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}
 		reading := s.readingAt(v.zone, sd)
 		if reading == nil {
 			continue
 		}
-		if w, ok := everyVoterTells(reading, sd, local, timeout, told, now); ok {
-			passed = append(passed, w)
+		if _, voters := participantsOf(reading); isAmong(voters, AgentId(st.identity)) {
+			readings[sd] = reading
 		}
 	}
-	if len(passed) != 1 {
+	if len(readings) != 1 {
 		return
 	}
-	w := passed[0]
-	v.take, v.by, v.from, v.reconciling, v.thaw = w.take, w.by, knownFromRecords, w.reconciling, w.thaw
-	v.fetch = nil
+	for sd, reading := range readings {
+		if w, ok := everyVoterTells(reading, sd, local, timeout, told, now); ok {
+			v.take, v.by, v.from, v.reconciling, v.thaw = w.take, w.by, knownFromRecords, w.reconciling, w.thaw
+		}
+	}
 }
 
 // everyVoterTells is votersWord's test of one serial: the view that takes it

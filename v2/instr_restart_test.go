@@ -205,7 +205,7 @@ func TestAMemberInAnotherGroupWaitsForEveryOtherVoter(t *testing.T) {
 		{name: "none tells it", bob: unknownStamp(newest), nina: stamp(unknownStamp(newest))},
 		{name: "not heard lately", bob: tells(active, newest), nina: stamp(tells(active, newest)), later: 2 * time.Hour},
 	} {
-		r := newThawRig(t, "waits.othergroup.restart.example.", "")
+		r := newThawRig(t, strings.ReplaceAll(c.name, " ", "-")+".waits.othergroup.restart.example.", "")
 		r.noRecord(active, newest)
 		r.hear(roleB, c.bob, true)
 		if c.nina != nil {
@@ -235,7 +235,7 @@ func TestAMemberWithNoRecordCountsAsNoObjectionToAMember(t *testing.T) {
 // same way: from every voting member under it, with no election record.
 func TestOneWithNoVoteUnderTheSerialTakesWhatEveryVoterTells(t *testing.T) {
 	for _, app := range []tdns.AppType{AppTypeMPAgent, AppTypeMPAuditor} {
-		r := newThawRig(t, "novote.othergroup.restart.example.", "")
+		r := newThawRig(t, tdns.AppTypeToString[app]+".novote.othergroup.restart.example.", "")
 		old := tdns.Globals.App.Type
 		tdns.Globals.App.Type = app
 		t.Cleanup(func() { tdns.Globals.App.Type = old })
@@ -254,6 +254,43 @@ func TestOneWithNoVoteUnderTheSerialTakesWhatEveryVoterTells(t *testing.T) {
 		if r.known() != 41 {
 			t.Fatalf("%v: not taken: %s", app, r.conf.thawLine(r.zone))
 		}
+	}
+}
+
+// A serial told that it must fetch comes first: another it holds that would
+// pass is not taken in its place (cubic's review of #360).
+func TestAMemberFetchesASerialToldBeforeItTakesAnother(t *testing.T) {
+	r := newThawRig(t, "fetchfirst.othergroup.restart.example.", "")
+	held, notHeld, newest := freezeAt(t, 41, "x", "a,b", ""), freezeAt(t, 42, "y", "a,n", ""), voters3(t, 43, "z")
+	r.noRecord(held, newest)
+	r.hear(roleB, tells(held, newest), true)
+	r.hear(roleN, tells(notHeld, newest), true)
+	v, ok := r.conf.restartView(r.zone, time.Now())
+	if !ok || v.take != nil {
+		t.Fatalf("taken with a serial told left to fetch: %+v", v.take)
+	}
+	if len(v.fetch) != 1 || v.fetch[0].sd != sd(notHeld) {
+		t.Errorf("the serial told is not fetched: %+v", v.fetch)
+	}
+}
+
+// A serial that passes by itself is not taken while a voting member tells
+// another it votes under: the one that passes may be one a leaving member has
+// not moved on from. Once that member tells the other too, it is the one taken.
+func TestAMemberTakesNoSerialWhileAVoterTellsAnother(t *testing.T) {
+	r := newThawRig(t, "another.othergroup.restart.example.", "")
+	stale, active, newest := freezeAt(t, 41, "x", "a,b", ""), voters3(t, 42, "y"), freezeAt(t, 43, "z", "a,n", "")
+	r.noRecord(stale, active, newest)
+	r.hear(roleB, tells(stale, newest), true)
+	r.hear(roleN, tells(active, newest), true)
+	r.conf.thawTurn(r.zone)
+	if r.known() != 0 {
+		t.Fatalf("taken while a voting member tells another: %d", r.known())
+	}
+	r.hear(roleB, tells(active, newest), true)
+	r.conf.thawTurn(r.zone)
+	if r.known() != 42 {
+		t.Fatalf("not taken once they agree: %s", r.conf.thawLine(r.zone))
 	}
 }
 
