@@ -89,7 +89,7 @@ func holdFirstLocalRows(ar *AgentRegistry, beatInterval time.Duration) {
 // refreshLocalRow writes our row for one group, unless it is held: the first
 // row of the group, in the hold, with a member that is not OPERATIONAL from
 // here. It reports whether it wrote the row.
-func (gst *GossipStateTable) refreshLocalRow(groupHash string, peerStates map[string]string, zones []string, beatInterval uint32, now time.Time) bool {
+func (gst *GossipStateTable) refreshLocalRow(groupHash string, peerStates map[string]string, beatInterval uint32, now time.Time) bool {
 	gst.mu.RLock()
 	held := !gst.localWritten[groupHash] && now.Before(gst.firstRowHoldUntil)
 	gst.mu.RUnlock()
@@ -102,7 +102,7 @@ func (gst *GossipStateTable) refreshLocalRow(groupHash string, peerStates map[st
 			}
 		}
 	}
-	gst.UpdateLocalState(groupHash, peerStates, zones, beatInterval)
+	gst.UpdateLocalState(groupHash, peerStates, beatInterval)
 	return true
 }
 
@@ -112,8 +112,10 @@ func (gst *GossipStateTable) refreshLocalRow(groupHash string, peerStates map[st
 // seconds (multi-provider.syncengine.intervals.beatinterval). It rides
 // in gossip so peers can display "Ns beats" alongside the AGE column
 // and understand why a particular reporter detects degradation faster
-// or slower than another.
-func (gst *GossipStateTable) UpdateLocalState(groupHash string, peerStates map[string]string, zones []string, beatInterval uint32) {
+// or slower than another. The row lists no zone: a zone's group is the
+// group manager's, and what a zone needs told rides in the stamp entry
+// (plan S22).
+func (gst *GossipStateTable) UpdateLocalState(groupHash string, peerStates map[string]string, beatInterval uint32) {
 	gst.mu.Lock()
 	defer gst.mu.Unlock()
 
@@ -133,7 +135,6 @@ func (gst *GossipStateTable) UpdateLocalState(groupHash string, peerStates map[s
 	gst.States[groupHash][gst.LocalID] = &MemberState{
 		Identity:     gst.LocalID,
 		PeerStates:   peerStates,
-		Zones:        zones,
 		Timestamp:    time.Now(),
 		BeatInterval: beatInterval,
 		// whole seconds on the wire, rounded up: a delay below a second is
@@ -610,7 +611,6 @@ func (gst *GossipStateTable) RefreshLocalStates(ar *AgentRegistry, pgm *Provider
 		hash := pg.GroupHash
 		// Build our peer states for this group
 		peerStates := make(map[string]string)
-		var zones []string
 
 		for _, member := range pg.Members {
 			if member == gst.LocalID {
@@ -628,18 +628,13 @@ func (gst *GossipStateTable) RefreshLocalStates(ar *AgentRegistry, pgm *Provider
 				"peer", member, "state", AgentStateToString[state], "ptr", fmt.Sprintf("%p", agent))
 		}
 
-		// Zones this member serves
-		for _, z := range pg.Zones {
-			zones = append(zones, string(z))
-		}
-
 		// Our local heartbeat interval — included in the gossiped
 		// MemberState so other agents can display per-reporter beat
 		// frequency alongside the AGE column.
 		beatInterval := ar.LocalAgent.Remote.BeatInterval
 
 		lgGossip.Debug("RefreshLocalStates", "group", shortHash(hash),
-			"localID", gst.LocalID, "peerStates", peerStates, "zones", zones, "beatInterval", beatInterval)
-		gst.refreshLocalRow(hash, peerStates, zones, beatInterval, now)
+			"localID", gst.LocalID, "peerStates", peerStates, "beatInterval", beatInterval)
+		gst.refreshLocalRow(hash, peerStates, beatInterval, now)
 	}
 }

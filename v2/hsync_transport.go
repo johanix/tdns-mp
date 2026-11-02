@@ -1423,6 +1423,7 @@ func (tm *MPTransportBridge) routeConfigMessage(msg *transport.IncomingMessage) 
 		Zone:       payload.Zone,
 		Subtype:    payload.Subtype,
 		ConfigData: payload.ConfigData,
+		Instr:      payload.Instr,
 	}
 
 	if tm.msgQs.configWaiters.deliver(rfiWaitKey(senderID, payload.Zone, payload.Subtype, payload.Nonce), configMsg) {
@@ -2009,8 +2010,9 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		beatGossip = tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
 			string(agent.ID), tm.agentRegistry.ProviderGroupManager, tm.agentRegistry.LeaderElectionManager)
 	}
-	if e := tm.stamps.entryFor(string(agent.ID)); e != nil {
-		beatGossip = append(beatGossip, *e)
+	stampEntry := tm.stamps.entryFor(string(agent.ID))
+	if stampEntry != nil {
+		beatGossip = append(beatGossip, *stampEntry)
 	}
 	if len(beatGossip) > 0 {
 		gossipData, _ = json.Marshal(beatGossip)
@@ -2095,9 +2097,11 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		}
 	}
 	// A beat that succeeded, on one mechanism or both, is one successful
-	// beat to the peer for the catch-up tracker.
+	// beat to the peer for the catch-up tracker, and has told the zones its
+	// stamp entry carried (plan S22).
 	if (apiBeatEligible && beatSucceeded(apiResp, apiErr)) || (dnsBeatEligible && beatSucceeded(dnsResp, dnsErr)) {
 		tm.catchUp.PeerOperational(agent.ID)
+		tm.stamps.acknowledged(string(agent.ID), stampEntry)
 	}
 	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
 		for _, resp := range []*transport.BeatResponse{apiResp, dnsResp} {
@@ -2248,14 +2252,14 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 	}
 	if update != nil {
 		syncReq.Operations = update.Operations
+		// the leader's KEY goes to the other agents with its publish
+		// instruction too, for their combiners (#206)
+		syncReq.Publish = update.Publish
 		if !isCombiner {
 			syncReq.CatchUp = update.CatchUp // an answer's marker is for the asker, not the combiner it is passed on to
 		}
 		if isCombiner {
 			syncReq.ZoneClass = update.ZoneClass
-			if update.Publish != nil {
-				syncReq.Publish = update.Publish
-			}
 			syncReq.Acting = update.Acting
 		}
 	}
