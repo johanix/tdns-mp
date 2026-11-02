@@ -351,11 +351,10 @@ func NewMsgQs() *MsgQs {
 type MPdata struct {
 	WeAreProvider bool                     // At least one of our agent identities matches an HSYNC3 Identity
 	OurLabel      string                   // Our provider label from the matching HSYNC3 record
-	WeAreSigner   bool                     // Our label is in Signing: in HSYNCPARAM signers, or leaving it (#147)
-	OtherSigners  int                      // Count of the other providers in Signing
-	ZoneSigned    bool                     // Signing is non-empty (zone uses multi-signer)
-	Signing       signingSet               // The providers that sign the zone: signers= and those leaving it (leaving_signer.go)
-	Leaving       bool                     // We sign, though signers= no longer names us (#147)
-	Leavers       []string                 // The providers in Signing that signers= no longer names, by identity (#147)
+	WeAreSigner   bool                     // Our label is in Sets.Signing
+	OtherSigners  int                      // Count of the other providers in Sets.KeySigners
+	ZoneSigned    bool                     // Sets.Signing is non-empty (zone uses multi-signer)
+	Sets          Roles                    // The sets the data is computed from: the step's (plan S13)
+	Leaving       bool                     // We sign by the step's sets, though signers= no longer names us (plan S13)
 	Options       map[tdns.ZoneOption]bool // MP-specific options (future: migrate from zd.Options)
 }

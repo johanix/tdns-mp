@@ -121,35 +121,13 @@ func (h *ActingHandover) olderThan(held *ActingHandover) bool {
 	return h.Made.Before(held.Made)
 }
 
-// signingProviders are the zone's signing set as a set of providers: those
-// signers= names, then those leaving it (#275), each with the identity of
-// its ON record ("" for none).
-func (mpzd *MPZoneData) signingProviders() []Provider {
-	set := mpzd.signingSet()
-	out := []Provider{}
-	for _, label := range mpzd.signingLabels() {
-		out = append(out, Provider{Label: label, Identity: set[label]})
-	}
-	return out
-}
-
-// actingSets are the sets a hand-over carries for the zone as mpzd reads
-// it: its roles, with the key, DS and signing sets its signing set (#275).
-func (mpzd *MPZoneData) actingSets() Roles {
-	r := mpzd.roles()
-	signing := mpzd.signingProviders()
-	r.KeySigners, r.DSSigners, r.Signing = signing, slices.Clone(signing), slices.Clone(signing)
-	return r
-}
-
 // wantedHandover is what this agent wants its combiner to act by for the
 // zone: the instructions it acts by (its active ones, S3's rule), the
-// store's newest serial, phase and step, and the step's sets, with the hold
-// while the zone is frozen (S6, folded in by S11). Until S13 the
-// sets of whose DNSKEYs and DS are published, and of who signs, are the
-// zone's signing set, signers= with the providers leaving it (#275): so the
-// other providers' combiners keep a leaving signer's DNSKEYs and CDS while
-// it signs on, until the owner removes its HSYNC3 record. Nil for a zone
+// store's newest serial, phase and step, and the step's sets per purpose
+// (plan S13), with the hold while the zone is frozen (S6, folded in by S11):
+// a leaving provider stays in each set until its step for that set, so the
+// other providers' combiners keep its DNSKEYs and CDS, and its own signer
+// signs on, until then (design 5.2). Nil for a zone
 // that is not loaded here or not multi-provider, and for one whose active
 // serial this agent does not know (S9); one with no records for a zone
 // whose instructions are gone (the end of multi-provider service). Nil too
@@ -171,7 +149,7 @@ func (conf *Config) wantedHandover(zone string) *ActingHandover {
 		return h
 	}
 	h.Serial, h.Digest, h.Records, h.Newest = in.Serial, in.Digest(), in.instructionRecords(zone), in.Serial
-	h.Sets = mpzd.actingSets()
+	h.Sets = mpzd.roles()
 	h.Sets.Hold = len(conf.zoneFrozen(zone)) > 0
 	if st := conf.InternalMp.Instructions.Status(zone); st != nil {
 		h.Phase = st.Phase
