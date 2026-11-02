@@ -216,6 +216,8 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 			}
 			st, ok := told[canonicalName(id)]
 			switch {
+			case !ok && heard[canonicalName(id)]:
+				v.waits = append(v.waits, id+" (tells nothing of the zone)")
 			case !ok || now.Sub(st.heard) > timeout:
 				v.waits = append(v.waits, id+" (not heard)")
 			case st.Error != "":
@@ -262,7 +264,7 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 		}
 		m := member{id: id}
 		m.st, m.heard = told[canonicalName(id)]
-		m.tells = tellsAgreement(m.st, m.heard, now, timeout, v.from, v.to)
+		m.tells = tellsAgreement(m.st, m.heard, heard[canonicalName(id)], now, timeout, v.from, v.to)
 		m.rolling = m.tells == "" && m.st.Rollover
 		key := canonicalName(id)
 		if m.tells == "" && !m.rolling {
@@ -334,12 +336,16 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 		}
 	}
 	// A voting member under V that does not vote under N tells nothing the
-	// thaw waits for but its payload encryption (rule 4).
+	// thaw waits for but its payload encryption (rule 4), which its stamp
+	// row tells whether it tells the zone or not (plan S22).
 	for _, id := range votersV {
 		if core.EqualNames(id, local) || isAmong(votersN, AgentId(id)) {
 			continue
 		}
-		if st, ok := told[canonicalName(id)]; !ok || !st.encrypted {
+		switch m := t.heard(id); {
+		case m == nil:
+			v.waits = append(v.waits, id+" (not heard)")
+		case !m.encrypted():
 			v.waits = append(v.waits, id+" (payload encryption off)")
 		}
 	}
@@ -347,19 +353,34 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 		v.parent = conf.parentWorkUnderWay(in.name)
 	} else if lem != nil {
 		if _, ok := lem.ZoneLeader(ZoneName(in.name)); !ok {
-			v.noLeader = lostLeader(leases, votersV, heard, told)
+			v.noLeader = lostLeader(leases, votersV, heard, t)
 		}
 	}
 	return v, true
+}
+
+// unheard is why a member with no stamp of a zone tells nothing of it: one
+// that is heard, OPERATIONAL, tells nothing of the zone, as at rest it lists
+// none (plan S22); one that is not is not heard.
+func (conf *Config) unheard(id string) string {
+	if ar := conf.InternalMp.AgentRegistry; ar != nil && ar.isAgentOperational(AgentId(id)) {
+		return "tells nothing of the zone"
+	}
+	return "not heard"
 }
 
 // tellsAgreement is why a member's latest first-hand stamp st does not
 // tell what the thaw needs: active from and agreeing on to, by serial and
 // digest, its active serial known, no owner error, its signer's hold, heard
 // within timeout (rule 4). "" when it does. Its rollover is read apart.
-func tellsAgreement(st toldStamp, heard bool, now time.Time, timeout time.Duration, from, to SerialDigest) string {
+// told: a stamp of the zone has been heard from it; operational: it is
+// heard at all. A member that is, but tells nothing of the zone, has
+// nothing going on in it (plan S22) until it hears the others' stamps.
+func tellsAgreement(st toldStamp, told, operational bool, now time.Time, timeout time.Duration, from, to SerialDigest) string {
 	switch {
-	case !heard:
+	case !told && operational:
+		return "tells nothing of the zone"
+	case !told:
 		return "not heard"
 	case now.Sub(st.heard) > timeout:
 		return "not heard since " + st.heard.Format(time.TimeOnly)
@@ -420,7 +441,7 @@ func (t *stampTable) waitsOnOf(zone string) []string {
 // and not leaving, with when it was last heard: the group stays without a
 // leader until it is heard again or the owner removes it (design 3.2,
 // membership 4.3). "" otherwise.
-func lostLeader(leases map[string]time.Time, votersV []string, heard map[string]bool, told map[string]toldStamp) string {
+func lostLeader(leases map[string]time.Time, votersV []string, heard map[string]bool, t *stampTable) string {
 	var last string
 	var at time.Time
 	for id, expiry := range leases {
@@ -431,9 +452,10 @@ func lostLeader(leases map[string]time.Time, votersV []string, heard map[string]
 	if last == "" || heard[last] || !isAmong(votersV, AgentId(last)) {
 		return ""
 	}
+	// its last beat, whether it told the zone or not (plan S22)
 	since := "never"
-	if st, ok := told[last]; ok {
-		since = st.heard.Format(time.TimeOnly)
+	if m := t.heard(last); m != nil {
+		since = m.Heard.Format(time.TimeOnly)
 	}
 	return dns.Fqdn(last) + " not heard since " + since
 }
