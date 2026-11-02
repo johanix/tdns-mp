@@ -4,6 +4,7 @@
 package tdnsmp
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -22,6 +23,8 @@ type sweepRig struct {
 	zdr    *ZoneDataRepo
 	ar     *AgentRepo
 	purged []string
+	// the type whose purge the combiner cannot be asked for; 0 for none
+	purgeFails uint16
 }
 
 func newSweepRig(t *testing.T, zone string) *sweepRig {
@@ -38,8 +41,12 @@ func newSweepRig(t *testing.T, zone string) *sweepRig {
 	r.conf.InternalMp.ZoneDataRepo = r.zdr
 	saved, savedSweep := purgeAtCombiner, askSweep
 	t.Cleanup(func() { purgeAtCombiner, askSweep = saved, savedSweep })
-	purgeAtCombiner = func(_ *MPTransportBridge, _ ZoneName, origin AgentId, rrtype uint16) {
+	purgeAtCombiner = func(_ *MPTransportBridge, _ ZoneName, origin AgentId, rrtype uint16) error {
+		if rrtype == r.purgeFails {
+			return errors.New("the queue would not take it")
+		}
 		r.purged = append(r.purged, strings.TrimSuffix(string(origin), ".")+" "+dns.TypeToString[rrtype])
+		return nil
 	}
 	askSweep = func(conf *Config, zone string, in *Instructions) { conf.sweep(r.zdr, ZoneName(zone), in) }
 	return r
@@ -103,6 +110,125 @@ func TestALostWithdrawalIsSweptWhenTheZoneIsDone(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), `msg="swept a contribution its origin is not entitled to"`) {
 		t.Errorf("no log line: %s", logs)
+	}
+}
+
+// The combiner is asked first. A contribution it could not be asked to drop
+// stays here with its tracking, the record of what is owed, and the other
+// purges go on. The tick asks again once roll-retry has passed, for as long as
+// it takes, and then the records leave this agent and the combiner.
+func TestAFailedPurgeIsAskedForAgainByTheTickUntilTheCombinerHasDroppedIt(t *testing.T) {
+	// the real purge says when it could not be queued
+	for name, tm := range map[string]*MPTransportBridge{"no transport": nil, "no combiner": {}} {
+		if err := purgeAtCombiner(tm, "real.sweep.example.", roleN, dns.TypeNS); err == nil {
+			t.Errorf("%s: the purge says nothing", name)
+		}
+	}
+	r := newSweepRig(t, "failed.sweep.example.")
+	zone := ZoneName(r.zone)
+	mpzd, hdb := withdrawnAtCombiner(t, "failed.combiner.sweep.example.", "ns1")
+	// in place of the transport: a queued NS purge reaches the combiner
+	queued := purgeAtCombiner
+	purgeAtCombiner = func(tm *MPTransportBridge, z ZoneName, origin AgentId, rrtype uint16) error {
+		err := queued(tm, z, origin, rrtype)
+		if err == nil && rrtype == dns.TypeNS {
+			if resp := combinerWithdraws(mpzd, hdb, false); resp.Status == "error" {
+				t.Errorf("the combiner refused the purge: %+v", resp)
+			}
+		}
+		return err
+	}
+	every := rollRetryFor(r.conf.MpConfig())
+	due := func() {
+		owed := r.zdr.sweepsOwed[zone]
+		owed.at = time.Now().Add(-every)
+		r.zdr.sweepsOwed[zone] = owed
+	}
+	stays := func(when string) {
+		t.Helper()
+		if !r.has(roleN, dns.TypeNS) || r.zdr.Tracking[zone][roleN][dns.TypeNS] == nil {
+			t.Errorf("%s: n's NS or its tracking left here", when)
+		}
+		if len(combinerHolds(mpzd, goneOrigin)) == 0 {
+			t.Errorf("%s: the combiner dropped it", when)
+		}
+		if !slices.Equal(r.purged, []string{"n.role.example DNSKEY"}) {
+			t.Errorf("%s: the purges %v, want DNSKEY's alone", when, r.purged)
+		}
+	}
+
+	r.holds(roleN, dns.TypeNS, dns.TypeDNSKEY)
+	r.zdr.getOrCreateTracking(zone, roleN, dns.TypeNS)
+	r.purgeFails = dns.TypeNS
+	r.run()
+	if st := status(t, r.store, r.zone); st.Phase != PhaseSteady {
+		t.Fatalf("the transition is not done: %s", st.Line())
+	}
+	if r.has(roleN, dns.TypeDNSKEY) {
+		t.Error("the other purge did not go on: n's DNSKEY stays")
+	}
+	stays("after the failed enqueue")
+
+	due()
+	r.conf.retrySweeps(r.zdr)
+	stays("the tick, and it fails again")
+	if time.Since(r.zdr.sweepsOwed[zone].at) >= every {
+		t.Error("a retry that failed is not owed again a roll-retry on")
+	}
+
+	r.purgeFails = 0
+	r.conf.retrySweeps(r.zdr)
+	stays("the tick within roll-retry")
+
+	due()
+	r.conf.retrySweeps(r.zdr)
+	if r.has(roleN, dns.TypeNS) || r.zdr.Tracking[zone][roleN][dns.TypeNS] != nil {
+		t.Error("the tick's sweep did not take n's NS here")
+	}
+	if held := combinerHolds(mpzd, goneOrigin); len(held) != 0 {
+		t.Errorf("the combiner still holds %v", held)
+	}
+	if !slices.Equal(r.purged, []string{"n.role.example DNSKEY", "n.role.example NS"}) {
+		t.Errorf("the purges %v, want each once", r.purged)
+	}
+	if len(r.zdr.sweepsOwed) != 0 {
+		t.Errorf("still owed: %v", r.zdr.sweepsOwed)
+	}
+}
+
+// The tick's sweep keeps the sweep's rule: while a transition is under way it
+// takes nothing and stays owed, and that transition's "done" answers for it.
+func TestAnOwedSweepWaitsWhileATransitionIsUnderWay(t *testing.T) {
+	r := newSweepRig(t, "underway.sweep.example.")
+	zone := ZoneName(r.zone)
+	r.holds(roleN, dns.TypeNS)
+	if cur, ok := r.conf.InternalMp.Instructions.reconcileInputs(r.zone); !ok || !cur.reconciling {
+		t.Fatal("the zone is not under way")
+	}
+	r.zdr.sweepsOwed = map[ZoneName]sweepOwed{zone: {in: r.v}}
+	r.conf.retrySweeps(r.zdr)
+	if !r.has(roleN, dns.TypeNS) || len(r.purged) != 0 {
+		t.Errorf("swept while the zone reconciles: purged %v", r.purged)
+	}
+	if _, owed := r.zdr.sweepsOwed[zone]; !owed {
+		t.Error("no longer owed, with nothing swept")
+	}
+	r.run()
+	if r.has(roleN, dns.TypeNS) || !slices.Equal(r.purged, []string{"n.role.example NS"}) || len(r.zdr.sweepsOwed) != 0 {
+		t.Errorf("after the transition's done: NS held %v, purged %v, owed %v", r.has(roleN, dns.TypeNS), r.purged, r.zdr.sweepsOwed)
+	}
+}
+
+// An owed sweep of a serial no longer active does nothing, and is no longer
+// owed: the serial after it has its own sweep at its "done".
+func TestAnOwedSweepOfAnEarlierSerialDoesNothing(t *testing.T) {
+	r := newSweepRig(t, "owed.sweep.example.")
+	r.run()
+	r.holds(roleN, dns.TypeNS)
+	r.zdr.sweepsOwed = map[ZoneName]sweepOwed{ZoneName(r.zone): {in: removalAt(t, 41, "agent", "a,b", "a")}}
+	r.conf.retrySweeps(r.zdr)
+	if !r.has(roleN, dns.TypeNS) || len(r.purged) != 0 || len(r.zdr.sweepsOwed) != 0 {
+		t.Errorf("swept by 41 with 42 active: purged %v, owed %v", r.purged, r.zdr.sweepsOwed)
 	}
 }
 

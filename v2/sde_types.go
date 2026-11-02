@@ -208,6 +208,9 @@ type ZoneDataRepo struct {
 	// DNSKEY replaces whose final confirmation waits for the combiner's word
 	// on that distribution's set (waitForCombiner). Engine only.
 	staleWaits map[string][]*staleWait
+	// sweepsOwed: the sweeps the tick runs again, by zone (entitlement.go,
+	// plan S17b). The engine's goroutine only.
+	sweepsOwed map[ZoneName]sweepOwed
 	// withdrawals: the leader's withdrawals this agent sent, by
 	// distribution (withdrawal.go, plan S16). Under mu.
 	withdrawals map[string]sentWithdrawal
