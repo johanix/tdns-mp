@@ -859,7 +859,7 @@ func (conf *Config) thawLine(zone string) string {
 	if st := conf.InternalMp.Instructions.Status(zone); st != nil && st.Active != nil && !st.DoneAt.IsZero() {
 		line := fmt.Sprintf("at %d, done since %s", st.Active.Serial, st.DoneAt.Format(time.TimeOnly))
 		if conf.safeToRemove(zone) {
-			line += "; safe to remove"
+			line += "; " + conf.safeToRemoveSaid(zone)
 		}
 		return line
 	}

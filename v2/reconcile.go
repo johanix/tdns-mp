@@ -475,6 +475,8 @@ type zoneReconcile struct {
 	withdrawn map[string]bool      // by provider and type: the data engine says it is done
 	stepSync  bool                 // the step held asks the leader's sync (syncCauseFor)
 	syncAt    time.Time
+	watching  string // the step held, while it watches the parent: its key (goOnPastParent)
+	warnedAt  time.Time
 }
 
 func (b *reconcileBook) zone(zone string) *zoneReconcile {
@@ -945,6 +947,7 @@ func (conf *Config) transitionDone(zone string, serial uint32) {
 	lg.Info("transition done", "zone", zone, "serial", serial)
 	if conf.safeToRemove(zone) {
 		lg.Info("safe to remove", "zone", zone, "serial", serial)
+		conf.parentNow(zone) // the status says what the parent still names
 	}
 	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil {
 		conf.onSetsChanged(mpzd, true)

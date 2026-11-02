@@ -32,7 +32,7 @@ which agent leads it among the zone's providers, and where the parent stands
 on the SIG(0) key that signs the UPDATEs. All take the zone with --zone.`,
 	}
 	c.AddCommand(newAgentParentSyncStatusCmd(kind), newAgentParentSyncElectionCmd(kind),
-		newAgentParentSyncInquireCmd(kind), newAgentParentSyncBootstrapCmd(kind))
+		newAgentParentSyncInquireCmd(kind), newAgentParentSyncBootstrapCmd(kind), newAgentParentSyncGoOnCmd(kind))
 	// A refusal from the agent comes back from the leaf as an error. The
 	// caller of Execute prints it, once, and it is no reason to print the
 	// usage.
@@ -189,6 +189,37 @@ Example:
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			amr, err := sendAgentParentSyncCmd(cmd, "parentsync-bootstrap")
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), amr.Msg)
+			return nil
+		},
+	}
+}
+
+func newAgentParentSyncGoOnCmd(kind string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "go-on",
+		Short: "Go on with a removal past a parent that does not move, on the leader",
+		Long: `Tell the zone's leader to stop watching the parent at the step of a provider's
+removal that waits for it: until the parent no longer names the provider's
+nameservers, or no longer serves its DS. Use it when nothing will move the parent,
+for example one that refuses the zone's SIG(0) key while the sync needs it.
+"parentsync status" shows what the step waits for.
+
+The step's TTLs are counted from now, and the removal then goes on. The parent
+keeps what it holds: resolvers can still be sent to a provider that stops signing
+at the removal's last step, and that provider's status says so beside "safe to
+remove". Refused on an agent that does not lead the zone, and unless a step here
+watches the parent. A new leader's operator gives the word again if the step still
+waits.
+
+Example:
+  tdns-mpcli agent parentsync go-on --zone example.com.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			amr, err := sendAgentParentSyncCmd(cmd, "parentsync-go-on")
 			if err != nil {
 				return err
 			}

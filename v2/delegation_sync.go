@@ -429,7 +429,7 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 	// Room for more than the two NOTIFYs a sync sends (CSYNC, CDS): the sync
 	// must not wait for a reader that comes only when it has returned.
 	taken := make(chan tdns.NotifyRequest, 8)
-	msg, rcode, ur, err = ds.ZoneData.SyncZoneDelegation(runCtx, hdb.KeyDB, taken, syncstate, imr)
+	msg, rcode, ur, err = conf.sendDelegationSync(runCtx, hdb.KeyDB, taken, ds, syncstate, imr)
 	var notifies []tdns.NotifyRequest
 	for len(taken) > 0 {
 		notifies = append(notifies, <-taken)
