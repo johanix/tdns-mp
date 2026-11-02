@@ -280,6 +280,29 @@ func TestTheNewKEYIsPublishedOnlyAfterTheParentHasTakenIt(t *testing.T) {
 	}
 }
 
+// The roll's KEY publishes the zone's key: the hold of a publication that did
+// not go out ends there, since no set-up runs during the roll, and the sync it
+// kept waiting is asked for at the next tick.
+func TestTheRollsKEYEndsTheHoldForAKEYNotPublished(t *testing.T) {
+	r := newRollRig(t, "roll.unpublished.example.")
+	r.conf.InternalMp.keyPolls.begin(r.zone).end(true)
+	r.conf.InternalMp.CatchUp.oweForKey(r.zone)
+	if why := r.conf.keyHoldReason(r.ctx, r.zone); why != "not published" {
+		t.Fatalf("the rig's hold: %q", why)
+	}
+	r.start(t)
+	if ro := r.roll(t); ro == nil || ro.phase != rollPublished {
+		t.Fatalf("the roll: %+v", ro)
+	}
+	if why := r.conf.keyHoldReason(r.ctx, r.zone); why != "" {
+		t.Errorf("the sync is still held once the roll's KEY is sent: %s", why)
+	}
+	r.conf.retestKeyHolds(r.ctx)
+	if r.conf.InternalMp.CatchUp.releaseKeyOwed(r.zone) {
+		t.Error("the sync that waited is still owed after the tick")
+	}
+}
+
 // From when the roll's KEY is sent, the leader's zone key is the new key,
 // though its own copy still serves the old KEY: what it hands over is the
 // new key, and its set-up does not publish the old KEY over the new one.

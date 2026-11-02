@@ -664,6 +664,9 @@ func (conf *Config) publishRolledKEY(zone ZoneName, newKey *sig0Row) error {
 		tm.rollKEYs.forget(zone)
 		return fmt.Errorf("the new KEY could not be sent: %w", err)
 	}
+	// the zone's key is published: an earlier publication that failed, or
+	// was held, no longer holds the zone. No set-up runs during the roll
+	conf.InternalMp.keyPolls.published(zone)
 	return nil
 }
 
