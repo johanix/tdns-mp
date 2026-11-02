@@ -127,8 +127,8 @@ func TestAMemberWithNoRecordTakesOnlyTheLeadersWord(t *testing.T) {
 	}
 }
 
-// A member with no record does not take another member's active serial:
-// only the leader's.
+// A member with no record does not take the active serial of a member that
+// neither leads nor votes under it.
 func TestAMemberWithNoRecordIgnoresAnotherMembersActive(t *testing.T) {
 	r := newThawRig(t, "notleader.restart.example.", roleB)
 	r.noRecord(r.n)
@@ -140,6 +140,171 @@ func TestAMemberWithNoRecordIgnoresAnotherMembersActive(t *testing.T) {
 	}
 	if line := r.conf.thawLine(r.zone); line != "active not known since the start; waiting for the leader's word" {
 		t.Errorf("the status: %q", line)
+	}
+}
+
+// groupHashOf is the hash of the zone's group under in.
+func groupHashOf(in *Instructions) string {
+	m := zoneMakeUp(in)
+	return ComputeGroupHash(m.voting, m.auditors, m.noRole)
+}
+
+// A member with no record is placed by its newest serial. When that has
+// another make-up than the serial active, it does not hold the group of the
+// serial active, so no election record names its leader (tdns-mp #353). It
+// takes the serial once every other voting member under it tells it, and is
+// then placed by it.
+func TestAMemberInAnotherGroupTakesWhatEveryOtherVoterTells(t *testing.T) {
+	r := newThawRig(t, "othergroup.restart.example.", "")
+	active, newest := voters3(t, 41, "x"), freezeAt(t, 43, "y", "a,b", "")
+	r.noRecord(active, newest)
+	withStore(t, r.store)
+	pgm := NewProviderGroupManager(roleA)
+	pgm.RecomputeGroups()
+	if pg := pgm.GetGroupForZone(ZoneName(r.zone)); pg == nil || pg.GroupHash != groupHashOf(newest) {
+		t.Fatalf("not placed by its newest serial: %+v", pg)
+	}
+
+	r.hear(roleB, tells(active, newest), true)
+	r.conf.thawTurn(r.zone)
+	if r.known() != 0 {
+		t.Fatalf("taken with another voting member unheard: %d", r.known())
+	}
+	st := tells(active, newest)
+	st.Thaw = &Thaw{From: SerialDigest{Serial: 40, Digest: "x"}, To: sd(active)}
+	r.hear(roleN, st, true)
+	r.conf.thawTurn(r.zone)
+	if r.known() != 41 {
+		t.Fatalf("not taken once every other voting member tells it: %s", r.conf.thawLine(r.zone))
+	}
+	if got := status(t, r.store, r.zone); got.LastThaw == nil || got.LastThaw.To != sd(active) {
+		t.Errorf("the thaw told with it was not kept: %+v", got)
+	}
+	pgm.RecomputeGroups()
+	if pg := pgm.GetGroupForZone(ZoneName(r.zone)); pg == nil || pg.GroupHash != groupHashOf(active) {
+		t.Errorf("not placed by the serial taken: %+v", pg)
+	}
+}
+
+// One member's telling is not enough while another voting member under that
+// serial is unheard, not heard lately, differs, or none of them tells it.
+func TestAMemberInAnotherGroupWaitsForEveryOtherVoter(t *testing.T) {
+	active, newest := voters3(t, 41, "x"), freezeAt(t, 43, "y", "a,b", "")
+	stamp := func(st InstrStamp) *InstrStamp { return &st }
+	otherDigest := tells(active, newest)
+	otherDigest.ActiveDigest = "x"
+	for _, c := range []struct {
+		name  string
+		bob   InstrStamp
+		nina  *InstrStamp
+		later time.Duration
+	}{
+		{name: "unheard", bob: tells(active, newest)},
+		{name: "another serial", bob: tells(active, newest), nina: stamp(tells(voters3(t, 42, "z"), newest))},
+		{name: "another digest", bob: tells(active, newest), nina: &otherDigest},
+		{name: "none tells it", bob: unknownStamp(newest), nina: stamp(unknownStamp(newest))},
+		{name: "not heard lately", bob: tells(active, newest), nina: stamp(tells(active, newest)), later: 2 * time.Hour},
+	} {
+		r := newThawRig(t, strings.ReplaceAll(c.name, " ", "-")+".waits.othergroup.restart.example.", "")
+		r.noRecord(active, newest)
+		r.hear(roleB, c.bob, true)
+		if c.nina != nil {
+			r.hear(roleN, *c.nina, true)
+		}
+		if v, ok := r.conf.restartView(r.zone, time.Now().Add(c.later)); !ok || v.take != nil {
+			t.Errorf("%s: the view takes %+v", c.name, v.take)
+		}
+	}
+}
+
+// A voting member with no record is no objection, as for a leader with no
+// record, as long as another tells the serial.
+func TestAMemberWithNoRecordCountsAsNoObjectionToAMember(t *testing.T) {
+	r := newThawRig(t, "noobjection.othergroup.restart.example.", "")
+	active, newest := voters3(t, 41, "x"), freezeAt(t, 43, "y", "a,b", "")
+	r.noRecord(active, newest)
+	r.hear(roleB, tells(active, newest), true)
+	r.hear(roleN, unknownStamp(newest), true)
+	r.conf.thawTurn(r.zone)
+	if r.known() != 41 {
+		t.Fatalf("not taken: %s", r.conf.thawLine(r.zone))
+	}
+}
+
+// One with no vote under the serial, a newcomer or the auditor, takes it the
+// same way: from every voting member under it, with no election record.
+func TestOneWithNoVoteUnderTheSerialTakesWhatEveryVoterTells(t *testing.T) {
+	for _, app := range []tdns.AppType{AppTypeMPAgent, AppTypeMPAuditor} {
+		r := newThawRig(t, tdns.AppTypeToString[app]+".novote.othergroup.restart.example.", "")
+		old := tdns.Globals.App.Type
+		tdns.Globals.App.Type = app
+		t.Cleanup(func() { tdns.Globals.App.Type = old })
+		if app == AppTypeMPAuditor {
+			r.conf.InternalMp.LeaderElectionManager = nil
+		}
+		active, newest := freezeAt(t, 41, "x", "b,n", ""), voters3(t, 43, "y")
+		r.noRecord(active, newest)
+		r.hear(roleB, tells(active, newest), true)
+		r.conf.thawTurn(r.zone)
+		if r.known() != 0 {
+			t.Fatalf("%v: taken with one voting member unheard: %d", app, r.known())
+		}
+		r.hear(roleN, tells(active, newest), true)
+		r.conf.thawTurn(r.zone)
+		if r.known() != 41 {
+			t.Fatalf("%v: not taken: %s", app, r.conf.thawLine(r.zone))
+		}
+	}
+}
+
+// A serial told that it must fetch comes first: another it holds that would
+// pass is not taken in its place (cubic's review of #360).
+func TestAMemberFetchesASerialToldBeforeItTakesAnother(t *testing.T) {
+	r := newThawRig(t, "fetchfirst.othergroup.restart.example.", "")
+	held, notHeld, newest := freezeAt(t, 41, "x", "a,b", ""), freezeAt(t, 42, "y", "a,n", ""), voters3(t, 43, "z")
+	r.noRecord(held, newest)
+	r.hear(roleB, tells(held, newest), true)
+	r.hear(roleN, tells(notHeld, newest), true)
+	v, ok := r.conf.restartView(r.zone, time.Now())
+	if !ok || v.take != nil {
+		t.Fatalf("taken with a serial told left to fetch: %+v", v.take)
+	}
+	if len(v.fetch) != 1 || v.fetch[0].sd != sd(notHeld) {
+		t.Errorf("the serial told is not fetched: %+v", v.fetch)
+	}
+}
+
+// A serial that passes by itself is not taken while a voting member tells
+// another it votes under: the one that passes may be one a leaving member has
+// not moved on from. Once that member tells the other too, it is the one taken.
+func TestAMemberTakesNoSerialWhileAVoterTellsAnother(t *testing.T) {
+	r := newThawRig(t, "another.othergroup.restart.example.", "")
+	stale, active, newest := freezeAt(t, 41, "x", "a,b", ""), voters3(t, 42, "y"), freezeAt(t, 43, "z", "a,n", "")
+	r.noRecord(stale, active, newest)
+	r.hear(roleB, tells(stale, newest), true)
+	r.hear(roleN, tells(active, newest), true)
+	r.conf.thawTurn(r.zone)
+	if r.known() != 0 {
+		t.Fatalf("taken while a voting member tells another: %d", r.known())
+	}
+	r.hear(roleB, tells(active, newest), true)
+	r.conf.thawTurn(r.zone)
+	if r.known() != 42 {
+		t.Fatalf("not taken once they agree: %s", r.conf.thawLine(r.zone))
+	}
+}
+
+// Two serials that each pass, which takes voting members with nobody in
+// common but this agent, are neither taken.
+func TestAMemberTakesNeitherOfTwoSerialsThatPass(t *testing.T) {
+	r := newThawRig(t, "twopass.othergroup.restart.example.", "")
+	first, second, newest := freezeAt(t, 41, "x", "a,b", ""), freezeAt(t, 42, "y", "a,n", ""), voters3(t, 43, "z")
+	r.noRecord(first, second, newest)
+	r.hear(roleB, tells(first, newest), true)
+	r.hear(roleN, tells(second, newest), true)
+	r.conf.thawTurn(r.zone)
+	if r.known() != 0 {
+		t.Fatalf("one of two serials was taken: %d", r.known())
 	}
 }
 
@@ -236,8 +401,9 @@ func TestRecordsThatDifferNameTheForgetRemedy(t *testing.T) {
 }
 
 // The auditor runs the rule of a member: its own record, or the leader's
-// word, never another member's. It has no election manager: the leader is
-// the one the gossip table's election records name.
+// word, never the word of one that neither leads nor votes under the serial.
+// It has no election manager: the leader is the one the gossip table's
+// election records name.
 func TestTheAuditorTakesItsRecordOrTheLeadersWord(t *testing.T) {
 	r := newThawRig(t, "auditor.restart.example.", roleA)
 	old := tdns.Globals.App.Type

@@ -7,9 +7,10 @@
  * none) knows no active serial: it is placed in its group by its newest
  * serial and talks from it, but it is frozen, keeps what it receives (S8)
  * and hands its parts nothing new until the active serial is known. A
- * member, and the auditor, take the leader's first-hand word; the leader
- * takes what every voting member with a record tells, or, with no record
- * anywhere, the newest serial every voting member tells.
+ * member, and the auditor, take the leader's first-hand word, or what every
+ * other voting member under a serial tells of it; the leader takes what every
+ * voting member with a record tells, or, with no record anywhere, the newest
+ * serial every voting member tells.
  */
 package tdnsmp
 
@@ -139,6 +140,9 @@ func (conf *Config) restartView(zone string, now time.Time) (restartView, bool) 
 	}
 	if !v.leads {
 		conf.leadersWord(&v, newest, told)
+		if v.take == nil && len(v.fetch) == 0 {
+			conf.votersWord(&v, told, now)
+		}
 		return v, true
 	}
 
@@ -202,11 +206,11 @@ func (conf *Config) restartView(zone string, now time.Time) (restartView, bool) 
 }
 
 // leadersWord is the rule of a member with no record, and of the auditor:
-// the leader's word only, first hand: a stamp that tells a known active
-// serial from the agent that leads the zone's group under that serial, by
-// the election records heard first hand (plan 7.2). A serial told that this
-// agent does not hold is fetched from the zone's leader or a voting member
-// under its newest serial.
+// the leader's word, first hand: a stamp that tells a known active serial
+// from the agent that leads the zone's group under that serial, by the
+// election records heard first hand (plan 7.2). A serial told that this agent
+// does not hold is fetched from the zone's leader or a voting member under
+// its newest serial.
 func (conf *Config) leadersWord(v *restartView, newest *heldSerial, told map[string]toldStamp) {
 	s := conf.InternalMp.Instructions
 	var leader string
@@ -238,6 +242,75 @@ func (conf *Config) leadersWord(v *restartView, newest *heldSerial, told map[str
 		v.fetch = nil
 		return
 	}
+}
+
+// votersWord is the other way a member with no record, or the auditor, knows
+// the active serial (design 3.4, amended 2026-11-02; tdns-mp #353), with no
+// serial told left to fetch. It is placed by its newest serial, and when that
+// has another make-up it holds no group of the serial active: no election
+// record can name that group's leader, so leadersWord cannot take the word. It
+// takes a serial it holds when every other voting member under it is heard
+// first hand and fresh and tells it active, or tells none: at least one tells
+// it, and a member with no record is no objection, as for a leader with no
+// record. A voting member that tells another serial it votes under differs
+// too, whoever votes under the first, so with two such serials it takes
+// neither: the older may be one a leaving member has not moved on from.
+func (conf *Config) votersWord(v *restartView, told map[string]toldStamp, now time.Time) {
+	s := conf.InternalMp.Instructions
+	mp := conf.MpConfig()
+	local, timeout := dns.Fqdn(mp.Identity), leavingTimeoutFor(mp)
+	readings := map[SerialDigest]*Instructions{}
+	for _, key := range slices.Sorted(maps.Keys(told)) {
+		st := told[key]
+		if !st.Known || st.ActiveDigest == "" || now.Sub(st.heard) > timeout {
+			continue
+		}
+		sd := SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}
+		reading := s.readingAt(v.zone, sd)
+		if reading == nil {
+			continue
+		}
+		if _, voters := participantsOf(reading); isAmong(voters, AgentId(st.identity)) {
+			readings[sd] = reading
+		}
+	}
+	if len(readings) != 1 {
+		return
+	}
+	for sd, reading := range readings {
+		if w, ok := everyVoterTells(reading, sd, local, timeout, told, now); ok {
+			v.take, v.by, v.from, v.reconciling, v.thaw = w.take, w.by, knownFromRecords, w.reconciling, w.thaw
+		}
+	}
+}
+
+// everyVoterTells is votersWord's test of one serial: the view that takes it
+// when every voting member under reading but local passes.
+func everyVoterTells(reading *Instructions, sd SerialDigest, local string, timeout time.Duration, told map[string]toldStamp, now time.Time) (restartView, bool) {
+	w := restartView{take: &sd}
+	_, voters := participantsOf(reading)
+	for _, id := range voters {
+		if core.EqualNames(id, local) {
+			continue
+		}
+		st, ok := told[canonicalName(id)]
+		switch {
+		case !ok || now.Sub(st.heard) > timeout:
+			return restartView{}, false
+		case !st.Known || st.ActiveDigest == "":
+			continue // no record: no objection
+		case st.Active != sd.Serial || st.ActiveDigest != sd.Digest:
+			return restartView{}, false
+		}
+		if w.by == "" {
+			w.by = id
+		}
+		w.reconciling = w.reconciling || st.Reconciling
+		if w.thaw == nil && st.Thaw != nil && st.Thaw.To == sd {
+			w.thaw = st.Thaw
+		}
+	}
+	return w, w.by != ""
 }
 
 // leadsUnder: id leads the zone's group under the instructions in, by the
