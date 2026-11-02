@@ -711,7 +711,7 @@ func TestWithdrawalDoneReadsEveryRecipient(t *testing.T) {
 	r.heldForN(r.n, time.Now(), "ns1.n.example.")
 	r.leads(roleA)
 	tm := r.conf.InternalMp.MPTransport
-	tm.noRoleTimeout = 50 * time.Millisecond
+	tm.noRoleTimeout = time.Hour // the test ends the wait itself
 	distID, err := r.conf.sendWithdrawal(r.zdr, ZoneName(r.zone), roleN, "NS")
 	if err != nil {
 		t.Fatal(err)
@@ -732,7 +732,7 @@ func TestWithdrawalDoneReadsEveryRecipient(t *testing.T) {
 	if r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
 		t.Fatal("done before the time-out for n, which has no role")
 	}
-	time.Sleep(60 * time.Millisecond)
+	tm.noRoleTimeout = time.Nanosecond // the time-out has passed
 	if !r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
 		t.Error("not done after the time-out for n")
 	}
@@ -755,7 +755,7 @@ func TestAWithdrawalWaitsForAnAuditorUpToTheTimeOut(t *testing.T) {
 	r.leads(roleA)
 	activeAs(t, r.store, r.zone, freezeAt(t, 42, "v", "a,b", "n")) // n an auditor
 	tm := r.conf.InternalMp.MPTransport
-	tm.noRoleTimeout = 50 * time.Millisecond
+	tm.noRoleTimeout = time.Hour // the test ends the wait itself
 	distID, err := r.conf.sendWithdrawal(r.zdr, ZoneName(r.zone), roleN, "NS")
 	if err != nil {
 		t.Fatal(err)
@@ -767,7 +767,7 @@ func TestAWithdrawalWaitsForAnAuditorUpToTheTimeOut(t *testing.T) {
 	if r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
 		t.Fatal("done before the time-out for the auditor")
 	}
-	time.Sleep(60 * time.Millisecond)
+	tm.noRoleTimeout = time.Nanosecond // the time-out has passed
 	if !r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
 		t.Error("not done after the time-out for the auditor")
 	}
