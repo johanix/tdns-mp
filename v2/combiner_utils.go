@@ -15,9 +15,10 @@ import (
 
 // combinerShouldApplyEdits returns true if this combiner is allowed to
 // apply contributions to the live zone. Non-signer combiners on signed
-// zones persist data but do not modify the zone.
+// zones persist data but do not modify the zone; one whose provider is on its
+// way in applies what canApply lets it (plan S18b).
 func (zd *MPZoneData) combinerShouldApplyEdits() bool {
-	if zd.MP != nil && zd.MP.MPdata != nil && zd.MP.MPdata.ZoneSigned && !zd.MP.MPdata.WeAreSigner {
+	if zd.MP != nil && zd.MP.MPdata != nil && zd.MP.MPdata.ZoneSigned && !zd.MP.MPdata.WeAreSigner && !zd.MP.MPdata.WeHoldKeys {
 		return false
 	}
 	return true

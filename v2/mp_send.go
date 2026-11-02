@@ -108,7 +108,9 @@ type keystateWirePayload struct {
 	NotSigning    bool                `json:"NotSigning,omitempty"`
 	Rollover      bool                `json:"Rollover,omitempty"`
 	WaitsOn       map[uint16][]string `json:"WaitsOn,omitempty"`
-	Hold          bool                `json:"Hold,omitempty"` // S6
+	Hold          bool                `json:"Hold,omitempty"`     // S6
+	Signs         bool                `json:"Signs,omitempty"`    // S18b
+	Withheld      bool                `json:"Withheld,omitempty"` // S18b
 }
 
 // keystateAppMessage mirrors DNSTransport.Keystate (core.AgentKeystatePost).
@@ -148,6 +150,8 @@ func keystateAppMessage(req *PeerKeystateRequest, peerID string) (*transport.App
 		Rollover:      req.Rollover,
 		WaitsOn:       req.WaitsOn,
 		Hold:          req.Hold,
+		Signs:         req.Signs,
+		Withheld:      req.Withheld,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {

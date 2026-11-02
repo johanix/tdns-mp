@@ -14,8 +14,8 @@
  * copy says (from S7). A signer handed nothing acts by its own copy (rule
  * 5): provisional for a copy with no reading (no serial=, #308), which
  * starts no multi-provider work; for one that reads, it waits for its
- * agent, and acts meanwhile by the sets it last acted by, kept over a restart
- * (signer_acted.go).
+ * agent, and acts meanwhile by the sets it last acted by: at a first load
+ * none, with the zone withheld (signer_role.go).
  */
 package tdnsmp
 
@@ -76,6 +76,10 @@ func (conf *Config) signerTakeHandover(sig *KeystateSignalMsg) {
 		refuse("the zone is not a multi-provider zone here")
 		return
 	}
+	if h.NoCopy {
+		conf.signerAgentHasNoCopy(mpzd)
+		return
+	}
 	store := actingHeld.Load()
 	if store == nil {
 		refuse("this signer keeps no hand-overs")
@@ -95,11 +99,7 @@ func (conf *Config) signerTakeHandover(sig *KeystateSignalMsg) {
 	if err == nil {
 		refusalLogged.Delete(handoverKey(zone))
 		conf.signerHold(zone, h.Sets.Hold)
-		if _, held := store.get(zone); held {
-			if err := signerActed.Load().drop(zone); err != nil {
-				lgSigner.Error("the sets the signer last acted by were not dropped", "zone", zone, "err", err)
-			}
-		}
+		conf.askSignerRole(zone)
 	}
 	if err == nil && h.Refresh {
 		conf.refreshFromUpstream(mpzd, lgSigner)
@@ -157,16 +157,23 @@ func (conf *Config) signerConfirmers(zone string) []string {
 // is served; and, for a zone its key machine runs, the distributions in
 // flight expecting KeyConfirmers when they changed from confirmers, and the
 // foreign rows' ds by DSSigners. Not before the zone's first load, which
-// reads what is held.
+// reads what is held; a withheld zone has been through it, and is not Ready
+// until it acts on a hand-over.
 func (mpzd *MPZoneData) actBySignerHandover(conf *Config, confirmers []string) {
-	if !mpzd.Ready {
+	if !mpzd.Ready && !mpzd.Withheld() {
 		return
 	}
-	mp := conf.MpConfig()
 	r, ok := actingHeld.Load().roles(mpzd.ZoneName)
 	if !ok {
 		return
 	}
+	mpzd.actBySets(conf, r, confirmers)
+}
+
+// actBySets has the signer act by the sets r, as actBySignerHandover says. Its
+// role's own calls come at the zone's turn (signerRoleTurn).
+func (mpzd *MPZoneData) actBySets(conf *Config, r Roles, confirmers []string) {
+	mp := conf.MpConfig()
 	// Computed on a wrapper of the zone as served, with a map of its own:
 	// the zone's options map is read without a lock. One refresh or
 	// hand-over at a time (mpDataLock), through the switch, not the re-sign
@@ -256,18 +263,23 @@ func signerActingLine(zone string) string {
 	return "waiting for its agent's hand-over"
 }
 
+// signerReportEvery is how often the signer reports again the zones that
+// wait for their agents' hand-over.
+const signerReportEvery = 15 * time.Second
+
 // reportSignerStart is the signer's start report (rule 5's request, plan
 // S11): once a zone is loaded here its inventory goes to its agent, which
-// says what the signer holds for it, nothing included; and every minute
-// after, again for each zone that waits for its agent's hand-over
-// (signerWaits), since the agent may not have been up. The agent hands a
-// zone over whenever the signer does not hold what it wants.
+// says what the signer holds for it, nothing included; and again every
+// signerReportEvery for each zone that waits for its agent's hand-over
+// (signerWaits), since the agent may not have been up. A withheld zone has
+// been loaded, and is not Ready until its agent's hand-over: it reports too.
+// The agent hands a zone over whenever the signer does not hold what it wants.
 func (conf *Config) reportSignerStart(ctx context.Context) {
 	reported := map[string]bool{}
 	report := func() {
 		for _, zone := range conf.InternalMp.MPZoneNames {
 			mpzd, ok := Zones.Get(zone)
-			if !ok || mpzd == nil || !mpzd.Ready {
+			if !ok || mpzd == nil || !mpzd.Ready && !mpzd.Withheld() {
 				continue
 			}
 			apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
@@ -279,7 +291,7 @@ func (conf *Config) reportSignerStart(ctx context.Context) {
 		}
 	}
 	report()
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.NewTicker(signerReportEvery)
 	defer ticker.Stop()
 	for {
 		select {

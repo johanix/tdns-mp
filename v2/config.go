@@ -385,4 +385,8 @@ type InternalMpConf struct {
 	// transfers: the agent's transfer confirmations for a server role's
 	// step (server_role.go).
 	transfers transferBook
+	// signerAdds is what the agent has looked up for a signer's addition, and
+	// signerRoles the signer's side of it (plan S18b).
+	signerAdds  signerAddBook
+	signerRoles signerRoleBook
 }

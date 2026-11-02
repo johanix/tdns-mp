@@ -29,16 +29,26 @@ import (
 // with its RRSIGs. A test stands in for it.
 var servingLookup = imrServingLookup
 
-// imrServingLookup finds ns's addresses through the IMR and asks them,
-// without recursion and with DNSSEC OK, for the zone's SOA.
+// servingKeysLookup is servingLookup for the zone's DNSKEY RRset.
+var servingKeysLookup = func(ctx context.Context, zone, ns string) (*core.RRset, error) {
+	return imrServingQuery(ctx, zone, ns, dns.TypeDNSKEY)
+}
+
+// imrServingLookup asks ns for the zone's SOA (imrServingQuery).
 func imrServingLookup(ctx context.Context, zone, ns string) (*core.RRset, error) {
+	return imrServingQuery(ctx, zone, ns, dns.TypeSOA)
+}
+
+// imrServingQuery finds ns's addresses through the IMR and asks them,
+// without recursion and with DNSSEC OK, for the zone's RRset of qtype.
+func imrServingQuery(ctx context.Context, zone, ns string, qtype uint16) (*core.RRset, error) {
 	imr := tdns.Globals.ImrEngine
 	if imr == nil {
 		return nil, errors.New("the IMR is not running")
 	}
 	var addrs []string
-	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		resp, err := imr.ImrQuery(ctx, ns, qtype, dns.ClassINET, nil)
+	for _, addrType := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		resp, err := imr.ImrQuery(ctx, ns, addrType, dns.ClassINET, nil)
 		if err != nil || resp == nil || resp.RRset == nil {
 			continue
 		}
@@ -56,15 +66,46 @@ func imrServingLookup(ctx context.Context, zone, ns string) (*core.RRset, error)
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("the IMR finds no address for %s", ns)
 	}
-	rrset, rcode, _, err := imr.AuthDNSQuery(ctx, zone, dns.TypeSOA, addrs, log.Default(), false)
+	rrset, rcode, _, err := imr.AuthDNSQuery(ctx, zone, qtype, addrs, log.Default(), false)
 	switch {
 	case err != nil:
 		return nil, err
 	case rrset == nil:
 		// NODATA, NXDOMAIN or a referral: no error, and no RRset
-		return nil, fmt.Errorf("no SOA in the answer (%s)", dns.RcodeToString[rcode])
+		return nil, fmt.Errorf("no %s in the answer (%s)", dns.TypeToString[qtype], dns.RcodeToString[rcode])
 	}
 	return rrset, nil
+}
+
+// highestServedSerial is the highest SOA serial the nameservers serve for the zone
+// (RFC 1982): what they served, for an upstream's step (other_keys.go). Each
+// must answer.
+func highestServedSerial(ctx context.Context, zone string, nameservers []string) (uint32, error) {
+	if len(nameservers) == 0 {
+		return 0, errors.New("multi-provider.local.nameservers names none")
+	}
+	var highest uint32
+	for i, ns := range nameservers {
+		rrset, err := servingLookup(ctx, zone, ns)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", ns, err)
+		}
+		var soa *dns.SOA
+		if rrset != nil {
+			for _, rr := range rrset.RRs {
+				if s, ok := rr.(*dns.SOA); ok {
+					soa = s
+				}
+			}
+		}
+		if soa == nil {
+			return 0, fmt.Errorf("%s serves no SOA for the zone", ns)
+		}
+		if i == 0 || CompareSerial(soa.Serial, highest) > 0 {
+			highest = soa.Serial
+		}
+	}
+	return highest, nil
 }
 
 // servingChainOK: each of the nameservers serves the zone at an SOA serial
@@ -136,4 +177,58 @@ func signedByOneOf(rrset *core.RRset, keys []dns.RR, now time.Time) error {
 		}
 	}
 	return nil
+}
+
+// servesOwnSignatures: each of the nameservers serves the zone from this
+// provider's own signer (design 5.1, plan S18b): a DNSKEY RRset with an RRSIG by
+// one of its KSKs among keys, in its validity period, that verifies, at an SOA
+// serial above the one they served (above; 0 says none is known). The RRset is
+// the zone's whole, and other signatures on it are not this check's.
+func servesOwnSignatures(ctx context.Context, zone string, nameservers []string, keys []dns.RR, above uint32, now time.Time) error {
+	if len(nameservers) == 0 {
+		return errors.New("multi-provider.local.nameservers names none")
+	}
+	var ksks []*dns.DNSKEY
+	for _, k := range keys {
+		if dk, ok := k.(*dns.DNSKEY); ok && dk.Flags&dns.SEP != 0 {
+			ksks = append(ksks, dk)
+		}
+	}
+	if len(ksks) == 0 {
+		return errors.New("no KSK of this provider's is known here")
+	}
+	if above != 0 {
+		for _, ns := range nameservers {
+			served, err := highestServedSerial(ctx, zone, []string{ns})
+			if err != nil {
+				return err
+			}
+			if CompareSerial(served, above) <= 0 {
+				return fmt.Errorf("%s serves serial %d, not above %d", ns, served, above)
+			}
+		}
+	}
+	for _, ns := range nameservers {
+		rrset, err := servingKeysLookup(ctx, zone, ns)
+		if err != nil {
+			return fmt.Errorf("%s: %w", ns, err)
+		}
+		if rrset == nil || !signedByOwnKSK(rrset, ksks, now) {
+			return fmt.Errorf("%s serves no DNSKEY RRset signed by this provider's KSK", ns)
+		}
+	}
+	return nil
+}
+
+// signedByOwnKSK: rrset has an RRSIG by one of ksks, valid at now, that verifies.
+func signedByOwnKSK(rrset *core.RRset, ksks []*dns.DNSKEY, now time.Time) bool {
+	return slices.ContainsFunc(rrset.RRSIGs, func(rr dns.RR) bool {
+		sig, ok := rr.(*dns.RRSIG)
+		if !ok || !sig.ValidityPeriod(now) {
+			return false
+		}
+		return slices.ContainsFunc(ksks, func(dk *dns.DNSKEY) bool {
+			return dk.KeyTag() == sig.KeyTag && dk.Algorithm == sig.Algorithm && sig.Verify(dk, rrset.RRs) == nil
+		})
+	})
 }

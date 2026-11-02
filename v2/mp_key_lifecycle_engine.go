@@ -45,7 +45,7 @@ func (w *signerWire) mpzd(zone string) *MPZoneData {
 
 // OtherSigners: the providers other than this one whose confirmations a
 // key's distribution expects (KeyConfirmers, plan S11). Nothing when this
-// provider does not sign the zone: the machine must not run there
+// provider has no keys in the zone: the machine must not run there
 // (IsSigner), and never waits on itself.
 func (w *signerWire) OtherSigners(zone string) []string {
 	self, r, signs := w.sets(zone)
@@ -56,7 +56,7 @@ func (w *signerWire) OtherSigners(zone string) []string {
 }
 
 // DSSigners: the providers other than this one whose KSKs have a DS
-// (plan S11); nothing when this provider does not sign the zone.
+// (plan S11); nothing when this provider has no keys in the zone.
 func (w *signerWire) DSSigners(zone string) []string {
 	self, r, signs := w.sets(zone)
 	if !signs {
@@ -65,14 +65,16 @@ func (w *signerWire) DSSigners(zone string) []string {
 	return othersIn(r.DSSigners, self)
 }
 
-// IsSigner reports whether this provider signs the zone (Signing).
+// IsSigner reports whether this provider's keys are published in the zone
+// (KeySigners, plan S18b): the machine runs from its DNSKEY step on, well
+// before it enters Signing and serves its own signatures.
 func (w *signerWire) IsSigner(zone string) bool {
 	_, _, signs := w.sets(zone)
 	return signs
 }
 
 // sets are this provider's label in the zone, the zone's sets
-// (signerSets), and whether this provider signs it.
+// (signerSets), and whether its keys are published there.
 func (w *signerWire) sets(zone string) (self string, r Roles, signs bool) {
 	mpzd := w.mpzd(zone)
 	if mpzd == nil {
@@ -83,7 +85,7 @@ func (w *signerWire) sets(zone string) (self string, r Roles, signs bool) {
 		mp = &MultiProviderConf{}
 	}
 	self, r = signerSets(mpzd, mp)
-	return self, r, self != "" && has(r.Signing, self)
+	return self, r, self != "" && has(r.KeySigners, self)
 }
 
 // signerSets are the sets the signer acts by for the zone, and this
@@ -149,10 +151,10 @@ func othersIn(set []Provider, self string) []string {
 
 // otherSignerLabels: the providers other than this one whose DNSKEYs are
 // published and whose foreign rows are kept (KeySigners, plan S11), and
-// whether this provider signs the zone at all.
+// whether this provider's keys are published there too.
 func otherSignerLabels(mpzd *MPZoneData, mp *MultiProviderConf) ([]string, bool) {
 	self, r := signerSets(mpzd, mp)
-	if self == "" || !has(r.Signing, self) {
+	if self == "" || !has(r.KeySigners, self) {
 		return nil, false
 	}
 	return othersIn(r.KeySigners, self), true
@@ -588,7 +590,8 @@ func (e *KeyLifecycleEngine) TakeConfiguredZones() {
 	}
 	// A configured zone is taken once it is loaded with its DNSSEC policy
 	// bound, which happens after the engines start (the policy binds on
-	// the zone's first load); until then it waits, and Run asks again on
+	// the zone's first load, or for one that does not sign yet at its DNSKEY
+	// step: signerRoleTurn); until then it waits, and Run asks again on
 	// every tick. A zone that is not multi-provider is refused, said once,
 	// and looked at again on every tick: the option may come to it later.
 	e.mu.Lock()

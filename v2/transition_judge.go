@@ -70,12 +70,12 @@ const (
 )
 
 // builtKinds are the kinds whose steps are built (decision 29), and
-// carriedKinds the kinds whose step can be carried out at all: a signer role
-// needs P5, an upstream its agent's check of the new transfer (S21). Each
-// step that builds a kind adds it here; the judge reads no config.
+// carriedKinds the kinds whose step can be carried out at all: an upstream
+// needs its agent's check of the new transfer (S21). Each step that builds a
+// kind adds it here; the judge reads no config.
 const (
-	builtKinds   changeKind = kindServerRole
-	carriedKinds changeKind = kindRolesTaken | kindServerRole | kindNSmgmt | kindParentSync | kindPubkey
+	builtKinds   changeKind = kindServerRole | kindSignerRole
+	carriedKinds changeKind = kindRolesTaken | kindServerRole | kindSignerRole | kindNSmgmt | kindParentSync | kindPubkey
 )
 
 // judgeTransition judges the change from the instructions at one serial to
@@ -165,6 +165,12 @@ func judge(from, to *Instructions, built, carried changeKind) []Refusal {
 	}
 	for _, f := range from.Records {
 		if t, ok := to.record(f.Label); ok && core.EqualNames(f.Identity, t.Identity) && f.Upstream != t.Upstream {
+			// a server that moves into signers= and names no upstream any more
+			// serves its own signer's copy, which the move's steps bring about
+			// (design 5.3): no upstream step of its own
+			if t.Upstream == "" && !slices.Contains(fSigners, f.Label) && slices.Contains(tSigners, f.Label) {
+				continue
+			}
 			kind(kindUpstream, "changes the upstream of %s", f.Identity)
 		}
 	}
