@@ -4,7 +4,9 @@
 package tdnsmp
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"slices"
 	"strings"
 	"testing"
@@ -484,6 +486,180 @@ func TestTheDNSKEYsAreNotWithdrawnBeforeTheDSTTLPassed(t *testing.T) {
 	r.next()
 	if !slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
 		t.Errorf("its DNSKEY did not go after the TTLs: %v, steps %v", r.withdrawals, r.taken())
+	}
+}
+
+// toDSStep brings a removal to step 3 with the parent still serving n's DS.
+func (r *leaverRig) toDSStep() {
+	r.t.Helper()
+	r.dsThere = func(seen parentSeen) bool { return !slices.Contains(seen.ds, 2) }
+	r.next()
+	r.next()
+	r.toNSGone()
+	r.next()
+	r.next()
+}
+
+// A held key has the TTL it was generated with, 3600; what resolvers keep is
+// what the zone's servers serve (the demo's rig run: an hour against 5 min).
+func TestTheDSStepWaitsForTheDNSKEYTTLServedNotTheOneHeld(t *testing.T) {
+	r := newSweepRig(t, "servedttl.remove.example.")
+	r.holds(roleN, dns.TypeDNSKEY)
+	r.toDSStep()
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTTL: 120, dnskeyTTL: 300})
+	r.next()
+	r.aged(4 * time.Minute) // over the DS TTL, under the DNSKEY TTL
+	r.next()
+	if slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Fatalf("its DNSKEY went within the served TTL: %v", r.withdrawals)
+	}
+	r.aged(2 * time.Minute)
+	r.next()
+	if !slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Errorf("its DNSKEY did not go after the served TTL: %v, steps %v", r.withdrawals, r.taken())
+	}
+}
+
+func TestWithNoServerTellingTheTTLTheDSStepGoesByTheOneHeld(t *testing.T) {
+	logs := captureLog(t)
+	r := newSweepRig(t, "heldttl.remove.example.")
+	r.holds(roleN, dns.TypeDNSKEY)
+	r.toDSStep()
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTTL: 120})
+	r.next()
+	r.aged(30 * time.Minute)
+	r.next()
+	if slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Fatalf("its DNSKEY went within the held TTL: %v", r.withdrawals)
+	}
+	if !strings.Contains(logs.String(), "no server told the zone's DNSKEY TTL") {
+		t.Errorf("no log line: %s", logs)
+	}
+	r.aged(31 * time.Minute)
+	r.next()
+	if !slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Errorf("its DNSKEY did not go after the held TTL: %v, steps %v", r.withdrawals, r.taken())
+	}
+}
+
+// A server the parent has dropped may have served the larger TTL.
+func TestTheLargestDNSKEYTTLSeenStands(t *testing.T) {
+	r := newLeaverRig(t, "largestttl.remove.example.", "agent")
+	for _, ttl := range []uint32{600, 300, 0} {
+		r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, dnskeyTTL: ttl})
+		if seen, ok := r.conf.parentNow(r.zone); !ok || seen.dnskeyTTL != 600 {
+			t.Errorf("after a look that saw %d: %d, known %v", ttl, seen.dnskeyTTL, ok)
+		}
+	}
+}
+
+// dnskeyServer serves the zone's DNSKEY RRset over TCP only, with the TTL; with
+// none it answers empty. The address it listens on is what it returns.
+func dnskeyServer(t *testing.T, zone string, ttl uint32) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &dns.Server{Listener: ln, Net: "tcp", Handler: dns.HandlerFunc(func(w dns.ResponseWriter, q *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(q)
+		if ttl != 0 {
+			rr, err := dns.NewRR(fmt.Sprintf("%s %d IN DNSKEY 257 3 15 11qYAYKxCrfVS/7TyWQHOg7nGkjJ3KgP9h8fZqXsIY8=", zone, ttl))
+			if err != nil {
+				t.Error(err)
+			}
+			m.Answer = append(m.Answer, rr)
+		}
+		if err := w.WriteMsg(m); err != nil {
+			t.Error(err)
+		}
+	})}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	return ln.Addr().String()
+}
+
+func TestTheServedDNSKEYTTLIsTheLargestAnyServerGives(t *testing.T) {
+	const zone = "served.remove.example."
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := closed.Addr().String()
+	closed.Close()
+	if got := servedDnskeyTTL(zone, []string{gone, dnskeyServer(t, zone, 120), dnskeyServer(t, zone, 300), dnskeyServer(t, zone, 0)}); got != 300 {
+		t.Errorf("the servers' largest: %d, want 300", got)
+	}
+	if got := servedDnskeyTTL(zone, []string{gone, dnskeyServer(t, zone, 0)}); got != 0 {
+		t.Errorf("no server tells: %d, want 0", got)
+	}
+}
+
+// syncDue makes the step's next ask of the sync due at once.
+func (r *leaverRig) syncDue() {
+	rb := &r.conf.InternalMp.reconciles
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	rb.zone(canonicalName(r.zone)).syncAt = time.Time{}
+}
+
+// nextAsks is the syncs a turn asks, with one due.
+func (r *leaverRig) nextAsks() int {
+	r.t.Helper()
+	r.syncDue()
+	before := len(r.syncs)
+	r.next()
+	return len(r.syncs) - before
+}
+
+// The sync is asked again while the parent still serves what leaves, and not
+// through the TTL wait after it has dropped it: then there is nothing to sync.
+func TestAStepStopsAskingTheSyncOnceTheParentHasDroppedItsRecords(t *testing.T) {
+	r := newLeaverRig(t, "syncstops.remove.example.", "agent")
+	r.dsThere = func(seen parentSeen) bool { return !slices.Contains(seen.ds, 2) }
+	r.next()
+	r.next()
+	r.next()
+	if n := r.nextAsks(); n != 1 {
+		t.Errorf("with the parent naming n: %d syncs asked, want 1", n)
+	}
+	r.served(parentSeen{ns: []string{"ns1.a.example.", "ns1.b.example."}, nsTTL: 600, ds: r.parent.ds, dsTTL: 900})
+	if n := r.nextAsks(); n != 0 {
+		t.Errorf("through the NS TTL: %d syncs asked, want 0", n)
+	}
+	r.aged(2 * time.Hour)
+	r.next()
+	r.next()
+	r.next()
+	if n := r.nextAsks(); n != 1 {
+		t.Errorf("with the parent serving n's DS: %d syncs asked, want 1; steps %v", n, r.taken())
+	}
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTTL: 900})
+	if n := r.nextAsks(); n != 0 {
+		t.Errorf("through the DS TTL: %d syncs asked, want 0", n)
+	}
+}
+
+// A leader that has not read the parent yet still asks: the look may fail where
+// the sync works. Step 1 waits for the look, so this is a new leader's, at a
+// step taken before it led.
+func TestTheSyncIsAskedWhileWhatTheParentServesIsNotKnown(t *testing.T) {
+	r := newLeaverRig(t, "syncunknown.remove.example.", "agent")
+	r.next()
+	r.next()
+	rb := &r.conf.InternalMp.reconciles
+	rb.mu.Lock()
+	rb.zone(canonicalName(r.zone)).parent = parentSeen{}
+	rb.zone(canonicalName(r.zone)).lookedAt = time.Time{}
+	rb.mu.Unlock()
+	r.parentErr = errors.New("no answer")
+	r.next()
+	if len(r.syncs) == 0 {
+		t.Error("no sync asked")
+	}
+	if line := r.conf.thawLine(r.zone); !strings.Contains(line, "until the parent's NS RRset is known") {
+		t.Errorf("the status: %q", line)
 	}
 }
 
