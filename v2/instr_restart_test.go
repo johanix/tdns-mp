@@ -319,9 +319,10 @@ func TestAMemberWhoseCopyGivesItNoRoleTakesTheSerialItFetches(t *testing.T) {
 	for _, c := range []struct {
 		zone    string
 		records []string
+		listed  bool
 	}{
-		{"norecord.restart.example.", freezeRecords[1:]},
-		{"norole.restart.example.", freezeRecords},
+		{"norecord.restart.example.", freezeRecords[1:], false},
+		{"norole.restart.example.", freezeRecords, true},
 	} {
 		t.Run(c.zone, func(t *testing.T) {
 			r := newThawRig(t, c.zone, "")
@@ -335,9 +336,13 @@ func TestAMemberWhoseCopyGivesItNoRoleTakesTheSerialItFetches(t *testing.T) {
 			tm.getZone = func(name string) (*tdns.ZoneData, bool) { return tdns.Zones.Get(name) }
 			ar.S.Set(AgentId(roleB), NewAgent(AgentId(roleB)))
 			ar.S.Set(AgentId(roleN), NewAgent(AgentId(roleN)))
+			if ok, _ := tm.IsPeerAuthorized(roleB, r.zone); ok && !c.listed {
+				t.Fatal("a member is let in with no request out, and its copy has no record for this agent: the test shows nothing")
+			}
 
 			// The member answers, and its answer meets what admits a message
-			// at this agent, in the transport's order.
+			// at this agent, in the transport's order. Another answer is
+			// refused only from a sender let in for this answer alone.
 			refused := make(chan string, 2)
 			prev := sendConfigRfi
 			t.Cleanup(func() { sendConfigRfi = prev })
@@ -349,7 +354,7 @@ func TestAMemberWhoseCopyGivesItNoRoleTakesTheSerialItFetches(t *testing.T) {
 					refused <- why
 				case !tm.keyHandOverOnly(configMessage(t, sender, ZoneName(r.zone), "instructions")):
 					refused <- "let in, and not let through"
-				case tm.keyHandOverOnly(configMessage(t, sender, ZoneName(r.zone), "upstream")):
+				case tm.admittedForKeyOnly(sender, r.zone) && tm.keyHandOverOnly(configMessage(t, sender, ZoneName(r.zone), "upstream")):
 					refused <- "another answer of the sender's is let through"
 				case !tm.keyAsks.confirmExpected(sender, msg.DistributionID):
 					refused <- "the request's delivery confirmation is not let in"
