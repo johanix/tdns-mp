@@ -250,9 +250,8 @@ func (ar *AgentRegistry) CleanupZoneRelationships(zonename ZoneName) {
 // localRemovedFromZone is the OnLocalRemoved hook. The groups are recomputed
 // right after it on the same path (ApplyHsyncDiff calls OnHsync3Changed
 // there too, tdns-mp #183), under the recompute's own lock. Without the
-// recompute the zone stayed in the group this agent was in, and a give-back
-// in the same refresh found this agent still leading the zone and ran the
-// leader's setup here.
+// recompute the zone stayed in the group this agent was in, and this agent
+// still led the zone.
 func (ar *AgentRegistry) localRemovedFromZone(zone ZoneName) {
 	ar.CleanupZoneRelationships(zone)
 }

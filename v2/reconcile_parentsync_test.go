@@ -253,6 +253,33 @@ func TestParentsyncToOwnerWithdrawsCDSAndCSYNCFirst(t *testing.T) {
 	}
 }
 
+// A copy the leader cannot read says nothing of the CDS and CSYNC: step 1 keeps
+// a TTL to wait for, as the owner writes to the parent after that wait. A copy
+// it can read, serving neither, has none.
+func TestACDSTTLThatCannotBeReadIsNotTakenAsNone(t *testing.T) {
+	r := newParentSyncRig(t, "ttl.parentsync.example.", "agent", "owner")
+	r.agree()
+	r.thawNow()
+	if got := r.conf.servedCDSTTL(r.zone); got != 0 {
+		t.Errorf("a loaded copy with no CDS or CSYNC: TTL %d", got)
+	}
+	if got := r.conf.servedCDSTTL("notloaded.parentsync.example."); got != cdsTTLUnknown {
+		t.Errorf("a zone not loaded: TTL %d, want %d", got, cdsTTLUnknown)
+	}
+	r.mpzd.Ready = false
+	r.toStep(psStep1)
+	r.mpzd.Ready = true
+	r.conf.handOverToParts(r.zone)
+	if got := r.sets().CDSTTL; got != cdsTTLUnknown {
+		t.Fatalf("a copy not ready at step 1: TTL %d, want %d", got, cdsTTLUnknown)
+	}
+	r.next()
+	r.next()
+	if st, _ := r.step(); st.What != psStep2 {
+		t.Errorf("step 2 did not wait for the TTL it could not read: %q", st.What)
+	}
+}
+
 // Step 1 is a DS step: it waits for an emergency rollover.
 func TestTheCDSStepWaitsForAnEmergencyRollover(t *testing.T) {
 	logs := captureLog(t)
@@ -668,6 +695,45 @@ func TestTheTakeUpsKEYIsOfferedOnlyAfterEveryMemberConfirmedIt(t *testing.T) {
 	r.conf.InternalMp.keyPolls.goroutines.Wait()
 	if len(r.polls) != 0 {
 		t.Error("the key was offered twice")
+	}
+}
+
+// A key that cannot be read when its offer is due holds the step, which offers
+// it once it can: it does not end with the key offered to nobody.
+func TestATakeUpsKeyThatCannotBeOfferedHoldsTheStep(t *testing.T) {
+	r := takeUpRig(t, "unoffered.takeup.example.")
+	zone := string(r.zone)
+	r.lem.SetOnZoneJoined(func(z ZoneName) error {
+		return r.conf.leaderKeySetup(r.ctx, z, false)
+	})
+	r.conf.takeUpWait(zone)
+	waitUntil(t, "the KEY is not booked", func() bool {
+		_, ok := r.conf.InternalMp.MPTransport.rollKEYs.state(r.zone)
+		return ok
+	})
+	r.conf.InternalMp.parentSyncs.wait()
+	r.confirmAll(t)
+	setState := func(state string) {
+		t.Helper()
+		if err := sig0KeyChange(r.mpzd.KeyDB, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "setstate",
+			Keyname: dns.Fqdn(zone), Keyid: r.old.keyid, State: state}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setState(tdns.Sig0StateRetired)
+	if w := r.conf.takeUpWait(zone); w != "the zone's key to be offered" {
+		t.Fatalf("no key to offer, and the step waits for %q", w)
+	}
+	r.conf.InternalMp.keyPolls.goroutines.Wait()
+	if len(r.polls) != 0 {
+		t.Fatal("something was offered with no key held")
+	}
+	setState(tdns.Sig0StateActive)
+	if w := r.conf.takeUpWait(zone); w != "" {
+		t.Fatalf("the key is back, and the step waits for %q", w)
+	}
+	if keyid := r.polled(t, "once the key can be read"); keyid != r.old.keyid {
+		t.Errorf("the poll is of key %d, want %d", keyid, r.old.keyid)
 	}
 }
 

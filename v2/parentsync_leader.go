@@ -113,9 +113,10 @@ func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error
 }
 
 // inKeySetup runs f with the zone's key-setup lock held. Every setup of a
-// zone's SIG(0) key takes it: the leader's after an election, a renewal or a
-// sync given back (SetOnLeaderElected), the one at an arrival
-// (SetOnZoneJoined), and a key round's decision (decideZoneKey). For one zone
+// zone's SIG(0) key takes it: the leader's after an election or a renewal
+// (SetOnLeaderElected), the one at an arrival and at the step that takes the
+// parent sync up (SetOnZoneJoined), and a key round's decision
+// (decideZoneKey). For one zone
 // they run one at a time, so that two of them never both find no key and
 // each make one, and a setup's clean-up of a key it made for a lead that
 // moved never takes a key another setup has just adopted. It is taken once

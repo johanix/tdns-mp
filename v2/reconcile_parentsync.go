@@ -69,6 +69,11 @@ const (
 // and a restart forgets what it published.
 const takeUpAskEvery = time.Minute
 
+// cdsTTLUnknown, in seconds, stands for the TTL of a CDS and CSYNC that the
+// leader cannot read from its copy, a zone not loaded here yet. The owner writes
+// to the parent after this wait, so it does not read as no TTL at all.
+const cdsTTLUnknown = 3600
+
 // servesNoCDS: a part handed r serves no CDS of its own.
 func servesNoCDS(r Roles) bool {
 	return r.CDSWithdrawn || r.ParentSync != core.HsyncParentSyncAgent
@@ -140,15 +145,16 @@ func parentSyncTakeUpSteps(p planView) []plannedStep {
 }
 
 // servedCDSTTL is the largest TTL of the CDS, CDNSKEY and CSYNC this agent's
-// copy of the zone serves; 0 with none.
+// copy of the zone serves; 0 with none. A copy that cannot be read says nothing
+// of them: cdsTTLUnknown.
 func (conf *Config) servedCDSTTL(zone string) uint32 {
 	mpzd, ok := Zones.Get(zone)
 	if !ok || mpzd == nil || mpzd.ZoneData == nil {
-		return 0
+		return cdsTTLUnknown
 	}
 	apex, err := mpzd.GetOwner(mpzd.ZoneName)
 	if err != nil || apex == nil {
-		return 0
+		return cdsTTLUnknown
 	}
 	var ttl uint32
 	for _, rrtype := range []uint16{dns.TypeCDS, dns.TypeCDNSKEY, dns.TypeCSYNC} {
@@ -433,29 +439,30 @@ func (conf *Config) takeUpWait(zone string) string {
 	if len(awaited) > 0 {
 		return "the zone's KEY confirmed by " + strings.Join(awaited, ", ")
 	}
-	conf.offerTakenUpKey(zone)
+	if !conf.offerTakenUpKey(zone) {
+		return "the zone's key to be offered"
+	}
 	return ""
 }
 
 // offerTakenUpKey offers the zone's key to the parent, once: every recipient
-// has confirmed its KEY.
-func (conf *Config) offerTakenUpKey(zone string) {
-	first := false
-	conf.InternalMp.parentSyncs.with(zone, func(z *parentSyncZone) {
-		first = !z.keyConfirmed
-		z.keyConfirmed = true
-	})
-	if !first {
-		return
+// has confirmed its KEY. It reports whether the key has been offered; a key
+// that cannot be read now is not, and the step asks again. The mark comes
+// before the poll, which asks for it (takeUpKEYUnconfirmed).
+func (conf *Config) offerTakenUpKey(zone string) bool {
+	if !conf.takeUpKEYUnconfirmed(zone) {
+		return true
 	}
 	z := ZoneName(zone)
 	kdb := conf.zoneKeyDB(z)
 	if kdb == nil {
-		return
+		return false
 	}
 	zk, err := readZoneKey(kdb, z)
 	if err != nil || zk.held == nil || zk.held.key == nil {
-		return
+		return false
 	}
+	conf.InternalMp.parentSyncs.with(zone, func(z *parentSyncZone) { z.keyConfirmed = true })
 	conf.launchKeyPoll(conf.turnCtx(), nil, z, zone, zk.held.keyid, zk.held.key.Algorithm)
+	return true
 }

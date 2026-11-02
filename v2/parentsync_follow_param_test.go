@@ -197,10 +197,10 @@ func TestOnlyAnAgentFollowsHSYNCPARAM(t *testing.T) {
 
 const logDroppedOwner = `msg="the held NOTIFY is dropped: the zone's owner syncs its delegation"`
 
-// The owner takes the sync over while a NOTIFY is held: the refresh that
-// brings the HSYNCPARAM drops the NOTIFY and ends the chain, and nothing
-// asks again, a lease renewal included. When HSYNCPARAM gives the sync back
-// to the agents, the next change is synced.
+// The owner takes the sync over while a NOTIFY is held: the step that gives
+// it to the owner drops the NOTIFY and ends the chain, and nothing asks
+// again, a lease renewal included. When a step gives the sync back to the
+// agents, the next change is synced.
 func TestTheOwnerTakingTheSyncOverDropsAHeldNotify(t *testing.T) {
 	asMPAgent(t)
 	const wait = time.Second
@@ -214,7 +214,7 @@ func TestTheOwnerTakingTheSyncOverDropsAHeldNotify(t *testing.T) {
 
 	parentSyncStep(t, r.conf, r.mpzd, parentSyncOwner) // before the wait is over
 	if l := r.log.String(); !strings.Contains(l, logDroppedOwner+" zone="+z+" notify=CSYNC") {
-		t.Errorf("the refresh did not drop the held NOTIFY:\n%s", l)
+		t.Errorf("the step did not drop the held NOTIFY:\n%s", l)
 	}
 	if n := r.chains(); n != 0 {
 		t.Errorf("%d chains left after the held NOTIFY was dropped", n)
@@ -359,7 +359,7 @@ func TestTheOwnerTakingTheSyncOverStopsAnUpdateBeingRetried(t *testing.T) {
 
 	parentSyncStep(t, r.conf, r.mpzd, parentSyncOwner) // before the retry's wait is over
 	if l := r.log.String(); !strings.Contains(l, logSyncStopped+" zone="+z+" syncs=1") {
-		t.Errorf("the refresh did not stop the sync under way:\n%s", l)
+		t.Errorf("the step did not stop the sync under way:\n%s", l)
 	}
 	for deadline := time.Now().Add(10 * time.Second); underWay() > 0; time.Sleep(10 * time.Millisecond) {
 		if time.Now().After(deadline) {

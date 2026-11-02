@@ -631,7 +631,7 @@ func (r *keyPollRig) chain() {
 // name this agent. For a zone that does not, it is off, at the first load
 // too, and what this agent had scheduled for the zone's parent ends: the
 // chain and the key poll. A zone that names this agent again turns it on,
-// and that is no give-back: no leader's setup runs.
+// and that is no take-up: no leader's setup runs.
 func TestParentSyncFollowsHSYNCPARAMOnlyForAZoneThatListsThisAgent(t *testing.T) {
 	asMPAgent(t)
 	r := newKeyPollRig(t, "listed.parentsync.example.")
@@ -654,7 +654,7 @@ func TestParentSyncFollowsHSYNCPARAMOnlyForAZoneThatListsThisAgent(t *testing.T)
 	}
 	select {
 	case <-setups:
-		t.Error("a zone that names this agent anew ran the leader's setup as a give-back")
+		t.Error("a zone that names this agent anew ran the leader's setup as a take-up")
 	case <-time.After(200 * time.Millisecond):
 	}
 
@@ -681,7 +681,7 @@ func TestParentSyncFollowsHSYNCPARAMOnlyForAZoneThatListsThisAgent(t *testing.T)
 	}
 	select {
 	case <-setups:
-		t.Error("a zone that names this agent again ran the leader's setup as a give-back")
+		t.Error("a zone that names this agent again ran the leader's setup as a take-up")
 	case <-time.After(200 * time.Millisecond):
 	}
 }

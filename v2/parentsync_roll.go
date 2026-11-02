@@ -769,7 +769,9 @@ func activateRolledKey(kdb *tdns.KeyDB, zone ZoneName, newKeyid, oldKeyid uint16
 // owner): when the zone publishes the new KEY the new key is made active and
 // the old one retired, as an import would; otherwise a new key made here
 // alone is deleted, and one the parent took is retired: the parent trusts
-// it until this agent, leading, deletes it there (sweepRetiredKeys).
+// it until this agent, leading, deletes it there (sweepRetiredKeys). The hand-over
+// of the parent sync to the owner ends a roll at the leader itself the same way,
+// and then deletes what the parent still trusts (deleteAgentsKey); why says which.
 func (conf *Config) endRollHere(kdb *tdns.KeyDB, r *sig0Roll, why string) {
 	zone := r.zone
 	var err error

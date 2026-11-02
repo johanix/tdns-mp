@@ -33,8 +33,9 @@ import (
 // again: the next pass finds this agent no leader.
 //
 // held reports that the zone was frozen when the poll was to start (plan
-// S6), and no rollover under way waited for the key (S14): it did not run,
-// and is not booked as run.
+// S6), and no rollover under way waited for the key (S14), or that the step
+// taking the parent sync up waits for its KEY's confirmations (S20): it did
+// not run, and is not booked as run.
 func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone ZoneName, keyName string, keyid uint16, algorithm uint8) (held bool) {
 	for {
 		runCtx, done := conf.delegationSyncRun(ctx, string(zone))
