@@ -431,7 +431,7 @@ func (conf *Config) startSig0Roll(ctx context.Context, zone ZoneName, alg uint8)
 		case len(zk.active) != 1:
 			return fmt.Errorf("zone %s has %d active SIG(0) keys", zone, len(zk.active))
 		case zk.held.parentState != edns0.KeyStateTrusted:
-			return fmt.Errorf("the parent does not trust the SIG(0) key %d of zone %s yet", zk.held.keyid, zone)
+			return fmt.Errorf("this agent has no record that the parent trusts the SIG(0) key %d of zone %s", zk.held.keyid, zone)
 		}
 		resp, err := sig0KeyMgmtRetried(kdb, tdns.KeystorePost{
 			Command:    "sig0-mgmt",
