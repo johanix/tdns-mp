@@ -327,6 +327,7 @@ func TestAnUpdateGoesAtOnceAndTheCsyncIsDistributedBesideIt(t *testing.T) {
 		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
 		t.Fatalf("the zone's SIG(0) key: %v", err)
 	}
+	trustActiveKeys(t, r.mpzd.KeyDB, z)
 	r.parent.holdsNS("ns1."+z, r.oldNS)
 	r.ask()
 	// no provider confirms anything, and the UPDATE is answered
