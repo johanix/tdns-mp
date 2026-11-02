@@ -813,9 +813,11 @@ func chunkQueryEndpoints(role string, mp *MultiProviderConf, chunkMode string) (
 }
 
 // reachableListenAddress says whether another host can reach a listen
-// address, given with or without its port. A wildcard or loopback address is
-// none: a receiver asked to fetch from it would ask itself. Nor is an address
-// with a zone: a zone means something on this host only.
+// address, given with or without its port. Asked at a wildcard or loopback
+// address, a receiver would ask itself. A link-local address stops at its
+// link, a zone means something on this host only, and no one fetches from a
+// multicast or broadcast address. A private address counts: it reaches the
+// hosts on its network. A host name is taken as given, except localhost.
 func reachableListenAddress(listen string) bool {
 	host := listen
 	if h, _, err := net.SplitHostPort(listen); err == nil {
@@ -828,8 +830,7 @@ func reachableListenAddress(listen string) bool {
 	if err != nil {
 		return true // a host name
 	}
-	addr = addr.Unmap()
-	return addr.Zone() == "" && !addr.IsUnspecified() && !addr.IsLoopback()
+	return addr.Zone() == "" && addr.Unmap().IsGlobalUnicast()
 }
 
 // buildAgentChunkQueryEndpoint builds the CHUNK query endpoint (host:port) from agent DNS config:
