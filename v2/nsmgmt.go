@@ -107,10 +107,11 @@ func (mpzd *MPZoneData) dropStoredNS() (int, error) {
 
 // --- The agent ---
 
-// nsmgmtChanged: the zone's nsmgmt is another than the last look saw. The
+// nsDropOwed: the zone's nsmgmt is another than the last look saw, or a change
+// an earlier look saw has not had the agent's data dropped yet (dropNS). The
 // first look is no change: a start reads this agent's data from its combiner
 // by the role held then.
-func (mpzd *MPZoneData) nsmgmtChanged() bool {
+func (mpzd *MPZoneData) nsDropOwed() bool {
 	if mpzd.instructions() == nil {
 		return false
 	}
@@ -118,22 +119,24 @@ func (mpzd *MPZoneData) nsmgmtChanged() bool {
 	mpzd.Lock()
 	defer mpzd.Unlock()
 	mpzd.EnsureMP()
-	changed := mpzd.MP.nsmgmtKnown && mpzd.MP.nsmgmtSeen != now
+	if mpzd.MP.nsmgmtKnown && mpzd.MP.nsmgmtSeen != now {
+		mpzd.MP.nsDropIsOwed = true
+	}
 	mpzd.MP.nsmgmtSeen, mpzd.MP.nsmgmtKnown = now, true
-	return changed
+	return mpzd.MP.nsDropIsOwed
 }
 
 // followNSmgmt asks the data engine, which owns the agent's data, to drop
 // the zone's NS when its nsmgmt changed, either way, or when the owner has
-// it and the data holds some. A full queue is no loss: the engine's round
-// drops what the data holds under nsmgmt=owner (nsmgmtRound).
+// it and the data holds some. A request a full queue does not take stays
+// owed: the engine's round drops the zone's NS (nsmgmtRound).
 func (conf *Config) followNSmgmt(mpzd *MPZoneData) {
 	zdr, msgQs := conf.InternalMp.ZoneDataRepo, conf.InternalMp.MsgQs
 	if zdr == nil || msgQs == nil || msgQs.SynchedDataCmd == nil {
 		return
 	}
 	zone := ZoneName(mpzd.ZoneName)
-	if !mpzd.nsmgmtChanged() && !(nsLeftToOwner(zone) && zdr.holdsNS(zone)) {
+	if !mpzd.nsDropOwed() && !(nsLeftToOwner(zone) && zdr.holdsNS(zone)) {
 		return
 	}
 	select {
@@ -163,8 +166,16 @@ func (zdr *ZoneDataRepo) holdsNS(zone ZoneName) bool {
 // dropNS drops the NS of every origin from the agent's data for the zone,
 // with its tracking: its own, which it contributes no more, and the others',
 // which a resync would otherwise hand its combiner again. Called from the
-// data engine, which owns the tracking.
+// data engine, which owns the tracking. What a change owed is settled first,
+// so that a change after it is owed again.
 func (zdr *ZoneDataRepo) dropNS(zone ZoneName) {
+	if mpzd, ok := Zones.Get(string(zone)); ok && mpzd != nil {
+		mpzd.Lock()
+		if mpzd.MP != nil {
+			mpzd.MP.nsDropIsOwed = false
+		}
+		mpzd.Unlock()
+	}
 	repo, ok := zdr.Get(zone)
 	if !ok {
 		return
@@ -188,9 +199,10 @@ func (zdr *ZoneDataRepo) dropNS(zone ZoneName) {
 	}
 }
 
-// nsmgmtRound is the data engine's look at every multi-provider zone: what
-// the data holds under nsmgmt=owner goes, a message that arrived late or a
-// request the full queue did not take, and the owner's NS RRset is reported.
+// nsmgmtRound is the data engine's look at every multi-provider zone: a drop a
+// change of nsmgmt owes, a request the full queue did not take; what the data
+// holds under nsmgmt=owner, a message that arrived late; and the report of the
+// owner's NS RRset.
 func (conf *Config) nsmgmtRound(zdr *ZoneDataRepo, now time.Time) {
 	for _, name := range Zones.Keys() {
 		mpzd, ok := Zones.Get(name)
@@ -198,7 +210,7 @@ func (conf *Config) nsmgmtRound(zdr *ZoneDataRepo, now time.Time) {
 			continue
 		}
 		zone := ZoneName(mpzd.ZoneName)
-		if nsLeftToOwner(zone) && zdr.holdsNS(zone) {
+		if mpzd.nsDropOwed() || nsLeftToOwner(zone) && zdr.holdsNS(zone) {
 			zdr.dropNS(zone)
 		}
 		conf.logOwnersNS(mpzd, now)

@@ -702,7 +702,7 @@ func requestAudit(ar *AgentRegistry, agent *Agent, zone string, msgQs *MsgQs) (*
 // hydration or the inventory put there. And a set the engine changed, or
 // whose change its combiner had not confirmed, before the request was sent
 // at sentAt (mayApplyOwnRead): the answer can predate it.
-func applyEditsToSDE(zd *tdns.ZoneData, agentRecords map[string]map[string][]string, zdr *ZoneDataRepo, self AgentId, sentAt time.Time) {
+func applyEditsToSDE(zd *tdns.ZoneData, agentRecords map[string]map[string][]string, acting *ActingHandover, zdr *ZoneDataRepo, self AgentId, sentAt time.Time) {
 	if zdr == nil {
 		zd.Logger.Printf("applyEditsToSDE: zone %s: no ZoneDataRepo available", zd.ZoneName)
 		return
@@ -710,8 +710,11 @@ func applyEditsToSDE(zd *tdns.ZoneData, agentRecords map[string]map[string][]str
 
 	zone := ZoneName(zd.ZoneName)
 	// under nsmgmt=owner what the combiner stores of NS is no agent's data
-	// (plan S19): a late contribution there does not come back here
-	nsOwner := nsLeftToOwner(zone)
+	// (plan S19): a late contribution there does not come back here. By this
+	// agent's sets, and by those the combiner held when it answered: an answer
+	// made under the owner can arrive after the step to the agents, and the
+	// combiner drops what it stores only when it takes that step
+	nsOwner := nsLeftToOwner(zone) || acting != nil && len(acting.Records) > 0 && acting.Sets.NSmgmt != core.HsyncNSmgmtAGENT
 	leave := func(agent AgentId, rrtype uint16) bool {
 		if rrtype == dns.TypeDNSKEY && isAmong([]string{string(self)}, agent) {
 			return true

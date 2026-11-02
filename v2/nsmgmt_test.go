@@ -413,6 +413,71 @@ func TestAnOwnReadUnderNsmgmtOwnerTakesNoNS(t *testing.T) {
 	}
 }
 
+// An own read's answer is judged by the role the combiner held when it
+// answered, too: one made under the owner can arrive after this agent has
+// taken the step to the agents, and what it names of NS is what the combiner
+// drops when it takes that step. A combiner handed nothing says nothing of it.
+func TestAnOwnReadMadeUnderTheOwnerTakesNoNSAfterTheStepToTheAgents(t *testing.T) {
+	r := newOwnRig(t, "lateanswer.nsmgmt.example.")
+	ns := string(r.zone) + " 3600 IN NS ns.a.role.example."
+	s := newStore(t)
+	withStore(t, s)
+	activeAs(t, s, string(r.zone), jAt(t, 8, `servers="a,b" nsmgmt="agent"`, freezeRecords...))
+	records := actRecords(`serial="8" servers="alpha,beta" nsmgmt="agent"`)
+	answer := func(h *ActingHandover) {
+		t.Helper()
+		applyOwnRead(r.mpzd, &ownReadAnswer{zone: r.zone, asked: true, sentAt: time.Now(),
+			resp: &EditsResponseMsg{Message: editsLoaded, AgentRecords: r.records(roleA, ns), Acting: h}}, r.zdr, roleA)
+	}
+	answer(stepHandover(t, string(r.zone), 0, core.HsyncNSmgmtOWNER, records...))
+	if got := r.holds(roleA, dns.TypeNS); len(got) != 0 {
+		t.Errorf("an answer made under the owner brought %v", got)
+	}
+	answer(stepHandover(t, string(r.zone), 1, core.HsyncNSmgmtAGENT, records...))
+	if got := r.holds(roleA, dns.TypeNS); len(got) != 1 {
+		t.Errorf("an answer made under the agents brought %v", got)
+	}
+	r2 := newOwnRig(t, "nothinghanded.nsmgmt.example.")
+	activeAs(t, s, string(r2.zone), jAt(t, 8, `servers="a,b" nsmgmt="agent"`, freezeRecords...))
+	applyOwnRead(r2.mpzd, &ownReadAnswer{zone: r2.zone, asked: true, sentAt: time.Now(),
+		resp: &EditsResponseMsg{Message: editsLoaded, AgentRecords: r2.records(roleA, string(r2.zone)+" 3600 IN NS ns.a.role.example.")}}, r2.zdr, roleA)
+	if got := r2.holds(roleA, dns.TypeNS); len(got) != 1 {
+		t.Errorf("a combiner handed nothing: the answer brought %v", got)
+	}
+}
+
+// A change to the agents whose request the full queue did not take stays owed:
+// the engine's round drops what the data holds, once, though nsmgmt=agent asks
+// for no drop by itself.
+func TestAFullQueueLosesNoDropOfAChangeToTheAgents(t *testing.T) {
+	r := newReconcileRig(t, "fullqueue.nsmgmt.example.", roleA)
+	mpzd, _ := Zones.Get(r.zone)
+	zdr, err := NewZoneDataRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.conf.InternalMp.ZoneDataRepo = zdr
+	r.conf.InternalMp.MsgQs = &MsgQs{SynchedDataCmd: make(chan *SynchedDataCmd)} // nobody takes a request
+	zone := ZoneName(r.zone)
+	activeAs(t, r.store, r.zone, jAt(t, 43, `servers="a,b" nsmgmt="owner"`, freezeRecords...))
+	r.conf.followNSmgmt(mpzd)
+	activeAs(t, r.store, r.zone, jAt(t, 44, `servers="a,b" nsmgmt="agent"`, freezeRecords...))
+	zdr.AddConfirmedRR(zone, roleB, mustRR(t, r.zone+" 3600 IN NS ns.late.example."))
+	r.conf.followNSmgmt(mpzd)
+	if !zdr.holdsNS(zone) {
+		t.Fatal("the request went to no engine, and the NS went")
+	}
+	r.conf.nsmgmtRound(zdr, time.Now())
+	if zdr.holdsNS(zone) {
+		t.Error("the round left what the change owed")
+	}
+	zdr.AddConfirmedRR(zone, roleB, mustRR(t, r.zone+" 3600 IN NS ns.alpha.example."))
+	r.conf.nsmgmtRound(zdr, time.Now())
+	if !zdr.holdsNS(zone) {
+		t.Error("under nsmgmt=agent, with the drop done, the round dropped a contribution")
+	}
+}
+
 // The engine's round drops what the agent's data holds under nsmgmt=owner, a
 // late message or a request a full queue did not take, and nothing under
 // nsmgmt=agent.
