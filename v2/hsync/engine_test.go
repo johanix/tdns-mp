@@ -62,15 +62,12 @@ func (z *mockZone) Participants() []PeerID {
 	return testParticipantsFromHSYNC3(z.rrs, z.hsyncparam)
 }
 
-// testParticipantsFromHSYNC3 mirrors tdnsmp.zoneParticipants for mock RRs.
-// Test-only — production derives participants via mpZoneView.Participants().
-func testParticipantsFromHSYNC3(hsyncRRs []dns.RR, hsyncparam *core.HSYNCPARAM) []PeerID {
-	if len(hsyncRRs) == 0 {
-		return nil
-	}
-
-	labelToIdentity := map[string]string{}
-	var allIdentities []PeerID
+// testParticipantsFromHSYNC3 mirrors tdnsmp.zoneParticipants' members for
+// mock RRs: every ON record, with a role or without, whatever HSYNCPARAM
+// lists (plan S15). Test-only: production derives the members via
+// mpZoneView.Participants().
+func testParticipantsFromHSYNC3(hsyncRRs []dns.RR, _ *core.HSYNCPARAM) []PeerID {
+	var members []PeerID
 	for _, rr := range hsyncRRs {
 		prr, ok := rr.(*dns.PrivateRR)
 		if !ok {
@@ -80,40 +77,12 @@ func testParticipantsFromHSYNC3(hsyncRRs []dns.RR, hsyncparam *core.HSYNCPARAM) 
 		if !ok || h3.State == 0 { // skip OFF (decommissioned)
 			continue
 		}
-		labelToIdentity[strings.TrimSuffix(h3.Label, ".")] = h3.Identity
-		allIdentities = append(allIdentities, PeerID(h3.Identity))
+		members = append(members, PeerID(h3.Identity))
 	}
-
-	if hsyncparam == nil {
-		slices.SortFunc(allIdentities, func(a, b PeerID) int {
-			return strings.Compare(string(a), string(b))
-		})
-		return slices.Compact(allIdentities)
-	}
-
-	seen := map[PeerID]bool{}
-	var participants []PeerID
-	addRole := func(labels []string) {
-		for _, label := range labels {
-			id, ok := labelToIdentity[strings.TrimSuffix(label, ".")]
-			if !ok {
-				continue
-			}
-			pid := PeerID(id)
-			if !seen[pid] {
-				participants = append(participants, pid)
-				seen[pid] = true
-			}
-		}
-	}
-	addRole(hsyncparam.GetServers())
-	addRole(hsyncparam.GetSigners())
-	addRole(hsyncparam.GetAuditors())
-
-	slices.SortFunc(participants, func(a, b PeerID) int {
+	slices.SortFunc(members, func(a, b PeerID) int {
 		return strings.Compare(string(a), string(b))
 	})
-	return participants
+	return slices.Compact(members)
 }
 
 type mapZoneLookup map[string]*mockZone
@@ -204,7 +173,8 @@ func TestMockZoneParticipants_offExcluded(t *testing.T) {
 	}
 }
 
-func TestMockZoneParticipants_hsyncparamRoles(t *testing.T) {
+// Every ON record is a member, with a role or without (plan S15).
+func TestMockZoneParticipants_everyONRecordIsAMember(t *testing.T) {
 	fox := mustHSYNC3RR(t, "fox", "fox.example.")
 	hare := mustHSYNC3RR(t, "hare", "hare.example.")
 	param := &core.HSYNCPARAM{
@@ -214,7 +184,7 @@ func TestMockZoneParticipants_hsyncparamRoles(t *testing.T) {
 	}
 
 	got := testParticipantsFromHSYNC3([]dns.RR{fox, hare}, param)
-	if len(got) != 1 || got[0] != PeerID("fox.example.") {
-		t.Fatalf("got %v, want [fox.example.]", got)
+	if !slices.Equal(got, []PeerID{"fox.example.", "hare.example."}) {
+		t.Fatalf("got %v, want [fox.example. hare.example.]", got)
 	}
 }

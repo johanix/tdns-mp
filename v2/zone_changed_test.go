@@ -66,10 +66,12 @@ func (r *zoneChangeRig) holdsZoneElection(zone ZoneName) bool {
 	return ok
 }
 
-// A zone of two providers whose owner takes the role of one: the zone is in
-// no group now (#149), and the remaining provider leads it at once, with no
-// restart. zoneChanged runs after the recompute: run before it, it would
-// still find the zone's old group, and start nothing.
+// A zone of two providers whose owner takes the role and the record of one:
+// the zone is in no group now (#149), and the remaining provider leads it at
+// once, with no restart. zoneChanged runs after the recompute: run before
+// it, it would still find the zone's old group, and start nothing. (With the
+// record kept, the other provider is a member with no role, and the zone is
+// in a group of its own, plan S15.)
 func TestAZoneReducedToOneVotingMemberGetsALeaderWithNoRestart(t *testing.T) {
 	zd := providerZone(t, "reduced.onevoter.example.", arrivalA, arrivalB)
 	r := newZoneChangeRig(t, zd)
@@ -82,9 +84,9 @@ func TestAZoneReducedToOneVotingMemberGetsALeaderWithNoRestart(t *testing.T) {
 		t.Fatal("precondition: this agent leads a zone of two providers with no election")
 	}
 
-	refreshWith(t, zd, zoneEdit{listed: []string{arrivalA, arrivalB}, serving: []string{arrivalA}, parentsync: true})
+	refreshWith(t, zd, zoneEdit{listed: []string{arrivalA}, serving: []string{arrivalA}, parentsync: true})
 	if pg := r.pgm.GetGroupForZone(zone); pg != nil {
-		t.Fatalf("the zone reduced to one voting member is in group %+v", pg)
+		t.Fatalf("the zone reduced to one provider is in group %+v", pg)
 	}
 	r.electedWithin(t, zone, "the zone reduced to one voting member")
 	if !r.lem.IsLeader(zone) {

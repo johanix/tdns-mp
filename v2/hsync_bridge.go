@@ -210,9 +210,9 @@ func (v mpZoneView) IsMultiProvider() bool {
 	return v.MPZoneData.Options[tdns.OptMultiProvider]
 }
 func (v mpZoneView) Participants() []hsync.PeerID {
-	participants, _ := participantsOf(instructionsFor(ZoneName(v.MPZoneData.ZoneName)))
-	out := make([]hsync.PeerID, 0, len(participants))
-	for _, id := range participants {
+	members, _, _ := zoneParticipants(v.MPZoneData.ZoneName, instructionsFor(ZoneName(v.MPZoneData.ZoneName)))
+	out := make([]hsync.PeerID, 0, len(members))
+	for _, id := range members {
 		out = append(out, hsync.PeerID(id))
 	}
 	return out
