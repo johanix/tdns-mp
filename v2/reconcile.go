@@ -404,6 +404,14 @@ func noRoleMember(zone ZoneName, id AgentId) bool {
 	return ok
 }
 
+// memberWithTimeOut: a distribution waits for id only up to
+// multi-provider.transitions.no-role-timeout: a member with no role, or an
+// auditor (design 4, amended 2026-11-02): one that cannot be reached holds
+// nothing for good.
+func memberWithTimeOut(zone ZoneName, id AgentId) bool {
+	return zoneStanding(instructionsFor(zone), string(id)) == standingAuditor || noRoleMember(zone, id)
+}
+
 // --- The parts ---
 
 // holdsStep: this agent holds the zone's step at the active serial sd: both

@@ -2710,7 +2710,8 @@ func (tm *MPTransportBridge) noRoleWait() time.Duration {
 }
 
 // dnskeyNoRoleTimedOut ends the wait of a DNSKEY distribution for the
-// members with no role that have not answered by the time-out (design 4):
+// members with no role and the auditors that have not answered by the
+// time-out (design 4):
 // each counts as answered, neither applying the keys nor rejecting them,
 // with one log line, and the distribution goes on without it. A voting
 // member is waited for as before, and looked at again after another
@@ -2745,7 +2746,7 @@ func (tm *MPTransportBridge) dnskeyNoRoleLookLocked(distID string) (string, bool
 		return distID, false
 	}
 	for _, a := range slices.Sorted(maps.Keys(prop.ExpectedAgents)) {
-		if prop.ExpectedAgents[a] || !noRoleMember(prop.Zone, a) || stillConfirmsKeys(prop.Zone, a) {
+		if prop.ExpectedAgents[a] || !memberWithTimeOut(prop.Zone, a) || stillConfirmsKeys(prop.Zone, a) {
 			continue
 		}
 		lgTransport.Warn("a member with no role did not confirm in time, going on", "zone", prop.Zone, "member", a, "what", "the DNSKEY distribution "+distID)
