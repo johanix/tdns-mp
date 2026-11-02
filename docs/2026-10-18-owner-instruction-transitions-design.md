@@ -1,6 +1,6 @@
 # Changes to the zone owner's instructions: numbered by the owner, agreed before they act, carried out by the leader
 
-**Status:** PROPOSAL, 2026-10-18, revision 6 (2026-10-26); rule 2 amended 2026-10-28.
+**Status:** PROPOSAL, 2026-10-18, revision 6 (2026-10-26); rule 2 amended 2026-10-28; 3.2 amended 2026-11-02.
 
 This document describes how tdns-mp handles a change of a zone owner's instructions: every edit of the zone's HSYNC3 or HSYNCPARAM records. It describes the design as it is meant to stand. The difference from today's code and the steps of the work are in the plan beside it, `2026-10-18-owner-instruction-transitions-plan.md`, whose section 6 lists the decisions this design rests on and the parts of the membership design it changes.
 
@@ -90,7 +90,7 @@ An agent enters this phase for a zone when it holds a serial above its active on
 The leader of the zone's group under N thaws the zone to a serial V when all of these hold:
 
 - every voting member under N, the leader included, tells, first hand and in its latest message, active N and that it agrees on V, by serial and digest, and has its signer's hold confirmed; a refusal of a serial above V holds nothing; the leader agrees on V too;
-- no key rollover is under way in the zone, by every voting member's latest telling, an emergency rollover included;
+- no key rollover is under way in the zone, by every voting member's latest telling, an emergency rollover included. *Amended 2026-11-02 (the project owner's ruling: "addition of a standby key is not the start of a key rollover"):* a key on its way to being a standby key, and not a rollover's, holds no thaw; a key whose distribution to the other signers is still in flight does;
 - the leader has nothing in flight towards the parent: no sync, no retry of an UPDATE, no offer of the zone's key, no NOTIFY waiting. Entering agreeing, the leader stops starting such work except for a rollover under way, and cancels what it has left at the thaw's turn through a context of its own for the zone. The same drain is made at every hand-over of the zone's leadership.
 
 **A leaving voting member** is one that votes under N and not under V. One whose telling has not met the first two conditions for a configured time, counted from when this agent first holds V, heard or not, is excused from these conditions, its rollover flag included:
