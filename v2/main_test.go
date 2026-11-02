@@ -21,6 +21,6 @@ import (
 // runs, and not written after that (logTo, #276).
 func TestMain(m *testing.M) {
 	tdns.DefaultPublishCadence = 0
-	lg, lgAgent, lgEngine, lgSigner = swappable(lg), swappable(lgAgent), swappable(lgEngine), swappable(lgSigner)
+	lg, lgAgent, lgEngine, lgSigner, lgCombiner = swappable(lg), swappable(lgAgent), swappable(lgEngine), swappable(lgSigner), swappable(lgCombiner)
 	os.Exit(m.Run())
 }
