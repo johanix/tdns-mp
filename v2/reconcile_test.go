@@ -220,10 +220,9 @@ func TestDoneWaitsForEveryVotingMembersParts(t *testing.T) {
 // with them. The last step hands V's lists.
 func TestUntilTheFirstStepThePartsKeepTheSetsTheyHold(t *testing.T) {
 	r := newReconcileRig(t, "keep.reconcile.example.", roleA)
-	// v gives n a server role, a kind of change the judge refuses until its
-	// steps exist (S18a), here as if they did, and leaves the NS to the owner
+	// v gives n a server role (S18a) and leaves the NS to the owner (S19)
 	r.v = jAt(t, 42, `servers="a,b,n" nsmgmt="owner" suffix="v"`, freezeRecords...)
-	r.holdUnjudged(r.v, time.Now())
+	r.agree()
 	r.hear(roleN, tells(r.n, r.v), true) // a voting member under V: its payload encryption
 	r.thawNow()
 	h := r.wanted()
@@ -240,17 +239,26 @@ func TestUntilTheFirstStepThePartsKeepTheSetsTheyHold(t *testing.T) {
 	r.holdsToo(roleB)
 	r.holdsToo(roleN)
 	r.turn(time.Now())
-	// the change of nsmgmt has its step (S19), which hands nothing else
-	h = r.wanted()
-	if got := providerLabels(h.Sets.Servers); h.Step != 1 || !slices.Equal(got, []string{"a", "b"}) || h.Sets.NSmgmt != rolesFor(r.v, r.v, 0).NSmgmt {
-		t.Errorf("nsmgmt's step's sets: step %d, servers %v, nsmgmt %d", h.Step, got, h.Sets.NSmgmt)
+	// additions first, then role changes (design 5): n's server role, whose
+	// step changes no set, so that n's nameservers serve the zone before the
+	// owner's NS RRset, which may name them, is served
+	if h = r.wanted(); h.Step != 1 || !slices.Equal(providerLabels(h.Sets.Servers), []string{"a", "b"}) || h.Sets.NSmgmt != rolesFor(r.n, r.n, 0).NSmgmt {
+		t.Fatalf("the server role's step: step %d, servers %v, nsmgmt %d", h.Step, providerLabels(h.Sets.Servers), h.Sets.NSmgmt)
+	}
+	r.partsTake()
+	r.holdsToo(roleB)
+	r.holdsToo(roleN)
+	r.turn(time.Now())
+	// the change of nsmgmt's step, which hands nothing else
+	if h = r.wanted(); h.Step != 2 || !slices.Equal(providerLabels(h.Sets.Servers), []string{"a", "b"}) || h.Sets.NSmgmt != rolesFor(r.v, r.v, 0).NSmgmt {
+		t.Fatalf("nsmgmt's step: step %d, servers %v, nsmgmt %d", h.Step, providerLabels(h.Sets.Servers), h.Sets.NSmgmt)
 	}
 	r.partsTake()
 	r.holdsToo(roleB)
 	r.holdsToo(roleN)
 	r.turn(time.Now())
 	h = r.wanted()
-	if got := providerLabels(h.Sets.Servers); h.Step != 2 || !slices.Equal(got, []string{"a", "b", "n"}) || h.Sets.NSmgmt != rolesFor(r.v, r.v, 0).NSmgmt {
+	if got := providerLabels(h.Sets.Servers); h.Step != 3 || !slices.Equal(got, []string{"a", "b", "n"}) || h.Sets.NSmgmt != rolesFor(r.v, r.v, 0).NSmgmt {
 		t.Errorf("the last step's sets: step %d, servers %v, nsmgmt %d", h.Step, got, h.Sets.NSmgmt)
 	}
 }

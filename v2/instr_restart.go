@@ -124,7 +124,7 @@ func (conf *Config) restartView(zone string, now time.Time) (restartView, bool) 
 	}
 	local := dns.Fqdn(mp.Identity)
 	v := restartView{zone: name}
-	_, voters := participantsOf(newest.Reading)
+	_, voters, _ := participantsOf(newest.Reading)
 	var t *stampTable
 	if tm := conf.InternalMp.MPTransport; tm != nil {
 		t = tm.stamps
@@ -228,7 +228,7 @@ func (conf *Config) leadersWord(v *restartView, newest *heldSerial, told map[str
 			}
 			continue
 		}
-		if !conf.leadsUnder(reading, id) {
+		if !conf.leadsUnder(v.zone, reading, id) {
 			continue
 		}
 		v.take, v.by, v.from, v.reconciling = &sd, id, knownFromLeader, st.Reconciling
@@ -243,15 +243,15 @@ func (conf *Config) leadersWord(v *restartView, newest *heldSerial, told map[str
 // leadsUnder: id leads the zone's group under the instructions in, by the
 // election records this agent holds; a zone with one voting member is led
 // by it.
-func (conf *Config) leadsUnder(in *Instructions, id string) bool {
-	_, voters := participantsOf(in)
+func (conf *Config) leadsUnder(zone string, in *Instructions, id string) bool {
+	_, voters, _ := participantsOf(in)
 	if !isAmong(voters, AgentId(id)) {
 		return false
 	}
 	if len(voters) == 1 {
 		return true
 	}
-	m := zoneMakeUp(in)
+	m := zoneMakeUp(zone, in)
 	leader, ok := conf.groupLeader(ComputeGroupHash(m.voting, m.auditors, m.noRole))
 	return ok && core.EqualNames(leader, id)
 }
@@ -342,9 +342,11 @@ func (conf *Config) knowActive(zone string) {
 
 // know makes sd the zone's active serial (Know), and runs what follows: the
 // catch-up's answer time runs again (activeChanged); the readers moved from
-// the newest serial to the active one (onActiveChanged),
-// the sets handed to the parts (onSetsChanged), and the zone's turn asked
-// again, for a newer serial it may agree on now. The end of the freeze
+// the newest serial to the active one (onActiveChanged), the sets handed to
+// the parts (onSetsChanged), a provider put in a list it was not in asked
+// for its state (enteredLists), every voting member this agent never asked
+// is asked (askUnasked), and the zone's turn asked again, for a newer serial
+// it may agree on now. The end of the freeze
 // releases what was owed (onFreeze), and S8 what was kept.
 func (conf *Config) know(zone string, sd SerialDigest, th *Thaw, reconciling bool, by, from string) {
 	s := conf.InternalMp.Instructions
@@ -356,10 +358,16 @@ func (conf *Config) know(zone string, sd SerialDigest, th *Thaw, reconciling boo
 	lg.Info("the zone's active instructions are known", "zone", zone, "serial", sd.Serial, "from", from, "by", by)
 	conf.InternalMp.CatchUp.activeChanged(ZoneName(zone))
 	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil && mpzd.Ready {
-		if after := s.activeReading(zone); !sameInstructions(before, after) {
+		after := s.activeReading(zone)
+		if !sameInstructions(before, after) {
 			mpzd.onActiveChanged(conf.InternalMp.MPTransport, before, after)
 		}
 		conf.onSetsChanged(mpzd, true)
+		// a provider put in a list it was not in (plan S18a)
+		conf.enteredLists(zone, before, after)
+		// with the provider data the known serial gives: a member never
+		// asked is asked now (plan S15)
+		conf.InternalMp.CatchUp.askUnasked(ZoneName(zone))
 	}
 	conf.askThaw(zone)
 }

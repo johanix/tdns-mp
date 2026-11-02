@@ -189,7 +189,9 @@ func TestAZoneThatMovesToAGroupThisAgentLeadsKeepsItsSync(t *testing.T) {
 
 // A zone reduced to one provider lands in no group (#149): the remaining
 // provider leads it next, so what it scheduled for the parent stays, and it
-// does not say it dropped anything.
+// does not say it dropped anything. The owner takes the other provider's
+// role and its record: with the record kept it is a member with no role,
+// and the zone is in a group of its own (plan S15).
 func TestTheSoleRemainingVoterKeepsItsSync(t *testing.T) {
 	zd := providerZone(t, "sole.remaining.example.", arrivalA, arrivalB)
 	r := newZoneChangeRig(t, zd)
@@ -207,7 +209,7 @@ func TestTheSoleRemainingVoterKeepsItsSync(t *testing.T) {
 	c.of(string(zone))
 	c.mu.Unlock()
 
-	refreshWith(t, zd, zoneEdit{listed: []string{arrivalA, arrivalB}, serving: []string{arrivalA}, parentsync: true})
+	refreshWith(t, zd, zoneEdit{listed: []string{arrivalA}, serving: []string{arrivalA}, parentsync: true})
 	r.electedWithin(t, zone, "the zone reduced to one provider")
 	c.mu.Lock()
 	_, kept := c.zones[string(zone)]

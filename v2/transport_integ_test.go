@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -152,15 +153,16 @@ func TestTransportBoundary_HelloRejection(t *testing.T) {
 		}
 	})
 
-	// A2 security regression: an identity present in HSYNC3 but holding no
-	// HSYNCPARAM role is not a participant and must be refused at HELLO, while a
-	// role-holding member is accepted.
-	t.Run("RoleLessRejected", func(t *testing.T) {
+	// From the switch (plan S15) an identity present in HSYNC3 and holding no
+	// HSYNCPARAM role is a member: its HELLO is accepted and routed, as a
+	// role-holding member's is. Its SYNC, its election message and its
+	// request for the zone's SIG(0) key are refused: it does not vote.
+	t.Run("MemberWithNoRole", func(t *testing.T) {
 		env := newIntegEnv(t, nil)
 		const zone = "rolegated.example."
 		bob := dns.Fqdn(env.Bob.Identity)       // local (receiver)
 		alice := dns.Fqdn(env.Alice.Identity)   // member
-		const roleless = "auden.agent.example." // in HSYNC3, no role
+		const roleless = "auden.agent.example." // in HSYNC3, no role: a member
 
 		zd := seedZoneWithHSYNC3(t, zone, bob, alice, roleless)
 		addHSYNCPARAMServers(t, zd, shortLabel(bob), shortLabel(alice))
@@ -183,21 +185,38 @@ func TestTransportBoundary_HelloRejection(t *testing.T) {
 			t.Errorf("hello report: %+v", *r)
 		}
 
-		// Role-less HELLO refused.
+		// The member with no role: its HELLO accepted, and routed.
 		resp = postAPIHello(t, env.Bob, roleless, zone)
-		if !resp.Error {
-			t.Errorf("role-less identity must be refused at HELLO, got %+v", resp)
+		if resp.Error || resp.Status != "ok" {
+			t.Fatalf("the HELLO of a member with no role should be accepted, got %+v", resp)
 		}
-		if _, ok := recvWithin(env.Bob.MsgQs.Hello, 100*time.Millisecond); ok {
-			t.Error("a refused hello must not reach MsgQs.Hello")
+		if r, ok := recvWithin(env.Bob.MsgQs.Hello, integTestTimeout); !ok || string(r.Identity) != roleless {
+			t.Errorf("the accepted hello of a member with no role did not reach MsgQs.Hello: %v", r)
+		}
+		if parts := ParticipantsForZone(ZoneName(zone)); !slices.ContainsFunc(parts, func(p AgentId) bool { return dns.Fqdn(string(p)) == roleless }) {
+			t.Errorf("the members %v do not have the member with no role %q", parts, roleless)
 		}
 
-		// ParticipantsForZone excludes the role-less identity.
-		parts := ParticipantsForZone(ZoneName(zone))
-		for _, p := range parts {
-			if dns.Fqdn(string(p)) == dns.Fqdn(roleless) {
-				t.Errorf("participants must exclude role-less identity %q; got %v", roleless, parts)
-			}
+		// Its SYNC is refused at the router: it is no voting member.
+		ctx := buildSyncMessageContext(t, env.Bob.Bridge, roleless, bob, zone, nextDistributionID(),
+			map[string][]string{zone: {zone + " 3600 IN TXT \"norole\""}})
+		ctx.Peer = env.Bob.Bridge.PeerRegistry.GetOrCreate(roleless)
+		err := env.Bob.Bridge.Router.Route(ctx, transport.MessageType("sync"))
+		body, _ := ctx.Data["response"].([]byte)
+		if err == nil && !strings.Contains(string(body), "not a voting member") {
+			t.Errorf("the SYNC of a member with no role was not refused: err %v, response %s", err, body)
+		}
+		if _, leaked := recvMsgWithin(t, env.Bob.MsgQs.Msg, 100*time.Millisecond); leaked {
+			t.Error("the refused SYNC of a member with no role reached MsgQs.Msg")
+		}
+		// Its election message counts for nothing, and it may not hold the
+		// zone's SIG(0) key, so its request for the key is refused
+		// (HandleMessage, HandleGroupMessage and MsgHandler ask these).
+		if votesInZone(ZoneName(zone), AgentId(roleless)) {
+			t.Error("a member with no role votes in the zone")
+		}
+		if mayHoldZoneSig0Key(ZoneName(zone), AgentId(roleless)) {
+			t.Error("a member with no role may hold the zone's SIG(0) key")
 		}
 	})
 }

@@ -71,6 +71,9 @@ type stepRunner struct {
 	// servers serve the zone from its upstream. It is asked at every
 	// agent, of every step; nil for nothing more.
 	holds func(conf *Config, zone string, step InstrStep) bool
+	// status is what the step held waits for, as this agent's status shows
+	// it (S18a: a newcomer's nameservers); "" for nothing. Nil for none.
+	status func(conf *Config, zone string, step heldStep, now time.Time) string
 }
 
 // stepRunners are the runners registered, in the order they were.
@@ -530,7 +533,7 @@ func (conf *Config) reconcileTurn(zone string, now time.Time) {
 // under V is never a provider that V takes away (design 3.2).
 func (conf *Config) leadsReconciliation(in reconcileInputs) bool {
 	local := AgentId(dns.Fqdn(conf.MpConfig().Identity))
-	_, voters := participantsOf(in.active.Reading)
+	_, voters, _ := participantsOf(in.active.Reading)
 	switch {
 	case !isAmong(voters, local):
 		return false
@@ -561,10 +564,10 @@ type reconcileView struct {
 func (conf *Config) reconcileView(in reconcileInputs, told map[string]toldStamp, now time.Time) reconcileView {
 	mp := conf.MpConfig()
 	local := dns.Fqdn(mp.Identity)
-	_, votersV := participantsOf(in.active.Reading)
+	_, votersV, _ := participantsOf(in.active.Reading)
 	var votersN []string
 	if in.from != nil {
-		_, votersN = participantsOf(in.from.Reading)
+		_, votersN, _ = participantsOf(in.from.Reading)
 	}
 	var v reconcileView
 
@@ -771,7 +774,7 @@ func (conf *Config) emergencyRollover(in reconcileInputs, told map[string]toldSt
 	if t != nil && t.rollover != nil && t.rollover(in.name) && !pausedOn(t.waitsOnOf(in.name), in.active.Reading, excused) {
 		return local
 	}
-	_, votersV := participantsOf(in.active.Reading)
+	_, votersV, _ := participantsOf(in.active.Reading)
 	for _, id := range votersV {
 		if core.EqualNames(id, local) {
 			continue
@@ -848,7 +851,7 @@ func (conf *Config) followStep(in reconcileInputs, told map[string]toldStamp) {
 	if st, ok := told[canonicalName(string(leader))]; leader != "" && ok {
 		src = append(src, st)
 	} else if !votesIn(in.active.Reading, AgentId(conf.MpConfig().Identity)) {
-		_, voters := participantsOf(in.active.Reading)
+		_, voters, _ := participantsOf(in.active.Reading)
 		for _, id := range voters {
 			if st, ok := told[canonicalName(id)]; ok {
 				src = append(src, st)
@@ -936,6 +939,14 @@ func (conf *Config) reconcileLine(zone string, now time.Time) string {
 		}
 	} else if in.hasStep && in.step.Number == 0 {
 		line += ", waiting for the leader's first step"
+	}
+	for _, r := range stepRunners {
+		if r.status == nil || !in.hasStep {
+			continue
+		}
+		if s := r.status(conf, in.name, in.step, now); s != "" {
+			line += ", " + s
+		}
 	}
 	if in.newer != nil {
 		line += fmt.Sprintf("; %d held, waits until done", in.newer.Serial)
