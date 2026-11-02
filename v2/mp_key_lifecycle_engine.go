@@ -318,6 +318,16 @@ func (w *signerWire) KeysChanged(zone string) {
 	}
 }
 
+// MarksChanged: a fresh inventory to every agent. No key row changed, so
+// tdns's DS engine has nothing to follow.
+func (w *signerWire) MarksChanged(zone string) {
+	push := w.push
+	if push == nil {
+		push = pushKeystateInventory
+	}
+	go push(w.conf, dns.Fqdn(zone), nil)
+}
+
 func (w *signerWire) Report(zone string, keyid uint16, what string) {
 	lgSigner.Warn("key lifecycle: needs the operator", "zone", zone, "keyid", keyid, "what", what)
 	if mpzd := w.mpzd(zone); mpzd != nil {

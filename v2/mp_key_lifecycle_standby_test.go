@@ -245,6 +245,124 @@ func TestAnInventoryLeavesTheMachinesHoldAlone(t *testing.T) {
 	}
 }
 
+// A signer joins a zone at rest: no key is in published, so no key row is due
+// to be written. Each served key's record is done on the last answer, which
+// writes no row either, and the last inventory said a rollover: the leader's
+// next step and the thaw wait on that with no time-out. It must be said again.
+func TestAJoinersLastAnswerIsToldWithNoKeyRowWritten(t *testing.T) {
+	joined := func(t *testing.T, name string) (*driverRig, []uint16) {
+		t.Helper()
+		r := newDriverRig(t, name, driverPolicy, "p2")
+		ksk, zsk := bootstrapKSK(t, r)
+		r.wire.signers = []string{"p2", "p3"}
+		if err := r.l.SignersChanged(); err != nil {
+			t.Fatal(err)
+		}
+		if !r.underWay() {
+			t.Fatalf("the served keys' records wait for the joiner: not counted")
+		}
+		return r, []uint16{ksk, zsk}
+	}
+	confirm := func(t *testing.T, r *driverRig, k uint16, provider, status string) {
+		t.Helper()
+		if _, _, err := r.l.Confirm(k, provider, status, "because"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("applied, nothing due after", func(t *testing.T) {
+		r, keys := joined(t, "applied.joined.owned.example.")
+		changes := r.wire.changes
+		for i, k := range keys {
+			if r.wire.marks != 0 {
+				t.Errorf("told with %d of the %d records left", len(keys)-i, len(keys))
+			}
+			confirm(t, r, k, "p2", "applied")
+			confirm(t, r, k, "p3", "applied")
+		}
+		if r.wire.marks != 1 {
+			t.Errorf("the last answer told %d times, want once", r.wire.marks)
+		}
+		if r.underWay() {
+			t.Errorf("every record done: a rollover under way")
+		}
+		r.clock.Advance(driverPolicy.PropagationDelay + r.wire.ttl + time.Second)
+		r.tick("at rest")
+		if r.wire.changes != changes {
+			t.Errorf("%d key rows written, want none: nothing else would say it", r.wire.changes-changes)
+		}
+	})
+
+	t.Run("rejected by the joiner", func(t *testing.T) {
+		r, keys := joined(t, "rejected.joined.owned.example.")
+		confirm(t, r, keys[0], "p3", "rejected")
+		confirm(t, r, keys[1], "p2", "applied")
+		confirm(t, r, keys[1], "p3", "applied")
+		if r.wire.marks != 1 {
+			t.Errorf("told %d times, want once", r.wire.marks)
+		}
+		if r.underWay() {
+			t.Errorf("no record waits: a rollover under way")
+		}
+	})
+
+	t.Run("the joiner left", func(t *testing.T) {
+		r, keys := joined(t, "left.joined.owned.example.")
+		for _, k := range keys {
+			confirm(t, r, k, "p2", "applied")
+		}
+		if r.wire.marks != 0 {
+			t.Errorf("told %d times with the joiner's answers missing", r.wire.marks)
+		}
+		r.wire.signers = []string{"p2"}
+		if err := r.l.SignersChanged(); err != nil {
+			t.Fatal(err)
+		}
+		if r.wire.marks != 1 {
+			t.Errorf("told %d times, want once", r.wire.marks)
+		}
+		if r.underWay() {
+			t.Errorf("nobody left to wait for: a rollover under way")
+		}
+	})
+}
+
+// A rollover asked for is a flag of its own: withdrawing it writes no key row.
+func TestAWithdrawnRolloverIsTold(t *testing.T) {
+	r := newDriverRig(t, "withdrawn.owned.example.", driverPolicy, "p2")
+	bootstrapKSK(t, r)
+	r.l.CancelRollover("ZSK")
+	if r.wire.marks != 0 {
+		t.Errorf("nothing to withdraw: told %d times", r.wire.marks)
+	}
+	r.l.RequestRollover("ZSK")
+	if !r.underWay() {
+		t.Fatalf("a rollover asked for: not counted")
+	}
+	r.l.CancelRollover("ZSK")
+	if r.wire.marks != 1 {
+		t.Errorf("told %d times, want once", r.wire.marks)
+	}
+	if r.underWay() {
+		t.Errorf("withdrawn: a rollover under way")
+	}
+}
+
+// The signer's wire pushes the inventory, with no key marked as sent again.
+func TestTheSignerPushesAnInventoryWhenTheMarksChange(t *testing.T) {
+	got := make(chan []uint16, 1)
+	w := &signerWire{conf: &Config{}, push: func(_ *Config, zone string, resend []uint16) {
+		if zone != "marks.signer.example." {
+			t.Errorf("pushed for %q", zone)
+		}
+		got <- resend
+	}}
+	w.MarksChanged("marks.signer.example")
+	if r, ok := recvWithin(got, time.Second); !ok || len(r) != 0 {
+		t.Errorf("pushed %v (%v), want a plain push", r, ok)
+	}
+}
+
 // A rollover's new key in published still counts, whichever asked for it,
 // and so does a key in published where only the rows can be read.
 func TestARolloversNewKeyInPublishedStillCounts(t *testing.T) {

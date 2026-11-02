@@ -80,6 +80,10 @@ type Wire interface {
 	// of pub, sign, ds): the signer pushes a fresh inventory to its
 	// agents on every change (design §4.1, arrow 2).
 	KeysChanged(zone string)
+	// MarksChanged tells the surroundings that what RolloverFlags reads changed
+	// with no key row written, so KeysChanged will not tell them: the agents'
+	// last inventory says a rollover nobody has until a fresh one comes.
+	MarksChanged(zone string)
 }
 
 // distribution is one key's distribution in flight: who must confirm, and
@@ -795,6 +799,7 @@ func (l *ZoneKeyLifecycle) confirmLocked(keyid uint16, provider, status, reason 
 	if removal != nil && *removal != d.Removal {
 		return "", "", fmt.Errorf("key %d of %s: %w", keyid, l.Zone, ErrStaleConfirmation)
 	}
+	waited := l.propagationPending()
 	var ev KeyEvent
 	switch status {
 	case "applied":
@@ -832,6 +837,11 @@ func (l *ZoneKeyLifecycle) confirmLocked(keyid uint16, provider, status, reason 
 		delete(l.dist, keyid)
 		l.saveDist(keyid)
 	}
+	// the zone's last wait for an answer ended on a key that stays as it was,
+	// a joiner's record: no row written, so nothing else says it
+	if waited && from == to && !l.propagationPending() {
+		l.Wire.MarksChanged(l.Zone)
+	}
 	return from, to, err
 }
 
@@ -856,6 +866,7 @@ func (l *ZoneKeyLifecycle) Expects(signers []string) bool {
 func (l *ZoneKeyLifecycle) SignersChanged() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	waited := l.propagationPending()
 	now := map[string]bool{}
 	for _, p := range l.Wire.OtherSigners(l.Zone) {
 		now[p] = true
@@ -941,6 +952,10 @@ func (l *ZoneKeyLifecycle) SignersChanged() error {
 	}
 	// known only now: Expects says the distributions follow the set
 	l.known = now
+	// a signer that left took the last wait for an answer with it
+	if waited && !l.propagationPending() {
+		l.Wire.MarksChanged(l.Zone)
+	}
 	return nil
 }
 
@@ -983,6 +998,9 @@ func (l *ZoneKeyLifecycle) CancelRollover(role string) bool {
 	defer l.mu.Unlock()
 	had := l.rolls[role]
 	delete(l.rolls, role)
+	if had {
+		l.Wire.MarksChanged(l.Zone)
+	}
 	return had
 }
 
@@ -1448,13 +1466,17 @@ func (l *ZoneKeyLifecycle) RolloverFlags(hold bool) (rolloverFlags, error) {
 	if err != nil {
 		return rolloverFlags{}, err
 	}
-	f := rolloverFlags{Requested: len(l.rolls) > 0, AlgRoll: len(l.algRolloversOf(all)) > 0, Additions: l.standbyAdditions(all, hold)}
+	return rolloverFlags{Requested: len(l.rolls) > 0, AlgRoll: len(l.algRolloversOf(all)) > 0, PropagationPending: l.propagationPending(), Additions: l.standbyAdditions(all, hold)}, nil
+}
+
+// propagationPending: a distribution of the zone's waits for confirmations.
+func (l *ZoneKeyLifecycle) propagationPending() bool {
 	for _, d := range l.dist {
 		if confirmationsOutstandingFor(d) {
-			f.PropagationPending = true
+			return true
 		}
 	}
-	return f, nil
+	return false
 }
 
 // standbyAdditions are the keys in published that only add a standby key of
@@ -1674,6 +1696,7 @@ func (l *ZoneKeyLifecycle) CancelAlgorithmRollover(role string) (from, to uint8,
 		return from, to, err
 	}
 	l.logf("key lifecycle: the algorithm rollover cancelled; the keys of the new algorithm are withdrawn", "zone", l.Zone, "role", role, "from", dns.AlgorithmToString[from], "to", dns.AlgorithmToString[to])
+	l.Wire.MarksChanged(l.Zone)
 	return from, to, nil
 }
 
