@@ -317,8 +317,9 @@ func TestADeleteAtTheLeaderLeavesThePublishedKEYServed(t *testing.T) {
 		t.Fatalf("the delete: %q, reached the engine: %v", resp.ErrorMsg, u != nil)
 	}
 
-	// The combiner has a zone of its own: the agent's rig above has told the
-	// instructions store its roles for the agent's. The records are the same.
+	// The combiner serves the same records under a zone name of its own. Under
+	// the agent's name it would read that rig's roles, whose parentsync=owner
+	// applies no KEY, and this test would pass without the fix.
 	const atCombiner = "at." + zone
 	there := func(record string) string { return strings.ReplaceAll(record, zone, atCombiner) }
 	published := there(k.String())
