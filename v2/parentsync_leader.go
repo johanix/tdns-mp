@@ -103,10 +103,9 @@ func (lem *LeaderElectionManager) configuredPeers(zone ZoneName) int {
 }
 
 // SetOnLeaderElected sets the callback invoked when the local agent wins an
-// election, renews its lease, or leads a zone whose delegation sync comes back
-// to the agents (delegationSyncGivenBack). Each of those runs it in a goroutine
-// of its own. For one zone they run one at a time, so that two leader setups
-// never both find no SIG(0) key and each make one.
+// election or renews its lease. Each of those runs it in a goroutine of its
+// own. For one zone they run one at a time, so that two leader setups never
+// both find no SIG(0) key and each make one.
 func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error) {
 	lem.onLeaderElected = func(zone ZoneName) error {
 		return lem.inKeySetup(zone, func() error { return f(zone) })

@@ -535,7 +535,7 @@ func (conf *Config) rollPass(ctx context.Context, zone ZoneName, cause syncCause
 			// the roll ends here; with no leader known yet it waits
 			if lem != nil {
 				if leader, ok := lem.ZoneLeader(zone); ok && !sameName(string(leader), string(conf.localAgentID())) {
-					conf.endRollHere(kdb, r, leader)
+					conf.endRollHere(kdb, r, "another agent leads the zone, "+string(leader))
 				}
 			}
 			return
@@ -670,6 +670,32 @@ func (conf *Config) publishRolledKEY(zone ZoneName, newKey *sig0Row) error {
 	return nil
 }
 
+// rollKEYAwaited is whom the booked KEY still waits for: none once every
+// recipient has taken it (SUCCESS or IGNORED), members with no role after
+// S12's time-out; an error names a recipient that gave any other final word.
+func (conf *Config) rollKEYAwaited(zone ZoneName, st rollKEY) ([]string, error) {
+	var awaited []string
+	for _, rcpt := range st.expected {
+		w, heard := st.heard[rcpt]
+		switch {
+		case !heard:
+			awaited = append(awaited, rcpt)
+		case w.status != "SUCCESS" && w.status != "IGNORED":
+			return nil, fmt.Errorf("%s did not take the new KEY (%s: %s)", rcpt, w.status, w.message)
+		}
+	}
+	if len(awaited) > 0 {
+		only, wait := noRoleOnly(zone, awaited, st.since, time.Now(), noRoleTimeoutFor(conf.MpConfig()))
+		if !only || wait > 0 {
+			return awaited, nil
+		}
+		for _, a := range awaited {
+			lgEngine.Warn("a member with no role did not confirm in time, going on", "zone", zone, "member", a, "what", "the zone's new KEY")
+		}
+	}
+	return nil, nil
+}
+
 // rollMembers is step 4: once every recipient has confirmed the new KEY
 // (members with no role after the time-out), the new key is made active and
 // the old one retired at the leader, in one transaction. A recipient that
@@ -691,25 +717,13 @@ func (conf *Config) rollMembers(kdb *tdns.KeyDB, r *sig0Roll) (string, error) {
 		}
 		return "", conf.publishRolledKEY(zone, newKey)
 	}
-	var awaited []string
-	for _, rcpt := range st.expected {
-		w, heard := st.heard[rcpt]
-		switch {
-		case !heard:
-			awaited = append(awaited, rcpt)
-		case w.status != "SUCCESS" && w.status != "IGNORED":
-			tm.rollKEYs.forget(zone)
-			return "", fmt.Errorf("%s did not take the new KEY (%s: %s)", rcpt, w.status, w.message)
-		}
+	awaited, err := conf.rollKEYAwaited(zone, st)
+	if err != nil {
+		tm.rollKEYs.forget(zone)
+		return "", err
 	}
 	if len(awaited) > 0 {
-		only, wait := noRoleOnly(zone, awaited, st.since, time.Now(), noRoleTimeoutFor(conf.MpConfig()))
-		if !only || wait > 0 {
-			return "", nil
-		}
-		for _, a := range awaited {
-			lgEngine.Warn("a member with no role did not confirm in time, going on", "zone", zone, "member", a, "what", "the zone's new KEY")
-		}
+		return "", nil
 	}
 	if err := activateRolledKey(kdb, zone, r.newKeyid, r.oldKeyid); err != nil {
 		return "", fmt.Errorf("making key %d active and retiring key %d: %w", r.newKeyid, r.oldKeyid, err)
@@ -756,7 +770,7 @@ func activateRolledKey(kdb *tdns.KeyDB, zone ZoneName, newKeyid, oldKeyid uint16
 // the old one retired, as an import would; otherwise a new key made here
 // alone is deleted, and one the parent took is retired: the parent trusts
 // it until this agent, leading, deletes it there (sweepRetiredKeys).
-func (conf *Config) endRollHere(kdb *tdns.KeyDB, r *sig0Roll, leader AgentId) {
+func (conf *Config) endRollHere(kdb *tdns.KeyDB, r *sig0Roll, why string) {
 	zone := r.zone
 	var err error
 	_ = conf.keySetupLocked(zone, func() error {
@@ -783,8 +797,8 @@ func (conf *Config) endRollHere(kdb *tdns.KeyDB, r *sig0Roll, leader AgentId) {
 	if tm := conf.InternalMp.MPTransport; tm != nil {
 		tm.rollKEYs.forget(zone)
 	}
-	lgAgent.Info("the roll of the zone's SIG(0) key ends here: another agent leads the zone", "zone", zone, "phase", r.phase,
-		"old", r.oldKeyid, "new", r.newKeyid, "leader", leader)
+	lgAgent.Info("the roll of the zone's SIG(0) key ends here: "+why, "zone", zone, "phase", r.phase,
+		"old", r.oldKeyid, "new", r.newKeyid)
 }
 
 func sig0KeyChange(kdb *tdns.KeyDB, kp tdns.KeystorePost) error {

@@ -50,13 +50,17 @@ type InstrRemoval = hsync.InstrRemoval
 // --- The kinds of change and their runners (design 5) ---
 
 // stepKind orders the steps of a transition that changes several things
-// (design 5): additions first, then role changes, then removals.
+// (design 5): additions first, then role changes, then removals. The parent
+// sync's change comes outside them (plan S20): taken up by the agents before
+// anything that needs them at the parent, handed to the owner after it.
 type stepKind int
 
 const (
-	stepAddition stepKind = iota
+	stepTakeUp stepKind = iota
+	stepAddition
 	stepRoleChange
 	stepRemoval
+	stepHandOver
 )
 
 // stepRunner is the steps of one kind of change: what a transition needs of
@@ -92,6 +96,9 @@ type planView struct {
 	removals []Removal
 	excused  map[string]bool
 	taken    []string
+	// conf is for a step's own closures, when it is taken. Nil in a plan made
+	// only to be looked at by a test.
+	conf *Config
 }
 
 // plannedStep is one step of a runner's.
@@ -114,7 +121,8 @@ type plannedStep struct {
 	removals func(held []Removal) []Removal
 	// start is the leader's own action when it takes the step (a
 	// withdrawal, a sync: S16, S17b); wait what else the step waits for
-	// before it is held, since it was taken ("" for nothing). Nil for none.
+	// before it is held, since it was taken ("" for nothing), looked at once
+	// every member holds it. Nil for none.
 	start func(conf *Config, zone string)
 	wait  func(conf *Config, zone string, since time.Time) string
 }
@@ -129,7 +137,7 @@ const lastStepKey = "last"
 // signer hold V.
 func planSteps(p planView) []plannedStep {
 	var steps []plannedStep
-	for _, kind := range []stepKind{stepAddition, stepRoleChange, stepRemoval} {
+	for _, kind := range []stepKind{stepTakeUp, stepAddition, stepRoleChange, stepRemoval, stepHandOver} {
 		for _, r := range stepRunners {
 			if r.kind != kind {
 				continue
@@ -298,6 +306,17 @@ func (s *InstructionStore) excuse(zone, member string) error {
 		z.Excused = append(z.Excused, canonicalName(member))
 		return nil
 	})
+}
+
+// tookStep: the zone's transition has taken the step named key.
+func (s *InstructionStore) tookStep(zone, key string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, z := s.zoneLocked(zone)
+	return z != nil && slices.Contains(z.Taken, key)
 }
 
 // reconcileInputs is what the reconciliation reads of the store for a zone.
@@ -626,14 +645,14 @@ func (conf *Config) reconcileView(in reconcileInputs, told map[string]toldStamp,
 	if in.from != nil {
 		from = in.from.Reading
 	}
-	plan := planSteps(planView{zone: in.name, from: from, to: in.active.Reading, held: held, removals: removals, excused: excused, taken: in.step.Taken})
+	plan := planSteps(planView{zone: in.name, from: from, to: in.active.Reading, held: held, removals: removals, excused: excused, taken: in.step.Taken, conf: conf})
 	var cur *plannedStep
 	if n := len(in.step.Taken); n > 0 {
 		if i := slices.IndexFunc(plan, func(st plannedStep) bool { return st.key == in.step.Taken[n-1] }); i >= 0 {
 			cur = &plan[i]
 		}
 	}
-	if cur != nil && cur.wait != nil {
+	if cur != nil && cur.wait != nil && len(v.waits) == 0 {
 		if w := cur.wait(conf, in.name, in.step.at); w != "" {
 			v.waits = append(v.waits, w)
 		}
@@ -889,6 +908,7 @@ func (conf *Config) transitionDone(zone string, serial uint32) {
 		return
 	}
 	conf.InternalMp.reconciles.forget(canonicalName(zone))
+	conf.InternalMp.parentSyncs.transitionDone(zone)
 	lg.Info("transition done", "zone", zone, "serial", serial)
 	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil {
 		conf.onSetsChanged(mpzd, true)

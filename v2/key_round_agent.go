@@ -398,7 +398,7 @@ func (conf *Config) decideZoneKeyLocked(ctx context.Context, zone ZoneName, answ
 	}
 	// and for the transition's end: nothing new starts while the zone is
 	// frozen (plan S6)
-	if held, why := conf.syncHeld(string(zone), syncOther); held {
+	if held, why := conf.syncHeld(string(zone), conf.syncCauseFor(string(zone), tdns.DelegationSyncStatus{})); held {
 		lgAgent.Info("deciding that the zone has no SIG(0) key waits for the transition", "zone", zone, "phase", why)
 		return false, false
 	}

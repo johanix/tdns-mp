@@ -223,7 +223,6 @@ func TestAKindWithoutItsStepsIsRefused(t *testing.T) {
 	from := jAt(t, 41, jServers2, jAlpha, jBeta, jCharlie)
 	for _, c := range []struct{ param, reason string }{
 		{jServers2 + ` nsmgmt="agent"`, "changes nsmgmt"},
-		{jServers2 + ` parentsync="agent"`, "changes parentsync"},
 		{jServers2 + ` pubkey`, "changes pubkey"},
 		{jServers2 + ` pubcds`, "changes pubcds"},
 		{jServers3, "gives agent.charlie.example. a server role"},

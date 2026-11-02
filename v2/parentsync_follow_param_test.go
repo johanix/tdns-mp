@@ -91,6 +91,37 @@ var (
 	parentSyncOwner = core.HsyncParentSyncOwner
 )
 
+// parentSyncStep gives the parent sync to parentsync as a step of the zone's
+// reconciliation does (plan S20): the copy says so, the store's active reading
+// is that copy's and its sets hold it, and the agent acts by the sets. A
+// refresh alone changes nothing: TestTheAgentsStopSyncingAtTheirStepAndNotAtTheRefresh.
+func parentSyncStep(t *testing.T, conf *Config, mpzd *MPZoneData, parentsync uint8) {
+	t.Helper()
+	servedParentSync(t, mpzd, &parentsync, false)
+	activeFromCopy(t, conf, mpzd)
+}
+
+// activeFromCopy makes the zone's copy its active reading, in a store of
+// serials of the test's, and has the agent act by the sets.
+func activeFromCopy(t *testing.T, conf *Config, mpzd *MPZoneData) {
+	t.Helper()
+	s := instrStore.Load()
+	if s == nil {
+		s = newStore(t)
+		withStore(t, s)
+	}
+	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	if err != nil || apex == nil {
+		t.Fatalf("the apex: %v", err)
+	}
+	in, err := ReadInstructions(apex)
+	if err != nil || in == nil {
+		t.Fatalf("the served instructions: %v", err)
+	}
+	activeAs(t, s, mpzd.ZoneName, in)
+	conf.onSetsChanged(mpzd, true)
+}
+
 // The agent's delegation sync of a multi-provider zone follows the zone's
 // HSYNCPARAM in both directions. It was turned on when HSYNCPARAM said
 // parentsync=agent and never off (tdns-mp #200): once the owner had taken
@@ -120,7 +151,11 @@ func TestTheDelegationSyncFollowsHSYNCPARAM(t *testing.T) {
 	}
 	for _, s := range steps {
 		servedParentSync(t, r.mpzd, s.parentsync, s.gone)
-		refreshed(t, r.conf, r.mpzd)
+		if s.gone {
+			r.conf.onSetsChanged(r.mpzd, true)
+		} else {
+			activeFromCopy(t, r.conf, r.mpzd)
+		}
 		if got := r.mpzd.Options[tdns.OptParentSync]; got != s.want {
 			t.Fatalf("%s: the delegation sync is %v, want %v", s.what, got, s.want)
 		}
@@ -141,8 +176,7 @@ func TestTheOwnersHSYNCPARAMOutweighsTheAgentsConfig(t *testing.T) {
 	namedInTheZone(t, r.mpzd, "agent.us.example.")
 	r.leader("agent.us.example.")
 	// the rig's zone has the option on, as from the agent's configuration
-	servedParentSync(t, r.mpzd, &parentSyncOwner, false)
-	refreshed(t, r.conf, r.mpzd)
+	parentSyncStep(t, r.conf, r.mpzd, parentSyncOwner)
 	if r.mpzd.Options[tdns.OptParentSync] {
 		t.Fatal("an agent configured with parentsync syncs a zone whose owner syncs it")
 	}
@@ -155,8 +189,7 @@ func TestOnlyAnAgentFollowsHSYNCPARAM(t *testing.T) {
 	tdns.Globals.App.Type = AppTypeMPCombiner
 	t.Cleanup(func() { tdns.Globals.App.Type = old })
 	r := newLeaderSyncRig(t, "combiner.parentsync.example.")
-	servedParentSync(t, r.mpzd, &parentSyncOwner, false)
-	refreshed(t, r.conf, r.mpzd)
+	parentSyncStep(t, r.conf, r.mpzd, parentSyncOwner)
 	if !r.mpzd.Options[tdns.OptParentSync] {
 		t.Error("a combiner's refresh changed the delegation sync option")
 	}
@@ -179,8 +212,7 @@ func TestTheOwnerTakingTheSyncOverDropsAHeldNotify(t *testing.T) {
 	r.ask()
 	r.logged(t, 1, logHeld)
 
-	servedParentSync(t, r.mpzd, &parentSyncOwner, false) // before the wait is over
-	refreshed(t, r.conf, r.mpzd)
+	parentSyncStep(t, r.conf, r.mpzd, parentSyncOwner) // before the wait is over
 	if l := r.log.String(); !strings.Contains(l, logDroppedOwner+" zone="+z+" notify=CSYNC") {
 		t.Errorf("the refresh did not drop the held NOTIFY:\n%s", l)
 	}
@@ -200,8 +232,7 @@ func TestTheOwnerTakingTheSyncOverDropsAHeldNotify(t *testing.T) {
 		t.Errorf("a NOTIFY that was dropped left, or was checked:\n%s", l)
 	}
 
-	servedParentSync(t, r.mpzd, &parentSyncAgent, false)
-	refreshed(t, r.conf, r.mpzd)
+	parentSyncStep(t, r.conf, r.mpzd, parentSyncAgent)
 	r.propagation(0)
 	r.ask()
 	r.notified(t, "the agents sync the zone again", dns.TypeCSYNC)
@@ -221,8 +252,7 @@ func TestASyncQueuedBeforeTheOwnerTookOverIsNotSent(t *testing.T) {
 	if err != nil || !changed {
 		t.Fatalf("the refresh: changed=%v err=%v", changed, err)
 	}
-	servedParentSync(t, r.mpzd, &parentSyncOwner, false)
-	refreshed(t, r.conf, r.mpzd)
+	parentSyncStep(t, r.conf, r.mpzd, parentSyncOwner)
 	if r.mpzd.Options[tdns.OptParentSync] {
 		t.Fatal("the owner took the sync over, and the agent still syncs the zone")
 	}
@@ -242,70 +272,7 @@ func TestASyncQueuedBeforeTheOwnerTookOverIsNotSent(t *testing.T) {
 	r.untold(t, 0, "for a request queued before the owner took over")
 }
 
-// The owner gives the sync back. While the owner synced the zone, an
-// election or a lease renewal skipped the leader's setup, so a leader elected
-// then had no SIG(0) key for the zone, and the first sync after the give-back
-// failed until the next renewal. The refresh that gives the sync back runs the
-// setup at the agent that leads the zone, and only there.
-func TestTheLeaderRunsItsSetupWhenTheSyncIsGivenBack(t *testing.T) {
-	asMPAgent(t)
-	for _, tc := range []struct {
-		name   string
-		leader AgentId
-		want   int
-	}{
-		{"this agent leads", "agent.us.example.", 1},
-		{"another agent leads", "agent.eu.example.", 0},
-		{"no leader yet", "", 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			r := newLeaderSyncRig(t, "givenback.parentsync.example.")
-			namedInTheZone(t, r.mpzd, "agent.us.example.")
-			r.leader(tc.leader)
-			setups := make(chan ZoneName, 4)
-			r.lem.SetOnLeaderElected(func(z ZoneName) error { setups <- z; return nil })
-			setupsWithin := func(d time.Duration) int {
-				n, deadline := 0, time.After(d)
-				for {
-					select {
-					case z := <-setups:
-						if z != ZoneName(r.mpzd.ZoneName) {
-							t.Errorf("a leader setup for %s", z)
-						}
-						n++
-					case <-deadline:
-						return n
-					}
-				}
-			}
-
-			servedParentSync(t, r.mpzd, &parentSyncOwner, false)
-			refreshed(t, r.conf, r.mpzd)
-			if n := setupsWithin(200 * time.Millisecond); n != 0 {
-				t.Errorf("the owner took the sync over, and %d leader setups ran", n)
-			}
-
-			servedParentSync(t, r.mpzd, &parentSyncAgent, false)
-			refreshed(t, r.conf, r.mpzd)
-			if !r.mpzd.Options[tdns.OptParentSync] {
-				t.Fatal("the sync was given back, and the option is off")
-			}
-			wait := 200 * time.Millisecond
-			if tc.want > 0 {
-				wait = 5 * time.Second
-			}
-			n := setupsWithin(wait)
-			if tc.want > 0 && n > 0 {
-				n += setupsWithin(200 * time.Millisecond)
-			}
-			if n != tc.want {
-				t.Errorf("the sync was given back: %d leader setups ran, want %d", n, tc.want)
-			}
-		})
-	}
-}
-
-// An election, a lease renewal, gossip and a give-back each start the leader's
+// An election, a lease renewal and gossip each start the leader's
 // setup in a goroutine of their own. For one zone the setups run one at a
 // time, so two cannot both find no SIG(0) key and make one each. Setups for
 // different zones still run together.
@@ -390,8 +357,7 @@ func TestTheOwnerTakingTheSyncOverStopsAnUpdateBeingRetried(t *testing.T) {
 		t.Fatal("the refused UPDATE is not being retried")
 	}
 
-	servedParentSync(t, r.mpzd, &parentSyncOwner, false) // before the retry's wait is over
-	refreshed(t, r.conf, r.mpzd)
+	parentSyncStep(t, r.conf, r.mpzd, parentSyncOwner) // before the retry's wait is over
 	if l := r.log.String(); !strings.Contains(l, logSyncStopped+" zone="+z+" syncs=1") {
 		t.Errorf("the refresh did not stop the sync under way:\n%s", l)
 	}
@@ -404,31 +370,6 @@ func TestTheOwnerTakingTheSyncOverStopsAnUpdateBeingRetried(t *testing.T) {
 		t.Errorf("the parent got %d UPDATEs, want the one sent before the owner took over", n)
 	}
 	r.untold(t, 0, "for a sync the owner stopped")
-}
-
-// A zone's first load turns the option on when HSYNCPARAM says
-// parentsync=agent, and that is no give-back: at start-up the zone's election
-// runs the setup, and the election manager may not be set yet. Only a later
-// refresh can give the sync back.
-func TestAZonesFirstLoadIsNoGiveBack(t *testing.T) {
-	asMPAgent(t)
-	r := newLeaderSyncRig(t, "firstload.parentsync.example.")
-	namedInTheZone(t, r.mpzd, "agent.us.example.")
-	r.mpzd.SetOption(tdns.OptParentSync, false)
-	r.leader("agent.us.example.") // even if this agent led, as a fast election could have it
-	setups := make(chan ZoneName, 4)
-	r.lem.SetOnLeaderElected(func(z ZoneName) error { setups <- z; return nil })
-
-	servedParentSync(t, r.mpzd, &parentSyncAgent, false)
-	refreshed(t, r.conf, r.mpzd)
-	if !r.mpzd.Options[tdns.OptParentSync] {
-		t.Fatal("the first load did not turn the delegation sync on")
-	}
-	select {
-	case <-setups:
-		t.Error("the zone's first load ran the leader's setup as a give-back")
-	case <-time.After(200 * time.Millisecond):
-	}
 }
 
 // A sync that starts after the owner took the sync over sends nothing, also
@@ -450,8 +391,7 @@ func TestASyncThatStartsAfterTheTakeoverSendsNothing(t *testing.T) {
 		t.Fatalf("the refresh: changed=%v err=%v", changed, err)
 	}
 	// the owner takes over after the syncher has checked the option
-	servedParentSync(t, r.mpzd, &parentSyncOwner, false)
-	refreshed(t, r.conf, r.mpzd)
+	parentSyncStep(t, r.conf, r.mpzd, parentSyncOwner)
 
 	hdb := &HsyncDB{KeyDB: r.mpzd.KeyDB}
 	ds := tdns.DelegationSyncRequest{Command: "SYNC-DELEGATION", ZoneName: z, ZoneData: r.mpzd.ZoneData, SyncStatus: dss}
@@ -485,8 +425,7 @@ func handedOverAfterTheTakeover(t *testing.T, wait time.Duration) {
 	run, done := r.conf.delegationSyncRun(r.ctx, z) // a sync under way, past its last look
 	defer done()
 
-	servedParentSync(t, r.mpzd, &parentSyncOwner, false)
-	refreshed(t, r.conf, r.mpzd)
+	parentSyncStep(t, r.conf, r.mpzd, parentSyncOwner)
 
 	out := make(chan tdns.NotifyRequest, 4)
 	held, failed := r.conf.delegationSyncNotifiedWith(r.ctx, z, delegationNotifies{
@@ -521,8 +460,7 @@ func TestATakeoverJustBeforeTheHandoffLeavesNoChain(t *testing.T) {
 	delegationSyncBeforeHandoff = func(zone string) {
 		if zone == z && !took {
 			took = true
-			servedParentSync(t, r.mpzd, &parentSyncOwner, false)
-			refreshed(t, r.conf, r.mpzd)
+			parentSyncStep(t, r.conf, r.mpzd, parentSyncOwner)
 		}
 	}
 	t.Cleanup(func() { delegationSyncBeforeHandoff = saved })
@@ -543,67 +481,6 @@ func TestATakeoverJustBeforeTheHandoffLeavesNoChain(t *testing.T) {
 		t.Errorf("the refused handoff was taken for a failure to ask again:\n%s", l)
 	}
 	r.quiet(t, 300*time.Millisecond, "after a takeover just before the handoff")
-}
-
-// The owner's edit gives the sync back and, in the same refresh, removes this
-// agent's HSYNC3 record. The HSYNC diff then fires only the removal hook and
-// returns before its group recompute, so the zone stayed in the group this
-// agent led, and the give-back ran the leader's setup here. That path now
-// recomputes the groups too (OnHsync3Changed, tdns-mp #183), and the
-// give-back runs nothing at this agent.
-func TestAGiveBackThatAlsoRemovesThisAgentRunsNoSetupHere(t *testing.T) {
-	asMPAgent(t)
-	const zone = "removed.parentsync.example."
-	const local, other, third = "alpha.agent.example.", "bravo.agent.example.", "charlie.agent.example."
-	zd := seedZoneWithHSYNC3(t, zone, local, other, third)
-
-	pgm := NewProviderGroupManager(local)
-	ar := &AgentRegistry{LocalAgent: &MultiProviderConf{Identity: local}, ProviderGroupManager: pgm}
-	pgm.RecomputeGroups()
-	pg := pgm.GetGroupForZone(zone)
-	if pg == nil {
-		t.Fatal("the zone is in no group")
-	}
-	lem := NewLeaderElectionManager(local, time.Minute, func(ZoneName, string, map[string][]string) error { return nil })
-	lem.SetProviderGroupManager(pgm)
-	lem.mu.Lock()
-	lem.groupElections[pg.GroupHash] = &LeaderElection{Leader: local, LeaderExpiry: time.Now().Add(time.Hour)}
-	lem.mu.Unlock()
-	setups := make(chan ZoneName, 4)
-	lem.SetOnLeaderElected(func(z ZoneName) error { setups <- z; return nil })
-	conf := &Config{Config: &tdns.Config{}}
-	conf.InternalMp.LeaderElectionManager = lem
-	conf.InternalMp.AgentRegistry = ar
-	if !lem.IsLeader(zone) {
-		t.Fatal("this agent does not lead the zone's group to start with")
-	}
-
-	// the owner's edit: this agent's HSYNC3 record goes
-	apex, _ := zd.Data.Get(zone)
-	h3, _ := apex.RRtypes.Get(core.TypeHSYNC3)
-	var kept []dns.RR
-	for _, rr := range h3.RRs {
-		if rr.(*dns.PrivateRR).Data.(*core.HSYNC3).Identity != local {
-			kept = append(kept, rr)
-		}
-	}
-	apex.RRtypes.Set(core.TypeHSYNC3, core.RRset{RRs: kept})
-	zd.Data.Set(zone, apex)
-	zd.InstallInitialSnapshot()
-
-	// what ApplyHsyncDiff calls on that path: the removal hook, then
-	// OnHsync3Changed, which the agent wires to the group recompute
-	ar.localRemovedFromZone(zone)
-	pgm.RecomputeGroups()
-	if lem.IsLeader(zone) {
-		t.Error("after its HSYNC3 record went, this agent still leads the zone")
-	}
-	conf.delegationSyncGivenBack(zone)
-	select {
-	case <-setups:
-		t.Error("the give-back ran the leader's setup at an agent the edit removed")
-	case <-time.After(200 * time.Millisecond):
-	}
 }
 
 // The owner's edit removes this agent from the zone and changes the

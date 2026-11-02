@@ -1081,7 +1081,7 @@ func (mpzd *MPZoneData) dsSignersChanged() bool {
 // delegation sync (plan S13): explicit, an update only where the parent
 // differs; an agent that does not lead, and a zone whose parent the owner
 // syncs, ask for nothing.
-func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack bool) {
+func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) {
 	if recompute && mpzd.Options[tdns.OptMultiProvider] {
 		// Computed on a wrapper of the zone as served, with a map of its own,
 		// and swapped in under the zone's lock, as a refresh and a hand-over
@@ -1105,12 +1105,7 @@ func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack b
 			conf.askCsyncProgress(nil, ZoneName(mpzd.ZoneName))
 		}
 	}
-	givenBack = conf.followParentSyncParam(mpzd)
-	// A refresh runs the give-back itself, after PostRefresh; a change of
-	// the sets has none to wait for.
-	if givenBack && recompute {
-		conf.delegationSyncGivenBack(mpzd.ZoneName)
-	}
+	conf.followParentSyncParam(mpzd)
 	// asked once the parentsync option follows the step's sets: a step that
 	// gives the agents the parent sync and changes DSSigners would otherwise
 	// find the option off, and ask nothing
@@ -1118,5 +1113,4 @@ func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack b
 		conf.requestDelegationSync(nil, mpzd.ZoneName, "the step's DS set changed")
 	}
 	conf.handOverToParts(mpzd.ZoneName) // the agent's combiner and signer act by the sets too (S10, S11)
-	return givenBack
 }

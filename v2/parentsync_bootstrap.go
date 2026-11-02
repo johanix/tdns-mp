@@ -68,6 +68,12 @@ func (conf *Config) keyPollOnce(ctx, runCtx context.Context, zone ZoneName, keyN
 		lgElect.Info("the key poll is not started during the transition", "zone", zone, "phase", why)
 		return false, true
 	}
+	// Nor as the step that takes the parent sync up, before every recipient
+	// has confirmed the KEY (plan S20): the step offers it then
+	if conf.takeUpKEYUnconfirmed(string(zone)) {
+		lgElect.Info("the key poll waits for the KEY's confirmations", "zone", zone)
+		return false, true
+	}
 	// The option says whether this agent may sync the zone at all: the
 	// zone's records name it, and HSYNCPARAM says parentsync=agent
 	// (followParentSyncParam).

@@ -1629,37 +1629,32 @@ func withoutImplicitDS(dss tdns.DelegationSyncStatus) (bool, tdns.DelegationSync
 // that waits finds no chain (delegationSyncOwnerSyncs). An election, a
 // lease renewal included, finds the option off and asks for nothing.
 //
-// givenBack says the owner has given the sync back to the agents: the
-// option went on at a refresh after the zone's first. The callback then runs,
-// after PostRefresh, the leader's setup that an election skipped while the
-// owner synced the zone (delegationSyncGivenBack). At a first load the option
-// comes on too, and that is no give-back: at start-up the zone's election runs
-// the setup. A zone whose first load comes after its group already has a
-// leader (a zone added to a running agent, a late first transfer) has no
-// election of its own, and waits for its group's next lease renewal.
+// It follows the step's sets, so a refresh never changes it by itself: the
+// option goes off at the last of a hand-over's steps to the owner, and comes
+// on at the step that takes the sync up, whose runner has the leader take the
+// zone up as at an arrival (plan S20). At a first load the option comes on
+// too: at start-up the zone's election runs the setup. A zone whose first load
+// comes after its group already has a leader (a zone added to a running
+// agent, a late first transfer) has no election of its own, and waits for its
+// group's next lease renewal.
 //
 // The option follows HSYNCPARAM only for a zone whose records name this
 // agent (matchHsyncIdentity, as the first-load detection asks; an OFF record
 // counts). For any other zone it is off, and what this agent had scheduled
 // for the zone's parent ends, a sync under way included. An option that
 // comes on because a refresh names this agent where the last one did not is
-// no give-back either: the zone arrives, and is taken up as an arrival.
+// no take-up: the zone arrives, and is taken up as an arrival.
 //
 // A zone whose HSYNCPARAM cannot be read keeps the option it has.
-func (conf *Config) followParentSyncParam(mpzd *MPZoneData) (givenBack bool) {
+func (conf *Config) followParentSyncParam(mpzd *MPZoneData) {
 	if tdns.Globals.App.Type != AppTypeMPAgent || !mpzd.Options[tdns.OptMultiProvider] {
-		return false
+		return
 	}
 	// parentsync changes only at a step (design 3.3): the step's sets. An
 	// OFF record names nobody (plan S3).
 	in := mpzd.instructions()
 	byAgents := in != nil && in.HasParam && mpzd.roles().ParentSync == core.HsyncParentSyncAgent
 	named, _, _ := mpzd.matchHsyncIdentity(ourHsyncIdentities(conf.MpConfig()))
-	mpzd.EnsureMP()
-	first := !mpzd.MP.ParentSyncFollowed
-	wasNamed := mpzd.MP.ParentSyncNamed
-	mpzd.MP.ParentSyncFollowed = true
-	mpzd.MP.ParentSyncNamed = named
 
 	// Whatever the option says: an agent that the records name and that no
 	// longer takes part in the zone (no role) sends nothing to the parent. The syncher asks the same (stillParticipates),
@@ -1671,13 +1666,13 @@ func (conf *Config) followParentSyncParam(mpzd *MPZoneData) (givenBack bool) {
 
 	byAgents = byAgents && named
 	if byAgents == mpzd.Options[tdns.OptParentSync] {
-		return false
+		return
 	}
 	mpzd.SetRuntimeOption(tdns.OptParentSync, byAgents)
 	switch {
 	case byAgents:
 		lg.Info("HSYNCPARAM parentsync=agent detected on refresh, enabling delegation sync", "zone", mpzd.ZoneName)
-		return !first && wasNamed
+		conf.InternalMp.parentSyncs.tellOwner(mpzd.ZoneName, "") // the owner has nothing left to delete
 	case !named:
 		lg.Info("this agent is not named in the zone's records: it sends nothing to the parent", "zone", mpzd.ZoneName)
 		conf.endDelegationSyncWork(mpzd.ZoneName)
@@ -1685,7 +1680,6 @@ func (conf *Config) followParentSyncParam(mpzd *MPZoneData) (givenBack bool) {
 		lg.Info("HSYNCPARAM does not say parentsync=agent: the zone's owner syncs its delegation, and this agent no longer sends anything to the parent", "zone", mpzd.ZoneName)
 		conf.delegationSyncOwnerSyncs(mpzd.ZoneName)
 	}
-	return false
 }
 
 // PostRefresh runs after the hard flip for all MP roles.

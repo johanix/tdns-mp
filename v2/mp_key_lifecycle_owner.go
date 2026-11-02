@@ -244,6 +244,13 @@ func (o *MPKeyLifecycleOwner) DSIntent(zd *tdns.ZoneData, digest uint8) (tdns.DS
 	if zd == nil {
 		return tdns.DSIntent{}, nil
 	}
+	// A signer handed parentsync=owner, or the first step of the hand-over
+	// to it, serves no CDS (plan S20): to tdns's DS engine the zone's keys
+	// warrant none. Only a part holds a hand-over: at the agent the DS set
+	// stays what its sync hands the parent.
+	if r, ok := actingHeld.Load().roles(zd.ZoneName); ok && servesNoCDS(r) {
+		return tdns.DSIntent{Known: true}, nil
+	}
 	var inv []tdns.KeyInventoryItem
 	snap := o.inventoryOf(zd.ZoneName)
 	if computed := o.computedSource(); snap != nil && snap.Owned {

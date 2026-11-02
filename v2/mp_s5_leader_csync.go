@@ -225,6 +225,7 @@ func (conf *Config) distributeCsync(ctx context.Context, zone string, csync *dns
 				Records:   []string{csync.String()},
 			}},
 		},
+		Step:     conf.parentSyncTakenUp(zone),
 		Response: answer,
 	}
 	var stopped <-chan struct{}

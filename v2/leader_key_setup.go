@@ -86,7 +86,7 @@ func (conf *Config) leaderKeySetup(ctx context.Context, zone ZoneName, elected b
 	// poll, whatever the poll's outcome. A new lead, a new or taken key, and
 	// a restart publish and poll as before.
 	_, _, ended := conf.InternalMp.keyPolls.state(zone)
-	if renewalKeepsKey(zk, ended, lem.LeadStart(zone)) {
+	if !conf.parentSyncTakenUp(string(zone)) && renewalKeepsKey(zk, ended, lem.LeadStart(zone)) {
 		lgAgent.Info("a renewal of the lead keeps the zone's SIG(0) key as it is: published, and bootstrapped in this lead",
 			"zone", zone, "keyid", zk.held.keyid)
 		return nil
@@ -179,6 +179,11 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 	held := *zk.held
 	keyRR := held.key
 	lgAgent.Info("publishing KEY to combiner with PublishInstruction", "zone", zone, "keyid", held.keyid)
+	// As the step that takes the parent sync up, every recipient's word on
+	// the KEY comes before its offer: the step offers it (plan S20)
+	if conf.parentSyncTakenUp(string(zone)) {
+		return conf.publishRolledKEY(zone, &held)
+	}
 	if _, _, _, err := sendZoneKEY(tm, zone, keyRR, ""); err != nil {
 		return err
 	}

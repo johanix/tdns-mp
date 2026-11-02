@@ -486,7 +486,7 @@ func (conf *Config) delegationSyncNotified(ctx context.Context, zone string, sen
 func (conf *Config) delegationSyncNotifiedWith(ctx context.Context, zone string, sent delegationNotifies, delays []time.Duration) (held bool, failed error) {
 	c := &conf.InternalMp.delegationSyncChains
 	every := delegationCsyncAwaitedEvery
-	frozen := conf.zoneFrozen(zone)
+	frozen := conf.frozenForNotify(zone)
 	c.mu.Lock()
 	if sent.run != nil && sent.run.Err() != nil {
 		// The owner took the sync over after the sync last looked at the
@@ -661,7 +661,7 @@ func (conf *Config) delegationSyncReleaseAfter(ctx context.Context, zone string,
 		stopped := ctx != nil && ctx.Err() != nil
 		leads := conf.leadsZone(zone)
 		caughtUp, waiting := conf.InternalMp.CatchUp.CaughtUp(ZoneName(zone))
-		frozen := conf.zoneFrozen(zone)
+		frozen := conf.frozenForNotify(zone)
 		c.mu.Lock()
 		ch := c.zones[zone]
 		if ch == nil || ch.ask != ask || ch.hold == nil || ch.hold.awaiting {
@@ -955,32 +955,6 @@ func (conf *Config) stopRunsOfLostLead(hold uint64) {
 	for zone, n := range stopped {
 		lgEngine.Info("the delegation sync under way is stopped: another agent leads the zone now", "zone", zone, "syncs", n)
 	}
-}
-
-// delegationSyncGivenBack runs the leader's setup when the zone's HSYNCPARAM
-// gives the delegation sync back to the agents (followParentSyncParam) and
-// this agent leads the zone. While the owner synced it, an election or a lease
-// renewal skipped the setup (onLeaderElected), so a leader elected then has no
-// SIG(0) key for the zone, and nothing would ask for a sync until the next
-// renewal. The setup is what an election runs: the key, then a sync. An agent
-// that does not lead runs nothing; the leader's own refresh runs it. A zone's
-// first load is no give-back (followParentSyncParam): at start-up the zone's
-// election runs the setup, and start-up may not yet have set the election
-// manager that this reads. A zone first loaded after its group has a leader
-// waits for the group's next lease renewal. It runs after PostRefresh, so
-// that a refresh that also moves the zone between groups is judged on the
-// groups it gives.
-func (conf *Config) delegationSyncGivenBack(zone string) {
-	lem := conf.InternalMp.LeaderElectionManager
-	if lem == nil || lem.onLeaderElected == nil || !lem.IsLeader(ZoneName(zone)) {
-		return
-	}
-	lgEngine.Info("the zone's delegation sync is the agents' again, and this agent leads it: running the leader's setup", "zone", zone)
-	go func() {
-		if err := lem.onLeaderElected(ZoneName(zone)); err != nil {
-			lgEngine.Error("the leader's setup failed after the delegation sync came back to the agents", "zone", zone, "err", err)
-		}
-	}()
 }
 
 // endDelegationSyncChain forgets the zone's chain, its CSYNC and its owed
