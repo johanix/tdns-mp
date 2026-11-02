@@ -358,7 +358,7 @@ func newNotifyRigWith(t *testing.T, zone, scheme string, signed bool, setup func
 	}
 	dsyncName := zlabels[0] + "._dsync." + parentZone
 	var dsync []dns.RR
-	for _, rdata := range map[string][]string{"NOTIFY": {"CDS NOTIFY", "CSYNC NOTIFY"}, "UPDATE": {"ANY UPDATE"}}[scheme] {
+	for _, rdata := range map[string][]string{"NOTIFY": {"CDS NOTIFY", "CSYNC NOTIFY"}, "UPDATE": {"ANY UPDATE"}, "BOTH": {"ANY UPDATE", "CDS NOTIFY", "CSYNC NOTIFY"}}[scheme] {
 		rr, err := dns.NewRR(fmt.Sprintf("%s 3600 IN DSYNC %s %d %s", dsyncName, rdata, r.parent.port, target))
 		if err != nil {
 			t.Fatalf("the DSYNC record: %v", err)

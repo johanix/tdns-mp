@@ -178,6 +178,10 @@ func TestParentSyncSubcommandsPostWhatTheAgentSwitchesOn(t *testing.T) {
 		!strings.Contains(err.Error(), "not the delegation sync leader for "+zone) {
 		t.Errorf("bootstrap on an agent that does not lead: error %v, output %q; want the handler's refusal", err, out)
 	}
+	if out, err := run("go-on", "-z", zone); err == nil ||
+		!strings.Contains(err.Error(), "not the delegation sync leader for "+zone) {
+		t.Errorf("go-on on an agent that does not lead: error %v, output %q; want the handler's refusal", err, out)
+	}
 
 	// No resolver in this agent: the inquiry gets as far as asking for it.
 	if out, err := run("inquire", "-z", zone); err == nil ||
@@ -208,6 +212,12 @@ func TestParentSyncSubcommandsPostWhatTheAgentSwitchesOn(t *testing.T) {
 	}
 	wantLines(t, "bootstrap", out,
 		fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", zone, keyid))
+
+	// The leader's go-on reaches the handler: with no removal, nothing to end.
+	if out, err := run("go-on", "-z", zone); err == nil ||
+		!strings.Contains(err.Error(), "no removal's step here watches the parent") {
+		t.Errorf("go-on on the leader with no removal: error %v, output %q; want the handler's refusal", err, out)
+	}
 }
 
 // The status command prints what the agent's handler reports of the zone:

@@ -104,6 +104,11 @@ type zoneSerials struct {
 	// reconciliation, by identity (design 3.2): planned as excused from
 	// then on.
 	Excused []string `json:"excused,omitempty"`
+	// ParentWords are the step keys of a removal's watches on the parent that
+	// the leader's operator ended (goOnPastParent, decision 110), until the
+	// transition is done. They are this agent's: a new leader's operator gives
+	// the word again if the step still waits.
+	ParentWords []string `json:"parent_words,omitempty"`
 	// DoneAt is when the transition to the active serial was done here
 	// (S12); zero from the thaw that starts the next until it is done.
 	DoneAt time.Time `json:"done_at,omitzero"`
@@ -450,6 +455,7 @@ func (z *zoneSerials) clone() *zoneSerials {
 	c.Removals = slices.Clone(z.Removals)
 	c.Taken = slices.Clone(z.Taken)
 	c.Excused = slices.Clone(z.Excused)
+	c.ParentWords = slices.Clone(z.ParentWords)
 	return &c
 }
 
@@ -642,6 +648,7 @@ func (s *InstructionStore) Activate(zone string, thaw Thaw) error {
 			}
 		}
 		z.Step, z.Removals, z.Taken, z.StepOf, z.StepWhat, z.Excused = 0, nil, nil, 0, "", nil
+		z.ParentWords = nil
 		z.Sets, z.StepAt, z.Pending, z.DoneAt = sets, time.Now(), false, time.Time{}
 		if straight {
 			z.Sets, z.Pending = nil, true
@@ -767,7 +774,7 @@ func (s *InstructionStore) Done(zone string) error {
 		}
 		z.From, z.Removals = nil, nil
 		z.Step, z.Sets, z.StepOf, z.StepWhat, z.Taken, z.StepAt, z.Pending = 0, nil, 0, "", nil, time.Time{}, false
-		z.Excused, z.DoneAt = nil, time.Now()
+		z.Excused, z.ParentWords, z.DoneAt = nil, nil, time.Now()
 		return nil
 	})
 }
