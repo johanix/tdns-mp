@@ -348,10 +348,11 @@ func (mpzd *MPZoneData) checkMPauthorization() error {
 // that stops voting stays (decision 37). One exception: while its provider
 // is out of signers= and the step's sets keep it signing (plan S13), the
 // combiner takes its own agent's operations (local, one of its configured
-// agents), so that what it serves does not go stale. Nil when the origin
-// may contribute.
-func originVoteRefusal(zone, origin string, local bool, ops []core.RROperation, records map[string][]string) *CombinerSyncResponse {
-	if votesInZone(ZoneName(zone), AgentId(origin)) {
+// agents), so that what it serves does not go stale. A removal this combiner
+// takes in any origin's name (combinerTakesRemoval, S16) is no refusal, and
+// logs none. Nil when the origin may contribute.
+func originVoteRefusal(zone, origin string, local, removal bool, ops []core.RROperation, records map[string][]string) *CombinerSyncResponse {
+	if removal || votesInZone(ZoneName(zone), AgentId(origin)) {
 		return nil
 	}
 	if mpzd, ok := Zones.Get(zone); local && ok && mpzd.leavingSigner() {
@@ -446,7 +447,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		}
 	}
 
-	if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Operations, req.Records); refusal != nil && !req.Removal {
+	if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Removal, req.Operations, req.Records); refusal != nil {
 		refusal.DistributionID, refusal.Timestamp = resp.DistributionID, resp.Timestamp
 		return refusal
 	}

@@ -3,6 +3,7 @@ package tdnsmp
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -474,6 +475,53 @@ func TestAWithdrawalPassesTheCombinersOriginChecks(t *testing.T) {
 	}
 	if held := combinerHolds(mpzd, goneOrigin); len(held) != 0 {
 		t.Errorf("the origin's NS after the withdrawal: %v", held)
+	}
+}
+
+// The combiner logs "rejecting contribution" for a refusal and for nothing
+// else. A removal it takes from an origin that does not vote logs no such
+// line at either of its two checks; a real refusal logs what it always did.
+func TestOnlyARefusalLogsRejectingAContribution(t *testing.T) {
+	mpzd, hdb := withdrawnAtCombiner(t, "log.combiner.withdraw.example.", "ns1")
+	mpzd.Options[OptMPManualApproval] = true
+	conf := &Config{Config: &tdns.Config{}}
+	conf.Config.Internal.KeyDB = hdb.KeyDB
+	conf.SetMpConfig(&MultiProviderConf{Role: "combiner", Identity: csyncCombinerID, Agents: []*PeerConf{{Identity: csyncOurAgent}}})
+	logbuf := &lockedBuffer{}
+	logTo(t, lgCombiner, slog.NewJSONHandler(logbuf, nil))
+	msgQs := &MsgQs{Msg: make(chan *AgentMsgPostPlus, 4)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); CombinerMsgHandler(ctx, conf, msgQs, nil, nil) }()
+	t.Cleanup(func() { cancel(); <-done })
+	send := func(origin string, w *Withdraw, op core.RROperation) {
+		msgQs.Msg <- &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: AgentMsgNotify, OriginatorID: AgentId(origin), DeliveredBy: csyncOurAgent,
+			Zone: ZoneName(mpzd.ZoneName), DistributionID: nextDistributionID(), Withdraw: w, Operations: []core.RROperation{op}}}
+	}
+	add := core.RROperation{Operation: "add", RRtype: "NS", Records: []string{mpzd.ZoneName + " 3600 IN NS ns.alpha.example."}}
+	send(goneOrigin, &Withdraw{Provider: goneOrigin, RRtype: "NS"}, core.RROperation{Operation: "replace", RRtype: "NS"})
+	send(goneOrigin, nil, add)
+	// a voting origin's edit behind them is kept for approval: once it is,
+	// the two before it have been handled
+	send(csyncLeaderA, nil, add)
+	waitUntil(t, "the edit behind the two was not kept for approval", func() bool {
+		edits, _ := ListPendingEdits(hdb, mpzd.ZoneName)
+		return len(edits) > 0
+	})
+	cancel()
+	<-done
+	if held := combinerHolds(mpzd, goneOrigin); len(held) != 0 {
+		t.Errorf("the origin's NS after the withdrawal: %v", held)
+	}
+	logged := logbuf.String()
+	if n := strings.Count(logged, `"msg":"rejecting contribution"`); n != 1 {
+		t.Errorf("%d lines of \"rejecting contribution\", want the one of the real refusal:\n%s", n, logged)
+	}
+	for _, want := range []string{`"level":"WARN"`, `"zone":"log.combiner.withdraw.example."`, `"sender":"` + goneOrigin + `"`,
+		`"reason":"origin ` + goneOrigin + ` is not a voting member of zone log.combiner.withdraw.example."`} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("the refusal's line lacks %s:\n%s", want, logged)
+		}
 	}
 }
 
