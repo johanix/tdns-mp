@@ -205,6 +205,8 @@ func inventoryRequest(sender, zone string, inventory []KeyInventoryEntry, owned 
 		Rollover:     marks.rollover,
 		WaitsOn:      marks.waitsOn,
 		Hold:         marks.hold,
+		Signs:        marks.signs,
+		Withheld:     marks.withheld,
 		Timestamp:    time.Now(),
 	}
 }
@@ -215,13 +217,18 @@ func inventoryRequest(sender, zone string, inventory []KeyInventoryEntry, owned 
 // this provider (rolloverUnderWay, on its own state), for each key waiting
 // in mpdist or mpremove, the other signers whose "applied" is missing, and
 // whether it holds the zone's key machine (plan S6), which a signer that
-// does not sign the zone confirms the same way.
+// does not sign the zone confirms the same way; that it serves its own
+// signatures, and that it withholds the zone (plan S18b). A signer whose
+// keys are published and that does not serve its signatures yet (P5's mode)
+// is no "not signing": its keys are distributed and its agent reads them.
 type inventoryMarks struct {
 	acting     *ActingHandover
 	notSigning bool
 	rollover   bool
 	waitsOn    map[uint16][]string
 	hold       bool
+	signs      bool
+	withheld   bool
 }
 
 // inventoryMarksOf are the zone's marks, given its key inventory. A zone
@@ -236,8 +243,10 @@ func (conf *Config) inventoryMarksOf(zone string, items []KeyInventoryItem) inve
 	if mpzd, ok := Zones.Get(zone); ok {
 		// under the zone's lock: a hand-over replaces MPdata under it
 		mpzd.Lock()
-		notSigning := mpzd.MP != nil && mpzd.MP.MPdata != nil && !mpzd.MP.MPdata.WeAreSigner
+		notSigning := mpzd.MP != nil && mpzd.MP.MPdata != nil && !mpzd.MP.MPdata.WeAreSigner && !mpzd.MP.MPdata.WeHoldKeys
+		m.signs = mpzd.DnssecPolicy != nil && mpzd.Options[tdns.OptInlineSigning]
 		mpzd.Unlock()
+		m.withheld = mpzd.Withheld()
 		if notSigning {
 			m.notSigning = true
 			return m

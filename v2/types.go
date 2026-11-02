@@ -235,6 +235,7 @@ type KeyInventorySnapshot struct {
 	Rollover   bool
 	WaitsOn    map[uint16][]string
 	Hold       bool // the signer holds the zone's key machine (plan S6)
+	Signs      bool // the signer serves its own signatures: it has started signing (plan S18b)
 	Received   time.Time
 	seq        uint64 // the inventory's KeystateInventoryMsg.seq
 }
@@ -357,6 +358,7 @@ type MPdata struct {
 	WeAreProvider bool                     // At least one of our agent identities matches an HSYNC3 Identity
 	OurLabel      string                   // Our provider label from the matching HSYNC3 record
 	WeAreSigner   bool                     // Our label is in Sets.Signing
+	WeHoldKeys    bool                     // Our label is in Sets.KeySigners: our keys are published, and ours or not, we keep the other signers' (plan S18b)
 	OtherSigners  int                      // Count of the other providers in Sets.KeySigners
 	ZoneSigned    bool                     // Sets.Signing is non-empty (zone uses multi-signer)
 	Sets          Roles                    // The sets the data is computed from: the step's (plan S13)

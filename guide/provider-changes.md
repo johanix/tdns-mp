@@ -132,10 +132,24 @@ As a signer and server, in this order:
 4. `servers="alpha,bravo,charlie"`, if it was not in the
    first edit.
 
-**Today:** a provider named in `signers=` while its
-signer is running does not sign until the signer is
-restarted
-([issue 146](https://github.com/johanix/tdns-mp/issues/146)).
+The leader carries this out, each step confirmed by every
+provider; `tdns-mpcli agent parentsync status` says which
+step the zone is at (`adding signer agent.charlie.example.:
+step 2 (its DS at the parent)`). Charlie's signer starts
+signing with no restart, at its last step, above the serial
+its servers served. Until then it relays its copy.
+
+A server that becomes a signer goes on serving its upstream's
+copy until its status and its agent's log say `the provider
+may switch its servers to its own signer`. Its operator then
+points its signer at its own combiner and its servers at its
+own signer, and the zone is done once they serve its
+signatures. **Not before:** a signer re-plumbed to its combiner
+while it does not sign serves an unsigned copy.
+
+A signer that has been handed nothing by its agent takes no
+role from its own copy: at its first load the zone is withheld,
+and answers nobody, until its agent hands it what it acts by.
 
 ### 3.5 Charlie's NS records
 
@@ -338,11 +352,11 @@ Every agent refuses, with the same reason:
 
 On this build the agents also refuse every edit whose
 steps tdns-mp does not carry out yet (`step-missing`,
-`not-built`): a server role (3.4), a move into `signers=`
-(3.4, 5.1), and a change of
-`parentsync`. So a change of
+`not-built`): a change of `parentsync`. So a change of
 `parentsync` is refused: the owner does not write to the
-parent. A role taken away is carried out (section 4).
+parent. A server role, a move into `signers=`, a role taken
+away (section 4), an upstream, `nsmgmt`, `pubkey` and
+`pubcds` are carried out.
 
 A change of `auditors=` or `suffix`, and an HSYNC3 record
 added or removed for a provider with no role, are agreed.

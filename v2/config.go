@@ -396,4 +396,8 @@ type InternalMpConf struct {
 	// ownersNSLogged is when each report of the owner's NS RRset was last
 	// logged (nsmgmt.go); the data engine's.
 	ownersNSLogged map[string]time.Time
+	// signerAdds is what the agent has looked up for a signer's addition, and
+	// signerRoles the signer's side of it (plan S18b).
+	signerAdds  signerAddBook
+	signerRoles signerRoleBook
 }

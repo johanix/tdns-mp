@@ -212,9 +212,22 @@ func TestAnUpstreamChangeIsAgreedOnceItsStepExists(t *testing.T) {
 func TestAMoveIntoSignersIsRefusedUntilItsStepExists(t *testing.T) {
 	from := jAt(t, 41, jServers3, jAlpha, jBeta, jCharlie)
 	to := jAt(t, 42, `servers="alpha,beta,charlie" signers="alpha,charlie"`, jAlpha, jBeta, jCharlie)
-	wantRefusals(t, "now", judgeTransition(from, to), Refusal{RefusedStepMissing, "moves agent.charlie.example. into signers=, a step that cannot be carried out yet"})
-	wantRefusals(t, "P5", judge(from, to, builtKinds, carriedKinds|kindSignerRole), Refusal{RefusedNotBuilt, "moves agent.charlie.example. into signers=: not built yet"})
-	wantRefusals(t, "S18b", judge(from, to, builtKinds|kindSignerRole, carriedKinds|kindSignerRole))
+	wantRefusals(t, "before P5", judge(from, to, builtKinds&^kindSignerRole, carriedKinds&^kindSignerRole), Refusal{RefusedStepMissing, "moves agent.charlie.example. into signers=, a step that cannot be carried out yet"})
+	wantRefusals(t, "P5", judge(from, to, builtKinds&^kindSignerRole, carriedKinds), Refusal{RefusedNotBuilt, "moves agent.charlie.example. into signers=: not built yet"})
+	wantRefusals(t, "S18b", judgeTransition(from, to))
+}
+
+// A server that moves into signers= and names no upstream any more serves its
+// own signer's copy from then on, which the move's steps bring about (design
+// 5.3). Any other change of an upstream waits for its own step (S21), and so
+// does one that moves it to another signer as it moves into signers=.
+func TestAServerMovedIntoSignersDropsItsUpstreamWithNoStepOfItsOwn(t *testing.T) {
+	const a, b = `3600 IN HSYNC3 ON a a.role.example. .`, `3600 IN HSYNC3 ON b b.role.example. a`
+	from := jAt(t, 41, `servers="a,b" signers="a"`, a, b)
+	to := jAt(t, 42, `servers="a,b" signers="a,b"`, a, `3600 IN HSYNC3 ON b b.role.example. .`)
+	wantRefusals(t, "the move", judgeTransition(from, to))
+	stays := jAt(t, 42, `servers="a,b" signers="a"`, a, `3600 IN HSYNC3 ON b b.role.example. .`)
+	wantRefusals(t, "no move", judgeTransition(from, stays)) // 211-demo: S21 builds an upstream's step
 }
 
 func TestAKindWithoutItsStepsIsRefused(t *testing.T) {
