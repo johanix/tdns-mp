@@ -28,7 +28,9 @@ package tdnsmp
 
 import (
 	"cmp"
+	"context"
 	"fmt"
+	"net"
 	"slices"
 	"strings"
 	"time"
@@ -52,6 +54,9 @@ const (
 	// removalTTLUnknown stands for a TTL this agent never saw served: a new
 	// leader's, of a DS the parent had dropped before it looked.
 	removalTTLUnknown = time.Hour
+	// dnskeyLookWait is how long a look at the zone's DNSKEY TTL waits for each
+	// of its servers.
+	dnskeyLookWait = 2 * time.Second
 )
 
 // leaver is a provider that leaves servers=, signers= or both.
@@ -364,13 +369,15 @@ func zoneNSOf(zone string) ([]string, uint32) {
 
 // --- The parent ---
 
-// parentSeen is what the parent serves for the zone, as last looked at.
+// parentSeen is what the parent serves for the zone, as last looked at, and
+// the TTL the zone's own servers give its DNSKEY RRset.
 type parentSeen struct {
-	at    time.Time
-	ns    []string // the names of its NS RRset, folded
-	nsTTL uint32
-	ds    []uint16 // the key tags of its DS RRset
-	dsTTL uint32   // as last served
+	at        time.Time
+	ns        []string // the names of its NS RRset, folded
+	nsTTL     uint32
+	ds        []uint16 // the key tags of its DS RRset
+	dsTTL     uint32   // as last served
+	dnskeyTTL uint32   // the largest seen since the zone's first look; 0 if none
 }
 
 // parentLook asks the parent what it serves for the zone; a test stands in
@@ -415,12 +422,63 @@ var parentLook = func(conf *Config, zone string) (parentSeen, error) {
 				seen.dsTTL = max(seen.dsTTL, ds.Hdr.Ttl)
 			}
 		}
+		// the servers the parent names, and those the zone itself names
+		zoneNames, _ := zoneNSOf(zone)
+		names := append(slices.Clone(seen.ns), zoneNames...)
+		slices.Sort(names)
+		seen.dnskeyTTL = servedDnskeyTTL(zd.ZoneName, serverAddrs(conf.Config.Internal.ImrEngine, slices.Compact(names)))
 		return seen, nil
 	}
 	if last == nil {
 		last = fmt.Errorf("no parent server gave an NS RRset for %s", zd.ZoneName)
 	}
 	return parentSeen{}, last
+}
+
+// serverAddrs are the addresses of the named servers, found as FetchParentData
+// finds the parent's. A name that does not resolve gives none.
+func serverAddrs(imr *tdns.Imr, names []string) []string {
+	var addrs []string
+	for _, name := range names {
+		for _, rrtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+			resp, err := imr.ImrQuery(context.Background(), name, rrtype, dns.ClassINET, nil)
+			if err != nil || resp == nil || resp.RRset == nil {
+				continue
+			}
+			for _, rr := range resp.RRset.RRs {
+				switch rr := rr.(type) {
+				case *dns.A:
+					addrs = append(addrs, net.JoinHostPort(rr.A.String(), "53"))
+				case *dns.AAAA:
+					addrs = append(addrs, net.JoinHostPort(rr.AAAA.String(), "53"))
+				}
+			}
+		}
+	}
+	return addrs
+}
+
+// servedDnskeyTTL is the largest TTL the servers give the zone's DNSKEY RRset,
+// 0 when none tells. Providers' signer policies may differ, and a resolver may
+// hold the RRset of any of them. Over TCP: the RRset of a zone with several
+// signers does not fit a plain UDP answer.
+func servedDnskeyTTL(zone string, servers []string) uint32 {
+	c := &dns.Client{Net: "tcp", Timeout: dnskeyLookWait}
+	m := new(dns.Msg)
+	m.SetQuestion(zone, dns.TypeDNSKEY)
+	var ttl uint32
+	for _, server := range servers {
+		res, _, err := c.Exchange(m, server)
+		if err != nil || res.Rcode != dns.RcodeSuccess {
+			continue
+		}
+		for _, rr := range res.Answer {
+			if key, ok := rr.(*dns.DNSKEY); ok {
+				ttl = max(ttl, key.Hdr.Ttl)
+			}
+		}
+	}
+	return ttl
 }
 
 // parentLookGo runs a look at the parent; a test runs it in place.
@@ -451,6 +509,8 @@ func (conf *Config) parentNow(zone string) (parentSeen, bool) {
 				if got.dsTTL == 0 {
 					got.dsTTL = zr.parent.dsTTL // as last served
 				}
+				// a server the parent has since dropped may have served the larger
+				got.dnskeyTTL = max(got.dnskeyTTL, zr.parent.dnskeyTTL)
 				zr.parent = got
 			}
 			rb.mu.Unlock()
@@ -598,9 +658,9 @@ func (conf *Config) removalNSWait(zone, label, id string, agentNS bool) string {
 	if agentNS && !conf.removalWithdrawn(zone, id, "NS") {
 		return "for the withdrawal of its NS to be confirmed"
 	}
-	conf.askStepSync(zone, "a removal's NS step")
 	seen, ok := conf.parentNow(zone)
 	if !ok {
+		conf.askStepSync(zone, "a removal's NS step")
 		return "until the parent's NS RRset is known"
 	}
 	rb := &conf.InternalMp.reconciles
@@ -615,6 +675,7 @@ func (conf *Config) removalNSWait(zone, label, id string, agentNS bool) string {
 	}
 	zoneNames, zoneTTL := zoneNSOf(zone)
 	if len(named) > 0 {
+		conf.askStepSync(zone, "a removal's NS step")
 		rb.forgetWait(key, wait)
 		text := "until the parent no longer names " + strings.Join(named, ", ")
 		if !agentNS && slices.ContainsFunc(named, func(n string) bool { return slices.Contains(zoneNames, canonicalName(n)) }) {
@@ -637,15 +698,16 @@ func (conf *Config) removalDSWait(zone, id string) string {
 	if !conf.removalWithdrawn(zone, id, "CDS") {
 		return "for the withdrawal of its CDS to be confirmed"
 	}
-	conf.askStepSync(zone, "a removal's DS step")
 	seen, ok := conf.parentNow(zone)
 	if !ok {
+		conf.askStepSync(zone, "a removal's DS step")
 		return "until the parent's DS RRset is known"
 	}
 	rb := &conf.InternalMp.reconciles
 	key := canonicalName(zone)
 	wait := "ds " + id
 	if !dsLeft(conf, zone, seen) {
+		conf.askStepSync(zone, "a removal's DS step")
 		rb.forgetWait(key, wait)
 		return removalWaitSaid(conf, zone, id, "3 (its DS)", "until the parent no longer serves its DS")
 	}
@@ -653,7 +715,7 @@ func (conf *Config) removalDSWait(zone, id string) string {
 	if seen.dsTTL != 0 {
 		ttl = time.Duration(seen.dsTTL) * time.Second
 	}
-	until := rb.sinceFirst(key, wait, time.Now()).Add(max(ttl, conf.dnskeyTTLOf(zone, id)))
+	until := rb.sinceFirst(key, wait, time.Now()).Add(max(ttl, conf.dnskeyTTLOf(zone, id, seen)))
 	if time.Now().Before(until) {
 		return removalWaitSaid(conf, zone, id, "3 (its DS)", "for the DS and DNSKEY TTLs until "+removalTime(until))
 	}
@@ -680,10 +742,18 @@ var dsLeft = func(conf *Config, zone string, seen parentSeen) bool {
 	return !slices.ContainsFunc(seen.ds, func(tag uint16) bool { return !tags[tag] })
 }
 
-// dnskeyTTLOf is the DNSKEY TTL of the zone: the larger of the zone's own
-// RRset's and the leaving provider's contribution's, removalTTLUnknown when
-// this agent holds neither.
-func (conf *Config) dnskeyTTLOf(zone, id string) time.Duration {
+// dnskeyTTLOf is the DNSKEY TTL of the zone: what its servers were seen to
+// serve. Failing that, the larger of the zone's own RRset's and the leaving
+// provider's contribution's, removalTTLUnknown when this agent holds neither.
+// That fallback errs long: a held key has its TTL as generated (3600), not the
+// one its signer's policy serves it with.
+func (conf *Config) dnskeyTTLOf(zone, id string, seen parentSeen) time.Duration {
+	if seen.dnskeyTTL != 0 {
+		return time.Duration(seen.dnskeyTTL) * time.Second
+	}
+	if conf.InternalMp.reconciles.sayOnce(canonicalName(zone), "served dnskey ttl") {
+		lg.Warn("no server told the zone's DNSKEY TTL; a removal goes by the TTL held here", "zone", zone, "provider", id)
+	}
 	var ttl uint32
 	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil && mpzd.ZoneData != nil {
 		if apex, err := mpzd.GetOwner(mpzd.ZoneName); err == nil && apex != nil {
