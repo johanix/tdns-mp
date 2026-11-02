@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -502,11 +503,12 @@ func TestOnlyARefusalLogsRejectingAContribution(t *testing.T) {
 	send(goneOrigin, &Withdraw{Provider: goneOrigin, RRtype: "NS"}, core.RROperation{Operation: "replace", RRtype: "NS"})
 	send(goneOrigin, nil, add)
 	// a voting origin's edit behind them is kept for approval: once it is,
-	// the two before it have been handled
+	// the two before it have been handled. The withdrawal's own edit is listed
+	// too until it is applied, so look for that origin's.
 	send(csyncLeaderA, nil, add)
 	waitUntil(t, "the edit behind the two was not kept for approval", func() bool {
 		edits, _ := ListPendingEdits(hdb, mpzd.ZoneName)
-		return len(edits) > 0
+		return slices.ContainsFunc(edits, func(e *PendingEditRecord) bool { return e.SenderID == csyncLeaderA })
 	})
 	cancel()
 	<-done
@@ -709,7 +711,7 @@ func TestWithdrawalDoneReadsEveryRecipient(t *testing.T) {
 	r.heldForN(r.n, time.Now(), "ns1.n.example.")
 	r.leads(roleA)
 	tm := r.conf.InternalMp.MPTransport
-	tm.noRoleTimeout = 50 * time.Millisecond
+	tm.noRoleTimeout = time.Hour // the test ends the wait itself
 	distID, err := r.conf.sendWithdrawal(r.zdr, ZoneName(r.zone), roleN, "NS")
 	if err != nil {
 		t.Fatal(err)
@@ -730,7 +732,7 @@ func TestWithdrawalDoneReadsEveryRecipient(t *testing.T) {
 	if r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
 		t.Fatal("done before the time-out for n, which has no role")
 	}
-	time.Sleep(60 * time.Millisecond)
+	tm.noRoleTimeout = time.Nanosecond // the time-out has passed
 	if !r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
 		t.Error("not done after the time-out for n")
 	}
@@ -753,7 +755,7 @@ func TestAWithdrawalWaitsForAnAuditorUpToTheTimeOut(t *testing.T) {
 	r.leads(roleA)
 	activeAs(t, r.store, r.zone, freezeAt(t, 42, "v", "a,b", "n")) // n an auditor
 	tm := r.conf.InternalMp.MPTransport
-	tm.noRoleTimeout = 50 * time.Millisecond
+	tm.noRoleTimeout = time.Hour // the test ends the wait itself
 	distID, err := r.conf.sendWithdrawal(r.zdr, ZoneName(r.zone), roleN, "NS")
 	if err != nil {
 		t.Fatal(err)
@@ -765,7 +767,7 @@ func TestAWithdrawalWaitsForAnAuditorUpToTheTimeOut(t *testing.T) {
 	if r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
 		t.Fatal("done before the time-out for the auditor")
 	}
-	time.Sleep(60 * time.Millisecond)
+	tm.noRoleTimeout = time.Nanosecond // the time-out has passed
 	if !r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
 		t.Error("not done after the time-out for the auditor")
 	}
