@@ -55,3 +55,28 @@ func TestTheAuditorConfirmsADistributionAsSuccess(t *testing.T) {
 		t.Fatal("an engine without queues sent a confirmation")
 	}
 }
+
+// A withdrawal's originator is the provider, which did not send it: the
+// auditor's final word goes to the leader that delivered it, which waits for
+// it with no time-out. Any other message's goes to its originator, whoever
+// delivered it.
+func TestTheAuditorsFinalWordGoesToWhomTheMessagesAnswersGo(t *testing.T) {
+	var got *RemoteConfirmationDetail
+	e := &AuditorEngine{msgQs: &MsgQs{OnRemoteConfirmationReady: func(d *RemoteConfirmationDetail) { got = d }}}
+	const provider, leader = "agent.p1.example.", "agent.leader.example."
+	for _, c := range []struct {
+		name string
+		w    *Withdraw
+		want string
+	}{
+		{"a withdrawal", &Withdraw{Provider: provider, RRtype: "DNSKEY"}, leader},
+		{"a forwarded message", nil, provider},
+	} {
+		got = nil
+		e.recordSyncMsg(&AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: core.AgentMsgNotify, OriginatorID: provider, DeliveredBy: leader,
+			Zone: "cell.example.", DistributionID: "d1", Operations: []core.RROperation{{Operation: "replace", RRtype: "DNSKEY"}}, Withdraw: c.w}})
+		if got == nil || got.OriginatingSender != c.want {
+			t.Errorf("%s: the final word %+v, want it to go to %s", c.name, got, c.want)
+		}
+	}
+}

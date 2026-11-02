@@ -39,6 +39,33 @@ func TestTransportBoundary_ARefusalAsOlderIsBookedToGoAgain(t *testing.T) {
 	}
 }
 
+// The way a rig's auditor takes the leader's withdrawal: the transport names
+// the provider as the message's originator, and the auditor's final word goes
+// to the leader all the same.
+func TestTransportBoundary_TheAuditorsFinalWordOnAWithdrawalGoesToTheLeader(t *testing.T) {
+	zone := "auditor.boundary.example."
+	r := newNotifyRig(t, zone, "NOTIFY", repeat(time.Minute, 4)...)
+	peer := r.peer.Identity
+	distID := nextDistributionID()
+	body, err := json.Marshal(DnsSyncPayload{MessageType: "sync", OriginatorID: peer, YourIdentity: r.us.Identity, Zone: zone,
+		Operations: []core.RROperation{{Operation: "replace", RRtype: "DNSKEY"}}, Time: time.Now().Format(time.RFC3339Nano), Timestamp: time.Now().Unix(),
+		DistributionID: distID, Withdraw: &Withdraw{Provider: "agent.gone.boundary.example.", RRtype: "DNSKEY"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.us.Bridge.routeIncomingMessage(&transport.IncomingMessage{TypeToken: "sync", DistributionID: distID, SenderID: peer,
+		TransportSender: peer, Mechanism: transport.MechanismDNS, Zone: zone, Payload: body, ReceivedAt: time.Now(), SourceAddr: "127.0.0.1:0"})
+	amp, ok := recvMsgWithin(t, r.us.MsgQs.Msg, 10*time.Second)
+	if !ok {
+		t.Fatal("the transport did not queue the withdrawal")
+	}
+	var got *RemoteConfirmationDetail
+	(&AuditorEngine{msgQs: &MsgQs{OnRemoteConfirmationReady: func(d *RemoteConfirmationDetail) { got = d }}}).recordSyncMsg(amp)
+	if got == nil || got.OriginatingSender != peer {
+		t.Errorf("the auditor's final word: %+v, want it to go to the leader %s", got, peer)
+	}
+}
+
 // The peer leads the zone, and gone, which has a record and no role, has
 // NS records at the agent. The peer's withdrawal of them reaches the agent
 // over the wire and is taken: they leave the agent's data, the agent hands
