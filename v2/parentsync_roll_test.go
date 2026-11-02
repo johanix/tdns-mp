@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
@@ -541,6 +542,69 @@ func TestAKEYPurgeIsAskedForAgainUntilTheCombinerHasMadeIt(t *testing.T) {
 	r.conf.retryKEYPurges(r.zdr)
 	if len(r.sends) != 4 {
 		t.Errorf("asked again once dropped: %d sends", len(r.sends))
+	}
+}
+
+// A drop of a KEY is the combiner's word alone: a peer answering under the
+// drop's distribution ID changes nothing, whatever it says.
+func TestOnlyTheCombinerAnswersAKEYPurge(t *testing.T) {
+	r := newKeyPurgeRig(t, "roll.purgeword.example.")
+	word := func(from string, status transport.ConfirmStatus) {
+		r.conf.InternalMp.MPTransport.ChunkHandler.OnConfirmationReceived(confirmIn(r.sends[0], from, status, string(r.zone), nil, nil, nil, nil, false, ""))
+	}
+	r.conf.dropOtherKEYs(r.zdr, r.zone, r.them)
+	if len(r.sends) != 1 {
+		t.Fatalf("the combiner was asked %d times", len(r.sends))
+	}
+	word(string(r.them), transport.ConfirmSuccess)
+	r.conf.retryKEYPurges(r.zdr)
+	if !r.holds(earlierLeader) {
+		t.Fatal("a peer's word dropped the KEY")
+	}
+	word(string(r.them), transport.ConfirmRejected)
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 1 {
+		t.Errorf("a peer's refusal had the drop asked for again: %d sends", len(r.sends))
+	}
+	word(rigCombiner, transport.ConfirmSuccess)
+	r.conf.retryKEYPurges(r.zdr)
+	if r.holds(earlierLeader) {
+		t.Error("the KEY is kept after the combiner dropped it")
+	}
+}
+
+// A stored roll that cannot be read is no proof that none runs: no new roll
+// starts over it, and nothing reads which key is the zone's without it.
+func TestARollThatCannotBeReadIsNotOverwritten(t *testing.T) {
+	r := newRollRig(t, "roll.unreadable.example.")
+	r.parent.holdTrust = true
+	k2 := r.start(t)
+	kdb := r.mpzd.KeyDB
+	setNextTry := func(v any) {
+		t.Helper()
+		if _, err := kdb.DB.Exec(`UPDATE MPSig0Rolls SET nexttry = ?`, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setNextTry("not a time")
+	if _, err := loadRoll(kdb, r.zone); err == nil {
+		t.Fatal("the rig's roll can still be read")
+	}
+
+	_, err := r.conf.startSig0Roll(r.ctx, r.zone, dns.ED25519)
+	r.conf.InternalMp.sig0Rolls.wait()
+	if err == nil || !strings.Contains(err.Error(), "the roll of the SIG(0) key") {
+		t.Errorf("a roll started over one that cannot be read: %v", err)
+	}
+	if _, err := readZoneKey(kdb, r.zone); err == nil {
+		t.Error("the zone's key was read without its roll")
+	}
+	if published, err := sig0Rows(kdb, r.zone, tdns.Sig0StatePublished); err != nil || len(published) != 1 {
+		t.Errorf("published keys: %d, %v", len(published), err)
+	}
+	setNextTry(0)
+	if ro := r.roll(t); ro == nil || ro.newKeyid != k2 {
+		t.Errorf("the roll of key %d was overwritten: %+v", k2, ro)
 	}
 }
 

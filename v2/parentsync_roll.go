@@ -156,13 +156,14 @@ func rollZones(kdb *tdns.KeyDB) []ZoneName {
 // rollingKey is the new key of the zone's roll, kept published at the
 // leader, while the roll is "added" or "published"; sent: its KEY has gone
 // out ("published"). In "added" the KEY may have gone out before the phase
-// was written, which the zone's copy shows.
-func rollingKey(kdb *tdns.KeyDB, zone ZoneName) (key *sig0Row, sent bool) {
+// was written, which the zone's copy shows. A roll that cannot be read is an
+// error: it says nothing of which key is the zone's.
+func rollingKey(kdb *tdns.KeyDB, zone ZoneName) (key *sig0Row, sent bool, err error) {
 	r, err := loadRoll(kdb, zone)
 	if err != nil || r == nil || (r.phase != rollAdded && r.phase != rollPublished) {
-		return nil, false
+		return nil, false, err
 	}
-	return sig0RowByID(kdb, zone, tdns.Sig0StatePublished, r.newKeyid), r.phase == rollPublished
+	return sig0RowByID(kdb, zone, tdns.Sig0StatePublished, r.newKeyid), r.phase == rollPublished, nil
 }
 
 func sig0RowByID(kdb *tdns.KeyDB, zone ZoneName, state string, keyid uint16) *sig0Row {
@@ -412,7 +413,11 @@ func (conf *Config) startSig0Roll(ctx context.Context, zone ZoneName, alg uint8)
 	}
 	var newKeyid, oldKeyid uint16
 	err := conf.keySetupLocked(zone, func() error {
-		if r, err := loadRoll(kdb, zone); err == nil && r != nil {
+		r, err := loadRoll(kdb, zone)
+		switch {
+		case err != nil:
+			return fmt.Errorf("the roll of the SIG(0) key of %s cannot be read: %w", zone, err)
+		case r != nil:
 			return fmt.Errorf("a roll of the SIG(0) key of %s is under way (%s, new key %d)", zone, r.phase, r.newKeyid)
 		}
 		zk, err := readZoneKey(kdb, zone)

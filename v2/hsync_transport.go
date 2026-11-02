@@ -473,7 +473,6 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		tm.noteConfirmation(c, instr)
 		// a recipient's word on a roll's new KEY (plan S17a)
 		tm.rollKEYs.heard(distributionID, senderID, status.String(), c.Message, notYet)
-		tm.keyPurges.heard(distributionID, status.String(), c.Message, notYet)
 
 		// the queue's entry is settled whatever the answer: a "not yet" is
 		// sent again when the two are in step, not as the old send
@@ -487,6 +486,9 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 		// in "acting" (plan S8). What it removed on a word that was not
 		// final is named in the final word (carried).
 		if tm.combinerID != "" && core.EqualNames(dns.Fqdn(senderID), dns.Fqdn(string(tm.combinerID))) {
+			// its word on the drop of a KEY held under another name (plan
+			// S17a), which no other peer can give
+			tm.keyPurges.heard(distributionID, status.String(), c.Message, notYet)
 			handled, carried := tm.handover.confirmation(distributionID, status, confirmActing(c.App), removed)
 			if handled {
 				return
