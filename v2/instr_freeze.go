@@ -188,20 +188,22 @@ func syncCauseOf(st tdns.DelegationSyncStatus) syncCause {
 }
 
 // syncCauseFor is the cause of a sync of the zone with the status st: a
-// step's own while the step held asks it (S17b: a removal's NS and DS steps);
+// step's own while the step held asks it (S17b: a removal's NS and DS steps) or
+// once the agents have taken the parent sync up in this transition (S20);
 // otherwise by what differs.
 func (conf *Config) syncCauseFor(zone string, st tdns.DelegationSyncStatus) syncCause {
-	if conf.InternalMp.reconciles.asksSync(canonicalName(zone)) {
+	if conf.InternalMp.reconciles.asksSync(canonicalName(zone)) || conf.parentSyncTakenUp(zone) {
 		return syncStep
 	}
 	return syncCauseOf(st)
 }
 
 // frozenForNotify is why a NOTIFY to the zone's parent is held by the freeze:
-// nothing while the step held asks the sync, as a parent that takes NOTIFY
-// only follows the step's CSYNC and CDS (S17b).
+// nothing while the step held asks the sync (S17b) or once the agents have taken
+// the parent sync up in this transition (S20), as a parent that takes NOTIFY
+// only follows the step's CSYNC and CDS.
 func (conf *Config) frozenForNotify(zone string) []string {
-	if conf.InternalMp.reconciles.asksSync(canonicalName(zone)) {
+	if conf.InternalMp.reconciles.asksSync(canonicalName(zone)) || conf.parentSyncTakenUp(zone) {
 		return nil
 	}
 	return conf.zoneFrozen(zone)

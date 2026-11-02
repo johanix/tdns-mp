@@ -97,7 +97,7 @@ The keys that matter here:
 | `servers=`   | Comma-separated labels of providers that serve the zone.           |
 | `signers=`   | Labels of providers that sign the zone.                            |
 | `nsmgmt=`    | Who manages the NS RRset: `agent` (coordinated) or a single label. |
-| `parentsync=`| Who is responsible for parent-side delegation sync.                |
+| `parentsync=`| Who is responsible for parent-side delegation sync: `agent` or `owner`. To change it later, follow [Changing the Set of Providers §6.1](provider-changes.md#61-changing-parentsync). |
 | `auditors=`  | Labels of auditor parties (see [The Auditor](auditor.md)).         |
 
 For example.com. with alpha signing+serving and

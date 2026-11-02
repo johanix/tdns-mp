@@ -353,14 +353,19 @@ func (conf *Config) rolloverInZone(zone string) bool {
 // leave the rollover and the thaw waiting for each other (design 3.1, 6;
 // plan S14). Nor as a step of the reconciliation (design 6): a step's own sync
 // waits for the key too (holdForZoneKey comes before the freeze), so a leader
-// elected during a removal would wait for the step, and the step for it.
+// elected during a removal would wait for the step, and the step for it. Once a
+// hand-over to the owner has come to the delete of the agents' key at the
+// parent, the key is offered no more, whatever waits for it (S20).
 func (conf *Config) offerHeld(ctx context.Context, zone ZoneName) (held bool, why string) {
+	if conf.InternalMp.Instructions.tookStep(string(zone), parentSyncKeyKey) {
+		return true, "the parent sync goes to the zone's owner"
+	}
 	if len(conf.zoneFrozen(string(zone))) > 0 {
 		if conf.rolloverInZone(string(zone)) && conf.keyPending(ctx, zone) {
 			lgAgent.Info("the zone's SIG(0) key is offered during the transition: a rollover under way waits for the parent to trust it", "zone", zone)
 			return false, ""
 		}
-		if conf.InternalMp.reconciles.asksSync(canonicalName(string(zone))) {
+		if conf.InternalMp.reconciles.asksSync(canonicalName(string(zone))) || conf.parentSyncTakenUp(string(zone)) {
 			lgAgent.Info("the zone's SIG(0) key is published and offered during the transition: a step's own sync waits for it", "zone", zone)
 			return false, ""
 		}
@@ -387,6 +392,10 @@ func (conf *Config) keyToPublish(zone ZoneName) bool {
 func (conf *Config) zoneKeyLine(ctx context.Context, zone ZoneName) string {
 	if lem := conf.InternalMp.LeaderElectionManager; lem == nil || !lem.IsLeader(zone) {
 		return ""
+	}
+	// what the hand-over of the parent sync left for the owner (plan S20)
+	if line := conf.InternalMp.parentSyncs.ownerTold(string(zone)); line != "" {
+		return line
 	}
 	kdb := conf.zoneKeyDB(zone)
 	if kdb == nil {

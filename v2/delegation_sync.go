@@ -421,9 +421,9 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 	// No CSYNC is made while the zone is frozen (plan S6): the leader's
 	// CSYNC would be owed, and the sync that passes, a rollover's DS sync,
 	// must not wait for its confirmations. A step's own sync makes one: a
-	// parent that takes NOTIFY only follows it (S17b)
+	// parent that takes NOTIFY only follows it (S17b, S20)
 	var csyncErr error
-	if len(conf.zoneFrozen(ds.ZoneName)) == 0 || conf.InternalMp.reconciles.asksSync(canonicalName(ds.ZoneName)) {
+	if len(conf.frozenForNotify(ds.ZoneName)) == 0 {
 		csyncErr = conf.delegationCsyncStep(runCtx, ds.ZoneName, syncstate)
 	}
 	// Room for more than the two NOTIFYs a sync sends (CSYNC, CDS): the sync

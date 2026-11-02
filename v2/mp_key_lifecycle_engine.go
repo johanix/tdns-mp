@@ -281,7 +281,15 @@ func (w *signerWire) ServedDnskeyTTL(zone string) time.Duration {
 func (w *signerWire) KeysChanged(zone string) {
 	go pushKeystateInventoryToAllAgents(w.conf, dns.Fqdn(zone))
 	// and the CDS follows a ds column change the served DNSKEY RRset does
-	// not show (arrow 1): tdns's DS engine is woken
+	// not show (arrow 1)
+	w.wakeDSEngine(zone)
+}
+
+// wakeDSEngine has tdns's DS engine look at the zone's CDS.
+func (w *signerWire) wakeDSEngine(zone string) {
+	if w.conf.Config == nil {
+		return
+	}
 	if kdb := w.conf.Config.Internal.KeyDB; kdb != nil {
 		if zd, ok := tdns.Zones.Get(dns.Fqdn(zone)); ok && zd != nil {
 			kdb.KeysChanged(zd)

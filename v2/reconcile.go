@@ -50,13 +50,17 @@ type InstrRemoval = hsync.InstrRemoval
 // --- The kinds of change and their runners (design 5) ---
 
 // stepKind orders the steps of a transition that changes several things
-// (design 5): additions first, then role changes, then removals.
+// (design 5): additions first, then role changes, then removals. The parent
+// sync's change comes outside them (plan S20): taken up by the agents before
+// anything that needs them at the parent, handed to the owner after it.
 type stepKind int
 
 const (
-	stepAddition stepKind = iota
+	stepTakeUp stepKind = iota
+	stepAddition
 	stepRoleChange
 	stepRemoval
+	stepHandOver
 )
 
 // stepRunner is the steps of one kind of change: what a transition needs of
@@ -144,7 +148,7 @@ const lastStepKey = "last"
 // signer hold V.
 func planSteps(p planView) []plannedStep {
 	var steps []plannedStep
-	for _, kind := range []stepKind{stepAddition, stepRoleChange, stepRemoval} {
+	for _, kind := range []stepKind{stepTakeUp, stepAddition, stepRoleChange, stepRemoval, stepHandOver} {
 		for _, r := range stepRunners {
 			if r.kind != kind {
 				continue
@@ -322,6 +326,17 @@ func (s *InstructionStore) excuse(zone, member string) error {
 		z.Excused = append(z.Excused, canonicalName(member))
 		return nil
 	})
+}
+
+// tookStep: the zone's transition has taken the step named key.
+func (s *InstructionStore) tookStep(zone, key string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, z := s.zoneLocked(zone)
+	return z != nil && slices.Contains(z.Taken, key)
 }
 
 // reconcileInputs is what the reconciliation reads of the store for a zone.
@@ -994,6 +1009,7 @@ func (conf *Config) transitionDone(zone string, serial uint32) {
 		return
 	}
 	conf.InternalMp.reconciles.forget(canonicalName(zone))
+	conf.InternalMp.parentSyncs.transitionDone(zone)
 	lg.Info("transition done", "zone", zone, "serial", serial)
 	if conf.safeToRemove(zone) {
 		lg.Info("safe to remove", "zone", zone, "serial", serial)

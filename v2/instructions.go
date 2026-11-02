@@ -502,6 +502,12 @@ type Roles struct {
 	NSmgmt     uint8 `json:"nsmgmt"` // owner or agent
 	ParentSync uint8 `json:"parentsync"`
 	Hold       bool  `json:"hold,omitempty"` // nothing new starts (S6's freeze); false until then
+
+	// CDSWithdrawn: every provider withdraws its CDS and CSYNC, while
+	// parentsync stays the agents' until the last of a hand-over's steps to
+	// the owner (plan S20). CDSTTL is their TTL as served when they went.
+	CDSWithdrawn bool   `json:"cds_withdrawn,omitempty"`
+	CDSTTL       uint32 `json:"cds_ttl,omitempty"`
 }
 
 // rolesFor is the sets of a serial's lists: from's during a transition, the
@@ -652,8 +658,12 @@ func (mpzd *MPZoneData) setsLine() string {
 		}
 		return name + " " + strings.Join(labelsOf(set), ",")
 	}
-	return strings.Join([]string{part("servers", r.Servers), part("key signers", r.KeySigners), part("DS signers", r.DSSigners),
+	line := strings.Join([]string{part("servers", r.Servers), part("key signers", r.KeySigners), part("DS signers", r.DSSigners),
 		part("key confirmers", r.KeyConfirmers), part("signing", r.Signing)}, "; ")
+	if r.CDSWithdrawn {
+		line += "; CDS and CSYNC withdrawn"
+	}
+	return line
 }
 
 // participantsOf is the reading's three sets, by identity (plan S15): the

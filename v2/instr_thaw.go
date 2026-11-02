@@ -40,6 +40,7 @@ type thawBook struct {
 	zones   map[string]*zoneThaw // by zone, folded
 	pending map[string]bool      // the zones whose turn is asked (askThaw)
 	wake    chan struct{}
+	ctx     context.Context      // runThaws': what a step's own work at the parent runs under
 	fetched map[string]time.Time // the instructions RFIs asked, by zone, serial, digest and member
 	gate    map[string]bool      // the excusals from a group's gate logged, by group and member
 	// turn: one turn at a time, of any zone (thawTurn)
@@ -537,6 +538,7 @@ func (conf *Config) runThaws(ctx context.Context) {
 		b.wake = make(chan struct{}, 1)
 	}
 	wake := b.wake
+	b.ctx = ctx
 	b.mu.Unlock()
 	for {
 		select {

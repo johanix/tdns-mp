@@ -83,6 +83,9 @@ type editPolicy struct {
 	Leaving     bool  // a signer out of signers= that the step's sets keep signing (plan S13): it applies, and submits no keys
 	NSmgmt      uint8 // core.HsyncNSmgmtOWNER or core.HsyncNSmgmtAGENT
 	ParentSync  uint8 // core.HsyncParentSyncOwner or core.HsyncParentSyncAgent
+	// CDSWithdrawn: the first step of the parent sync's hand-over to the owner
+	// (plan S20): no CDS or CSYNC, while the KEY stays until its last
+	CDSWithdrawn bool
 }
 
 // canApply returns true if this combiner should apply the contribution
@@ -123,7 +126,7 @@ func (p *editPolicy) canApply(rrtype uint16) bool {
 	case dns.TypeDNSKEY:
 		return true
 	case dns.TypeCDS, dns.TypeCSYNC:
-		return p.ParentSync == core.HsyncParentSyncAgent
+		return p.ParentSync == core.HsyncParentSyncAgent && !p.CDSWithdrawn
 	case dns.TypeKEY:
 		return p.ParentSync == core.HsyncParentSyncAgent
 	}
@@ -160,7 +163,7 @@ func (p *editPolicy) canSubmit(rrtype uint16) bool {
 	case dns.TypeDNSKEY:
 		return p.WeAreSigner && !p.Leaving
 	case dns.TypeCDS, dns.TypeCSYNC:
-		return p.WeAreSigner && !p.Leaving && p.ParentSync == core.HsyncParentSyncAgent
+		return p.WeAreSigner && !p.Leaving && p.ParentSync == core.HsyncParentSyncAgent && !p.CDSWithdrawn
 	}
 	return true
 }
@@ -183,6 +186,7 @@ func (zd *MPZoneData) getEditPolicy() *editPolicy {
 	r := zd.roles()
 	p.NSmgmt = r.NSmgmt
 	p.ParentSync = r.ParentSync
+	p.CDSWithdrawn = r.CDSWithdrawn
 	return p
 }
 

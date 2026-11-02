@@ -232,12 +232,11 @@ func TestAServerMovedIntoSignersDropsItsUpstreamWithNoStepOfItsOwn(t *testing.T)
 
 func TestAKindWithoutItsStepsIsRefused(t *testing.T) {
 	from := jAt(t, 41, jServers2, jAlpha, jBeta, jCharlie)
-	for _, c := range []struct{ param, reason string }{
-		{jServers2 + ` parentsync="agent"`, "changes parentsync"},
-	} {
-		to := jAt(t, 42, c.param, jAlpha, jBeta, jCharlie)
-		wantRefusals(t, c.reason, judgeTransition(from, to), Refusal{RefusedNotBuilt, c.reason + ": not built yet"})
-		wantRefusals(t, c.reason+", once built", judge(from, to, allKinds, allKinds))
+	// parentsync: built (S20)
+	{
+		to := jAt(t, 42, jServers2+` parentsync="agent"`, jAlpha, jBeta, jCharlie)
+		wantRefusals(t, "changes parentsync", judge(from, to, builtKinds&^kindParentSync, carriedKinds), Refusal{RefusedNotBuilt, "changes parentsync: not built yet"})
+		wantRefusals(t, "changes parentsync, once built", judgeTransition(from, to))
 	}
 	// a role taken away: its steps are built (S17b)
 	wantRefusals(t, "a role taken", judgeTransition(from, jAt(t, 42, `servers="alpha" signers="alpha"`, jAlpha, jBeta, jCharlie)))

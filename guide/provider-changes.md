@@ -350,13 +350,8 @@ Every agent refuses, with the same reason:
 | Leaves an upstream that is not in `signers=`, or has no HSYNC3 record    | `upstream-dangling`       |
 | Takes out of `signers=` the upstream of a server that stays: move the server's upstream first, as its own edit | `upstream-signer-removed` |
 
-On this build the agents also refuse every edit whose
-steps tdns-mp does not carry out yet (`step-missing`,
-`not-built`): a change of `parentsync`. So a change of
-`parentsync` is refused: the owner does not write to the
-parent. A server role, a move into `signers=`, a role taken
-away (section 4), an upstream, `nsmgmt`, `pubkey` and
-`pubcds` are carried out.
+On this build every kind of edit has its steps, so no edit is
+refused for a step that is missing (`step-missing`, `not-built`).
 
 A change of `auditors=` or `suffix`, and an HSYNC3 record
 added or removed for a provider with no role, are agreed.
@@ -388,6 +383,51 @@ agent's log.
 agents agree on a serial before they act on it, they act
 by the zone's own copy, refused or not
 ([issue 211](https://github.com/johanix/tdns-mp/issues/211)).
+
+### 6.1 Changing `parentsync`
+
+A change of `parentsync` is carried out in steps by the
+leader of the zone's group, and each step is confirmed by
+every provider. `tdns-mpcli agent parentsync status` shows
+the step, for example `parent sync to the owner: step 3
+(the agents' key deleted at the parent)`.
+
+**From `agent` to `owner`.** The owner raises the serial
+and **does not write to the parent until every provider
+shows the transition as done**. Until then the agents still
+hold the delegation sync, and what they send could undo what
+the owner put there. In order:
+
+1. Every provider withdraws its CDS and CSYNC records.
+2. Their TTL passes.
+3. The agents' SIG(0) key is deleted at the parent, by an
+   update that key signs.
+4. Every agent stops syncing, and the agents' KEY record
+   leaves the zone. Then the transition is done.
+
+At a parent that takes NOTIFY only, and if the delete fails,
+the agents cannot delete the key, and the transition goes
+on: the owner has to delete it. The leader says so in its
+log, and on the `SIG(0) key:` line of its `agent parentsync
+status`, naming the key. That line does not survive a
+restart of the leader; the log line does.
+
+**From `owner` to `agent`.** The owner **stops writing to
+the parent before it raises the serial**. At the first step
+the leader takes the zone up: it publishes the zone's KEY,
+offers the key to the parent once every provider has
+confirmed the KEY, and syncs the delegation, looking at the
+parent first and sending only the difference. The transition
+is done once the KEY is confirmed, or at once for a zone
+that uses no key. It does not wait for the parent to trust
+the key: until the parent does, the sync waits, and
+`SIG(0) key:` says the key is offered and not taken yet.
+
+**Under `parentsync=owner`**, a provider's signer serves no
+CDS of its own, and its combiner applies no CDS, no CSYNC and
+no KEY from the agents. The owner adds the DS. A CDS, CSYNC
+or KEY in the owner's own copy of the zone is served as it
+comes.
 
 ## 7. Open Points
 

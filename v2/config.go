@@ -93,16 +93,8 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 					// The copy is noted first: every reader after it acts
 					// by the active instructions (plan S3).
 					conf.noteInstructions(mpzd)
-					givenBack := conf.onSetsChanged(mpzd, false)
+					conf.onSetsChanged(mpzd, false)
 					mpzd.PostRefresh(tm, msgQs)
-					if givenBack {
-						// after PostRefresh, which applies this refresh's
-						// HSYNC3 change and recomputes the groups: who leads
-						// is judged on the groups that change gives. (An
-						// edit that also removes this agent's own HSYNC3
-						// recomputes nothing, and is judged on the old ones.)
-						conf.delegationSyncGivenBack(mpzd.ZoneName)
-					}
 				}
 			})
 	}
@@ -400,4 +392,7 @@ type InternalMpConf struct {
 	// signerRoles the signer's side of it (plan S18b).
 	signerAdds  signerAddBook
 	signerRoles signerRoleBook
+	// parentSyncs: the steps of a change of parentsync, as this agent has
+	// carried them out (plan S20).
+	parentSyncs parentSyncBook
 }

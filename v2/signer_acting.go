@@ -209,8 +209,8 @@ func (mpzd *MPZoneData) actBySets(conf *Config, r Roles, confirmers []string) {
 
 // handedOver: a hand-over changed what the signer acts by for the zone.
 // For a zone the machine runs, every distribution in flight expects the
-// providers it expects now when they changed (SignersChanged), and the
-// foreign rows' ds follows DSSigners.
+// providers it expects now when they changed (SignersChanged), the foreign
+// rows' ds follows DSSigners, and the CDS its parentsync.
 func (e *KeyLifecycleEngine) handedOver(zone string, confirmers []string) {
 	l := e.driver(zone)
 	if l == nil {
@@ -224,6 +224,8 @@ func (e *KeyLifecycleEngine) handedOver(zone string, confirmers []string) {
 	if err := l.ApplyForeign(); err != nil {
 		lgSigner.Error("key lifecycle: the other providers' ds could not follow the providers handed", "zone", zone, "err", err)
 	}
+	// the CDS follows the hand-over's parentsync (plan S20)
+	e.wire.wakeDSEngine(zone)
 }
 
 // signerWaits: the signer holds no hand-over for the zone and the copy at
