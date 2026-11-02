@@ -623,6 +623,9 @@ func (conf *Config) askStepSync(zone, why string) {
 	}
 	rb.mu.Unlock()
 	if due {
+		// the sync may wait for the zone's key, whose offers now pass
+		// (offerHeld): the key rounds look at once
+		conf.InternalMp.CatchUp.keyCheck(ZoneName(zone))
 		stepSyncAsk(conf, zone, why)
 	}
 }
