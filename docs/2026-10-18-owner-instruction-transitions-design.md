@@ -1,6 +1,6 @@
 # Changes to the zone owner's instructions: numbered by the owner, agreed before they act, carried out by the leader
 
-**Status:** PROPOSAL, 2026-10-18, revision 6 (2026-10-26); rule 2 amended 2026-10-28; section 4 amended 2026-11-02.
+**Status:** PROPOSAL, 2026-10-18, revision 6 (2026-10-26); rule 2 amended 2026-10-28; sections 4, 5.2 and 6 amended 2026-11-02.
 
 This document describes how tdns-mp handles a change of a zone owner's instructions: every edit of the zone's HSYNC3 or HSYNCPARAM records. It describes the design as it is meant to stand. The difference from today's code and the steps of the work are in the plan beside it, `2026-10-18-owner-instruction-transitions-plan.md`, whose section 6 lists the decisions this design rests on and the parts of the membership design it changes.
 
@@ -207,6 +207,8 @@ The owner's order stays: the roles first, the record later. The leader under V r
 
 **The order of the zone's NS RRset and the parent's.** Under `nsmgmt=agent` the zone's NS RRset goes first: the leader's withdrawal at every member; then the leader's explicit sync with the parent; then a watch on the parent until its NS RRset no longer names the leaving provider's nameservers. Under `nsmgmt=owner` the order is the owner's: its edit drops the names from the zone first.
 
+**A parent that does not move.** *Amended 2026-11-02 (Johan):* the watches on the parent in steps 2 and 3 have no time-out that goes on: the provider would be told that the zone is safe to remove while resolvers are still sent to it. A watch ends when the parent moves, by any route, by hand too. While the parent refuses the zone's key the status says so, and past the leaving time-out a warning says so once an hour. For a parent that nothing will move, the word of the operator of the zone's leader ends the watch of the step held. What follows the watch runs as before, its TTLs counted from the word, and the leaving provider's "safe to remove" says which of its nameservers the parent still names.
+
 ### 5.3 A provider changes roles
 
 - **A server becomes a signer too.** As in 5.1's signer role, with the same preconditions; until they exist the transition is refused.
@@ -235,6 +237,7 @@ The rules of membership 4.1 for the key stand as written there, now under this d
 
 - A zone whose apex publishes several KEYs has no zone key: nothing is imported, retired or made, no sync that needs the key is asked for, and the status tells the operator to leave one. Nothing picks one for the operator.
 - A leader whose zone key the parent refuses (BADKEY, and a re-bootstrap the parent refuses) takes no action of its own: the syncs that need the key stay held, and the status says that the parent refuses the zone's key. It stays so until tdns parents judge a bootstrap by what they find (tdns #917), when the recovery below applies.
+  *Amended 2026-11-02 (Johan):* a sync that needs the key is one that goes by UPDATE. While the key holds an UPDATE, a parent that takes a NOTIFY is told by it, alone. A removal's watch on a parent that refuses the key has the end 5.2 gives it.
 - The key's offers and its bootstrap are held during a transition like every other change, except as a step of the reconciliation (5.2 step 1, 5.5) and while a rollover under way waits for the parent to trust a key just made (3.1).
 - The recovery of a lost key (a new KEY published beside one that nobody holds, then bootstrapped, then the old one deleted) is a leader action of its own. It starts only in a steady zone, is held during a transition, and is built once tdns parents judge a bootstrap by what they find.
 
