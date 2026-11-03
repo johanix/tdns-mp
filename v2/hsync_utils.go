@@ -1546,8 +1546,8 @@ func (mpzd *MPZoneData) signerSwitch(incoming *tdns.ZoneData, others []string, m
 	}
 	// A first load signs, unless its copy carries signatures: tdns takes those for
 	// the zone's own and leaves them, while StartSigning replaces them. Nor where it
-	// serves nothing: tdns would make it keys that are active at once, and its first
-	// keys are its key machine's (signerRoleTurn).
+	// serves nothing: nothing waits for its signatures, and it starts at the zone's
+	// turn, which says so to its agent (signerRoleTurn).
 	on := shouldSign && (signs || !loaded && serves && !apexSigned(incoming))
 	if on && !was.Options[tdns.OptInlineSigning] {
 		lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", mpzd.ZoneName)

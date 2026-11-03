@@ -99,9 +99,6 @@ func (conf *Config) signerTakeHandover(sig *KeystateSignalMsg) {
 	if err == nil {
 		refusalLogged.Delete(handoverKey(zone))
 		conf.signerHold(zone, h.Sets.Hold)
-		if h.Joining {
-			conf.keysStartOver(mpzd)
-		}
 		conf.askSignerRole(zone)
 	}
 	if err == nil && h.Refresh {
@@ -219,7 +216,7 @@ func (e *KeyLifecycleEngine) handedOver(zone string, confirmers []string) {
 	if l == nil {
 		return
 	}
-	e.startOver(zone)
+	e.distributeAtJoining(zone)
 	if !slices.Equal(confirmers, e.wire.OtherSigners(zone)) {
 		if err := l.SignersChanged(); err != nil {
 			lgSigner.Error("key lifecycle: the distributions in flight could not follow the providers handed", "zone", zone, "err", err)
@@ -230,12 +227,12 @@ func (e *KeyLifecycleEngine) handedOver(zone string, confirmers []string) {
 	}
 }
 
-// startOver: the keys of a provider that joins start over (T20), for a zone the
-// machine runs. Also on its next tick, should this fail.
-func (e *KeyLifecycleEngine) startOver(zone string) {
+// distributeAtJoining: the keys of a provider at its keys-step go to the other
+// signers, for a zone the machine runs. Also on its next tick, should this fail.
+func (e *KeyLifecycleEngine) distributeAtJoining(zone string) {
 	if l := e.driver(zone); l != nil {
-		if err := l.StartOver(); err != nil {
-			lgSigner.Error("key lifecycle: a joiner's keys could not start over; next tick", "zone", zone, "err", err)
+		if err := l.DistributeAtJoining(); err != nil {
+			lgSigner.Error("key lifecycle: a joiner's keys could not be distributed; next tick", "zone", zone, "err", err)
 		}
 	}
 }

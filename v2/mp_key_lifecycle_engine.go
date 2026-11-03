@@ -281,12 +281,7 @@ func (w *signerWire) ServedDnskeyTTL(zone string) (time.Duration, bool) {
 	if mpzd == nil {
 		return tdns.DefaultDnskeyTTL, true
 	}
-	own := tdns.DefaultDnskeyTTL
-	if rrset, err := mpzd.GetRRset(mpzd.ZoneName, dns.TypeDNSKEY); err == nil {
-		if ttl, ok := dnskeyTTLOf(rrset); ok {
-			own = ttl
-		}
-	}
+	own := copyDnskeyTTL(mpzd)
 	if self, r, _ := w.sets(zone); self != "" && !has(r.Servers, self) {
 		ttl, whole, looked := w.conf.InternalMp.servedKeys.largest(mpzd)
 		switch {
@@ -304,7 +299,8 @@ func (w *signerWire) ServedDnskeyTTL(zone string) (time.Duration, bool) {
 // not only a state change (design §4.1, arrow 2).
 func (w *signerWire) KeysChanged(zone string) {
 	go pushKeystateInventoryToAllAgents(w.conf, dns.Fqdn(zone))
-	// a provider that signs at its naming starts once its first keys are there
+	// a provider signing at its naming whose keys are its machine's starts once
+	// they are there
 	w.conf.askSignerRole(dns.Fqdn(zone))
 	// and the CDS follows a ds column change the served DNSKEY RRset does
 	// not show (arrow 1): tdns's DS engine is woken
