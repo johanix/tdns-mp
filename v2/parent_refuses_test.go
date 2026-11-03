@@ -288,7 +288,7 @@ func TestTheOperatorsWordEndsTheWatchAndNotWhatFollowsIt(t *testing.T) {
 		t.Fatalf("the word at the DS watch: %v", err)
 	}
 	r.next()
-	if line := r.conf.thawLine(r.zone); !strings.Contains(line, "for the DS and DNSKEY TTLs until") {
+	if line := r.conf.thawLine(r.zone); !strings.Contains(line, "for the DS TTL until") {
 		t.Fatalf("after the word at the DS watch: %q", line)
 	}
 	r.aged(3 * time.Hour)

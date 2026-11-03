@@ -96,6 +96,9 @@ multi-provider:
       # A step, a distribution and the leader's NOTIFY for its CSYNC wait
       # this long for a member with no role, then go on without it.
       no-role-timeout:        900
+      # A removal adds this to the parent's TTLs, for what a look at its
+      # servers cannot see. Longer for a parent that publishes in batches.
+      parent-publish-delay:   300
 
 service:
    name:           TDNS-MPAGENT

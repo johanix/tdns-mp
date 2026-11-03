@@ -150,11 +150,15 @@ type MultiProviderConf struct {
 	// out, before they go on without it (design 4, plan S12). Zero or
 	// absent: 900. RollRetry: how long after a failed phase of the
 	// leader's roll of the zone's SIG(0) key it is tried again (plan
-	// S17a). Zero or absent: 900.
+	// S17a). Zero or absent: 900. ParentPublishDelay: what a removal adds to
+	// the parent's TTLs, for what a look at its servers cannot see: its
+	// publication, and a server it does not name (design 5.2, plan S17b).
+	// Zero or absent: 300.
 	Transitions struct {
-		LeavingTimeout int `yaml:"leaving-timeout" mapstructure:"leaving-timeout"`
-		NoRoleTimeout  int `yaml:"no-role-timeout" mapstructure:"no-role-timeout"`
-		RollRetry      int `yaml:"roll-retry" mapstructure:"roll-retry"`
+		LeavingTimeout     int `yaml:"leaving-timeout" mapstructure:"leaving-timeout"`
+		NoRoleTimeout      int `yaml:"no-role-timeout" mapstructure:"no-role-timeout"`
+		RollRetry          int `yaml:"roll-retry" mapstructure:"roll-retry"`
+		ParentPublishDelay int `yaml:"parent-publish-delay" mapstructure:"parent-publish-delay"`
 	} `yaml:"transitions" mapstructure:"transitions"`
 	Api LocalAgentApiConf
 	Dns LocalAgentDnsConf

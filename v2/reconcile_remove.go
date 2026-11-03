@@ -10,12 +10,12 @@
  *     obligation, not a gate. A signer that serves nothing leaves
  *     KeyConfirmers here, at the reconciliation's first step.
  *  2. If it leaves servers=: Servers drop it, its NS is withdrawn under
- *     nsmgmt=agent, the leader syncs and watches the parent until its NS
- *     RRset no longer names the names, and counts the NS TTL from then. Then
- *     it leaves KeyConfirmers.
+ *     nsmgmt=agent, the leader syncs and watches the parent until no server of
+ *     its names the names, and counts the NS TTLs from then. Then it leaves
+ *     KeyConfirmers.
  *  3. If it leaves signers=: DSSigners drop it, its CDS is withdrawn, the
- *     leader syncs and watches the parent until its DS is gone, and waits the
- *     DS and DNSKEY TTLs from then.
+ *     leader syncs and watches the parent until no server of its serves its
+ *     DS, and waits the DS TTL and parent-publish-delay from then.
  *  4. Its DNSKEY is withdrawn; KeySigners and Signing drop it: it stops
  *     signing.
  *  5. The removal is done: every agent drops it from disk.
@@ -28,10 +28,8 @@ package tdnsmp
 
 import (
 	"cmp"
-	"context"
 	"errors"
 	"fmt"
-	"net"
 	"slices"
 	"strings"
 	"time"
@@ -55,9 +53,6 @@ const (
 	// removalTTLUnknown stands for a TTL this agent never saw served: a new
 	// leader's, of a DS the parent had dropped before it looked.
 	removalTTLUnknown = time.Hour
-	// dnskeyLookWait is how long a look at the zone's DNSKEY TTL waits for each
-	// of its servers.
-	dnskeyLookWait = 2 * time.Second
 )
 
 // leaver is a provider that leaves servers=, signers= or both.
@@ -370,21 +365,23 @@ func zoneNSOf(zone string) ([]string, uint32) {
 
 // --- The parent ---
 
-// parentSeen is what the parent serves for the zone, as last looked at, and
-// the TTL the zone's own servers give its DNSKEY RRset.
+// parentSeen is what the parent serves for the zone, as last looked at. A
+// resolver may be handed the answer of any of its servers, so a record is still
+// served while one server that answers holds it: the fields read all the answers
+// together, and each keeps them apart.
 type parentSeen struct {
-	at        time.Time
-	ns        []string // the names of its NS RRset, folded
-	nsTTL     uint32
-	nsServer  string    // the parent's server that said so
-	ds        []uint16  // the key tags of its DS RRset
-	dsRRs     []*dns.DS // the same RRset, whole
-	dsTTL     uint32    // as last served
-	dnskeyTTL uint32    // the largest seen since the zone's first look; 0 if none
+	at       time.Time
+	ns       []string     // the names of its NS RRset, folded
+	nsTTL    uint32       // the largest
+	nsServer string       // the parent's server that gave it
+	ds       []uint16     // the key tags of its DS RRset
+	dsRRs    []*dns.DS    // the same RRset, whole
+	dsTTL    uint32       // the largest, as last served
+	each     []parentSeen // what each server that answered serves
 }
 
 // parentLook asks the parent what it serves for the zone; a test stands in
-// for it. It asks the servers AnalyseZoneDelegation asks, in the same order.
+// for it. It asks the servers AnalyseZoneDelegation asks.
 var parentLook = func(conf *Config, zone string) (parentSeen, error) {
 	mpzd, ok := Zones.Get(zone)
 	if !ok || mpzd == nil || mpzd.ZoneData == nil {
@@ -397,9 +394,23 @@ var parentLook = func(conf *Config, zone string) (parentSeen, error) {
 	if err := zd.FetchParentData(conf.Config.Internal.ImrEngine); err != nil {
 		return parentSeen{}, err
 	}
+	seen, err := parentAtEveryServer(zd.ParentServers, func(server string, rrtype uint16) ([]dns.RR, error) {
+		return tdns.AuthQuery(zd.ZoneName, server, rrtype)
+	})
+	if err != nil {
+		return parentSeen{}, fmt.Errorf("zone %s: %w", zd.ZoneName, err)
+	}
+	return seen, nil
+}
+
+// parentAtEveryServer is parentSeen from asking each of servers. One that does
+// not answer hands nothing to anyone, and one with no NS RRset for the zone
+// tells nothing of it; with no answer at all nothing is known.
+func parentAtEveryServer(servers []string, ask func(server string, rrtype uint16) ([]dns.RR, error)) (parentSeen, error) {
+	var seen parentSeen
 	var last error
-	for _, server := range zd.ParentServers {
-		nsrrs, err := tdns.AuthQuery(zd.ZoneName, server, dns.TypeNS)
+	for _, server := range servers {
+		nsrrs, err := ask(server, dns.TypeNS)
 		if err != nil {
 			last = err
 			continue
@@ -407,82 +418,85 @@ var parentLook = func(conf *Config, zone string) (parentSeen, error) {
 		if len(nsrrs) == 0 {
 			continue
 		}
-		dsrrs, err := tdns.AuthQuery(zd.ZoneName, server, dns.TypeDS)
+		dsrrs, err := ask(server, dns.TypeDS)
 		if err != nil {
 			last = err
 			continue
 		}
-		seen := parentSeen{nsServer: server}
-		for _, rr := range nsrrs {
-			if ns, ok := rr.(*dns.NS); ok {
-				seen.ns = append(seen.ns, canonicalName(ns.Ns))
-				seen.nsTTL = max(seen.nsTTL, ns.Hdr.Ttl)
-			}
-		}
-		for _, rr := range dsrrs {
-			if ds, ok := rr.(*dns.DS); ok {
-				seen.ds = append(seen.ds, ds.KeyTag)
-				seen.dsRRs = append(seen.dsRRs, ds)
-				seen.dsTTL = max(seen.dsTTL, ds.Hdr.Ttl)
-			}
-		}
-		// the servers the parent names, and those the zone itself names
-		zoneNames, _ := zoneNSOf(zone)
-		names := append(slices.Clone(seen.ns), zoneNames...)
-		slices.Sort(names)
-		seen.dnskeyTTL = servedDnskeyTTL(zd.ZoneName, serverAddrs(conf.Config.Internal.ImrEngine, slices.Compact(names)))
+		seen.add(serverSeen(server, nsrrs, dsrrs))
+	}
+	if len(seen.each) > 0 {
 		return seen, nil
 	}
 	if last == nil {
-		last = fmt.Errorf("no parent server gave an NS RRset for %s", zd.ZoneName)
+		last = errors.New("no parent server gave an NS RRset")
 	}
 	return parentSeen{}, last
 }
 
-// serverAddrs are the addresses of the named servers, found as FetchParentData
-// finds the parent's. A name that does not resolve gives none.
-func serverAddrs(imr *tdns.Imr, names []string) []string {
-	var addrs []string
-	for _, name := range names {
-		for _, rrtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-			resp, err := imr.ImrQuery(context.Background(), name, rrtype, dns.ClassINET, nil)
-			if err != nil || resp == nil || resp.RRset == nil {
-				continue
-			}
-			for _, rr := range resp.RRset.RRs {
-				switch rr := rr.(type) {
-				case *dns.A:
-					addrs = append(addrs, net.JoinHostPort(rr.A.String(), "53"))
-				case *dns.AAAA:
-					addrs = append(addrs, net.JoinHostPort(rr.AAAA.String(), "53"))
-				}
-			}
+// serverSeen is what one server of the parent answered.
+func serverSeen(server string, nsrrs, dsrrs []dns.RR) parentSeen {
+	seen := parentSeen{nsServer: server}
+	for _, rr := range nsrrs {
+		if ns, ok := rr.(*dns.NS); ok {
+			seen.ns = append(seen.ns, canonicalName(ns.Ns))
+			seen.nsTTL = max(seen.nsTTL, ns.Hdr.Ttl)
 		}
 	}
-	return addrs
+	for _, rr := range dsrrs {
+		if ds, ok := rr.(*dns.DS); ok {
+			seen.ds = append(seen.ds, ds.KeyTag)
+			seen.dsRRs = append(seen.dsRRs, ds)
+			seen.dsTTL = max(seen.dsTTL, ds.Hdr.Ttl)
+		}
+	}
+	return seen
 }
 
-// servedDnskeyTTL is the largest TTL the servers give the zone's DNSKEY RRset,
-// 0 when none tells. Providers' signer policies may differ, and a resolver may
-// hold the RRset of any of them. Over TCP: the RRset of a zone with several
-// signers does not fit a plain UDP answer.
-func servedDnskeyTTL(zone string, servers []string) uint32 {
-	c := &dns.Client{Net: "tcp", Timeout: dnskeyLookWait}
-	m := new(dns.Msg)
-	m.SetQuestion(zone, dns.TypeDNSKEY)
-	var ttl uint32
-	for _, server := range servers {
-		res, _, err := c.Exchange(m, server)
-		if err != nil || res.Rcode != dns.RcodeSuccess {
-			continue
-		}
-		for _, rr := range res.Answer {
-			if key, ok := rr.(*dns.DNSKEY); ok {
-				ttl = max(ttl, key.Hdr.Ttl)
-			}
+// add reads one more server's answer into seen.
+func (seen *parentSeen) add(one parentSeen) {
+	seen.each = append(seen.each, one)
+	for _, name := range one.ns {
+		if !slices.Contains(seen.ns, name) {
+			seen.ns = append(seen.ns, name)
 		}
 	}
-	return ttl
+	for _, ds := range one.dsRRs {
+		if !slices.ContainsFunc(seen.dsRRs, func(held *dns.DS) bool { return dns.IsDuplicate(held, ds) }) {
+			seen.ds = append(seen.ds, ds.KeyTag)
+			seen.dsRRs = append(seen.dsRRs, ds)
+		}
+	}
+	if seen.nsServer == "" || one.nsTTL > seen.nsTTL {
+		seen.nsTTL, seen.nsServer = one.nsTTL, one.nsServer
+	}
+	seen.dsTTL = max(seen.dsTTL, one.dsTTL)
+}
+
+// behind are the servers holding what holds asks of, while another that answered
+// does not: the parent has dropped it and they have yet to follow. Sorted; none
+// while every server holds it, as no server is behind then.
+func (seen parentSeen) behind(holds func(one parentSeen) bool) []string {
+	var servers []string
+	for _, one := range seen.each {
+		if holds(one) {
+			servers = append(servers, one.nsServer)
+		}
+	}
+	if len(servers) == len(seen.each) {
+		return nil
+	}
+	slices.Sort(servers)
+	return servers
+}
+
+// behindSaid is what a watch on the parent adds to the step's status for the
+// servers behind, "" with none.
+func behindSaid(servers []string) string {
+	if len(servers) == 0 {
+		return ""
+	}
+	return " (still at " + strings.Join(servers, ", ") + "; the parent's other servers have dropped it)"
 }
 
 // parentLookGo runs a look at the parent; a test runs it in place.
@@ -513,8 +527,6 @@ func (conf *Config) parentNow(zone string) (parentSeen, bool) {
 				if got.dsTTL == 0 {
 					got.dsTTL = zr.parent.dsTTL // as last served
 				}
-				// a server the parent has since dropped may have served the larger
-				got.dnskeyTTL = max(got.dnskeyTTL, zr.parent.dnskeyTTL)
 				zr.parent = got
 			}
 			rb.mu.Unlock()
@@ -658,10 +670,11 @@ func (b *reconcileBook) stepTaken(zone string) {
 // --- The waits ---
 
 // removalNSWait is what the leaving provider's NS step waits for: under
-// nsmgmt=agent the withdrawal's confirmations; then until the parent's NS
-// RRset no longer names the stored names, and from then the larger of the
-// parent's and the zone's NS TTL, plus the propagation delay. The leader's
-// operator's word ends the watch, not what follows it. "" once passed.
+// nsmgmt=agent the withdrawal's confirmations; then until no server of the
+// parent names the stored names, and from then the longer of the two ways a
+// resolver can still reach the provider: the parent's NS TTL plus
+// parent-publish-delay, and the zone's NS TTL plus the propagation delay. The
+// leader's operator's word ends the watch, not what follows it. "" once passed.
 func (conf *Config) removalNSWait(zone, label, id string, agentNS bool) string {
 	if agentNS && !conf.removalWithdrawn(zone, id, "NS") {
 		return "for the withdrawal of its NS to be confirmed"
@@ -693,15 +706,19 @@ func (conf *Config) removalNSWait(zone, label, id string, agentNS bool) string {
 		if !agentNS && slices.ContainsFunc(named, func(n string) bool { return slices.Contains(zoneNames, canonicalName(n)) }) {
 			text += " (the owner's NS RRset still names it)"
 		}
+		text += behindSaid(seen.behind(func(one parentSeen) bool {
+			return slices.ContainsFunc(named, func(n string) bool { return slices.Contains(one.ns, canonicalName(n)) })
+		}))
 		return removalWaitSaid(conf, zone, id, "2 (its NS)", text+conf.parentRefusalNote(zone, id, step))
 	}
 	rb.watches(key, "")
 	delay, largest := conf.delegationNotifyWait(zone)
+	publish := parentPublishDelayFor(conf.MpConfig())
 	since := rb.sinceFirst(key, wait, time.Now())
-	until := since.Add(time.Duration(max(seen.nsTTL, zoneTTL))*time.Second + delay)
+	until := since.Add(max(time.Duration(seen.nsTTL)*time.Second+publish, time.Duration(zoneTTL)*time.Second+delay))
 	// the wait's terms as they are read, and again if one of them changes
-	if rb.sayOnce(key, fmt.Sprintf("%s terms %d %s %d %s %s", wait, seen.nsTTL, seen.nsServer, zoneTTL, delay, since)) {
-		lg.Info("a removal's NS step counts its wait", "zone", zone, "provider", id, "parent_ns_ttl", seen.nsTTL, "parent_server", seen.nsServer,
+	if rb.sayOnce(key, fmt.Sprintf("%s terms %d %s %s %d %s %s", wait, seen.nsTTL, seen.nsServer, publish, zoneTTL, delay, since)) {
+		lg.Info("a removal's NS step counts its wait", "zone", zone, "provider", id, "parent_ns_ttl", seen.nsTTL, "parent_server", seen.nsServer, "parent_publish_delay", publish,
 			"zone_ns_ttl", zoneTTL, "delay", delay, "delay_from", largest, "since", since.UTC().Format(time.RFC3339), "until", until.UTC().Format(time.RFC3339))
 	}
 	if time.Now().Before(until) {
@@ -711,9 +728,9 @@ func (conf *Config) removalNSWait(zone, label, id string, agentNS bool) string {
 }
 
 // removalDSWait is what the leaving provider's DS step waits for: its CDS
-// withdrawn, then until the parent no longer serves its DS, and from then the
-// parent's DS TTL, as last served, and the DNSKEY TTL. The leader's operator's
-// word ends the watch, not what follows it. "" once passed.
+// withdrawn, then until no server of the parent serves its DS, and from then the
+// parent's DS TTL, as last served, plus parent-publish-delay. The leader's
+// operator's word ends the watch, not what follows it. "" once passed.
 func (conf *Config) removalDSWait(zone, label, id string) string {
 	if !conf.removalWithdrawn(zone, id, "CDS") {
 		return "for the withdrawal of its CDS to be confirmed"
@@ -733,16 +750,24 @@ func (conf *Config) removalDSWait(zone, label, id string) string {
 		conf.askStepSync(zone, "a removal's DS step")
 		rb.forgetWait(key, wait)
 		rb.watches(key, step)
-		return removalWaitSaid(conf, zone, id, "3 (its DS)", "until the parent no longer serves its DS"+conf.parentRefusalNote(zone, id, step))
+		text := behindSaid(seen.behind(func(one parentSeen) bool { return !dsLeft(conf, zone, one) }))
+		return removalWaitSaid(conf, zone, id, "3 (its DS)", "until the parent no longer serves its DS"+text+conf.parentRefusalNote(zone, id, step))
 	}
 	rb.watches(key, "")
 	ttl := removalTTLUnknown
 	if seen.dsTTL != 0 {
 		ttl = time.Duration(seen.dsTTL) * time.Second
 	}
-	until := rb.sinceFirst(key, wait, time.Now()).Add(max(ttl, conf.dnskeyTTLOf(zone, id, seen)))
+	publish := parentPublishDelayFor(conf.MpConfig())
+	since := rb.sinceFirst(key, wait, time.Now())
+	until := since.Add(ttl + publish)
+	// the wait's terms as they are read, and again if one of them changes
+	if rb.sayOnce(key, fmt.Sprintf("%s terms %s %s %s", wait, ttl, publish, since)) {
+		lg.Info("a removal's DS step counts its wait", "zone", zone, "provider", id, "parent_ds_ttl", ttl, "ttl_seen", seen.dsTTL != 0, "parent_publish_delay", publish,
+			"since", since.UTC().Format(time.RFC3339), "until", until.UTC().Format(time.RFC3339))
+	}
 	if time.Now().Before(until) {
-		return removalWaitSaid(conf, zone, id, "3 (its DS)", "for the DS and DNSKEY TTLs until "+removalTime(until))
+		return removalWaitSaid(conf, zone, id, "3 (its DS)", "for the DS TTL until "+removalTime(until))
 	}
 	return ""
 }
@@ -751,61 +776,33 @@ func (conf *Config) removalDSWait(zone, label, id string) string {
 // provider's is gone. With the set not known it cannot be told, and the step
 // waits, as the syncher leaves the parent's DS alone then. A test stands in.
 var dsLeft = func(conf *Config, zone string, seen parentSeen) bool {
-	if len(seen.dsRRs) == 0 {
-		return true
-	}
-	intent, err := conf.computedDSIntent(zone, dns.SHA256)
-	if err != nil || !intent.Known {
-		return false
-	}
-	return dsAllIntended(seen.dsRRs, intent.Set)
-}
-
-// dsAllIntended: every DS served is one of set. Two providers' keys can share a
-// tag, so a DS of the set's digest type is compared whole. One of another digest
-// type goes by its tag and algorithm: a parent that computes its own may serve
-// it for a key that stays, and nothing would ever end that wait.
-func dsAllIntended(served []*dns.DS, set []dns.RR) bool {
-	return !slices.ContainsFunc(served, func(ds *dns.DS) bool {
-		return !slices.ContainsFunc(set, func(rr dns.RR) bool {
-			want, ok := rr.(*dns.DS)
-			if !ok || want.KeyTag != ds.KeyTag || want.Algorithm != ds.Algorithm {
-				return false
-			}
-			return want.DigestType != ds.DigestType || strings.EqualFold(want.Digest, ds.Digest) // not-a-name: a digest in hex
-		})
+	return dsAllIntended(seen.dsRRs, func(digest uint8) ([]dns.RR, bool) {
+		intent, err := conf.computedDSIntent(zone, digest)
+		return intent.Set, err == nil && intent.Known
 	})
 }
 
-// dnskeyTTLOf is the DNSKEY TTL of the zone: what its servers were seen to
-// serve. Failing that, the larger of the zone's own RRset's and the leaving
-// provider's contribution's, removalTTLUnknown when this agent holds neither.
-// That fallback errs long: a held key has its TTL as generated (3600), not the
-// one its signer's policy serves it with.
-func (conf *Config) dnskeyTTLOf(zone, id string, seen parentSeen) time.Duration {
-	if seen.dnskeyTTL != 0 {
-		return time.Duration(seen.dnskeyTTL) * time.Second
-	}
-	if conf.InternalMp.reconciles.sayOnce(canonicalName(zone), "served dnskey ttl") {
-		lg.Warn("no server told the zone's DNSKEY TTL; a removal goes by the TTL held here", "zone", zone, "provider", id)
-	}
-	var ttl uint32
-	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil && mpzd.ZoneData != nil {
-		if apex, err := mpzd.GetOwner(mpzd.ZoneName); err == nil && apex != nil {
-			for _, rr := range apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs {
-				ttl = max(ttl, rr.Header().Ttl)
-			}
+// dsAllIntended: every DS served is one of the set, as intended gives it for the
+// DS's digest type, and compared whole: two providers' keys can share a tag and
+// an algorithm, and a parent may compute its own of any type. A digest type none
+// is computed for here goes by its tag and algorithm, against the SHA-256 set:
+// it may be served for a key that stays, and nothing would ever end that wait.
+func dsAllIntended(served []*dns.DS, intended func(digest uint8) ([]dns.RR, bool)) bool {
+	for _, ds := range served {
+		set, known := intended(ds.DigestType)
+		whole := len(set) > 0
+		if known && !whole {
+			set, known = intended(dns.SHA256)
+		}
+		if !known || !slices.ContainsFunc(set, func(rr dns.RR) bool {
+			want, ok := rr.(*dns.DS)
+			return ok && want.KeyTag == ds.KeyTag && want.Algorithm == ds.Algorithm &&
+				(!whole || strings.EqualFold(want.Digest, ds.Digest)) // not-a-name: a digest in hex
+		}) {
+			return false
 		}
 	}
-	if zdr := conf.InternalMp.ZoneDataRepo; zdr != nil {
-		for _, rr := range zdr.heldOf(ZoneName(zone), AgentId(id), dns.TypeDNSKEY) {
-			ttl = max(ttl, rr.Header().Ttl)
-		}
-	}
-	if ttl == 0 {
-		return removalTTLUnknown
-	}
-	return time.Duration(ttl) * time.Second
+	return true
 }
 
 // removalWaitSaid logs what a step waits until, once for each thing.

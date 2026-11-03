@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"slices"
 	"strings"
 	"testing"
@@ -377,7 +376,7 @@ func TestTheNSTTLCountsFromWhenTheParentNoLongerNamesTheNames(t *testing.T) {
 	if len(r.taken()) != 2 {
 		t.Fatalf("the wait did not start over: %v", r.taken())
 	}
-	r.aged(6 * time.Minute)
+	r.aged(11 * time.Minute) // the TTL and parent-publish-delay
 	r.next()
 	if !slices.Equal(r.taken(), []string{"names", "ns", "confirmers"}) {
 		t.Errorf("after the TTL: %v", r.taken())
@@ -499,102 +498,6 @@ func (r *leaverRig) toDSStep() {
 	r.toNSGone()
 	r.next()
 	r.next()
-}
-
-// A held key has the TTL it was generated with, 3600; what resolvers keep is
-// what the zone's servers serve (the demo's rig run: an hour against 5 min).
-func TestTheDSStepWaitsForTheDNSKEYTTLServedNotTheOneHeld(t *testing.T) {
-	r := newSweepRig(t, "servedttl.remove.example.")
-	r.holds(roleN, dns.TypeDNSKEY)
-	r.toDSStep()
-	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTTL: 120, dnskeyTTL: 300})
-	r.next()
-	r.aged(4 * time.Minute) // over the DS TTL, under the DNSKEY TTL
-	r.next()
-	if slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
-		t.Fatalf("its DNSKEY went within the served TTL: %v", r.withdrawals)
-	}
-	r.aged(2 * time.Minute)
-	r.next()
-	if !slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
-		t.Errorf("its DNSKEY did not go after the served TTL: %v, steps %v", r.withdrawals, r.taken())
-	}
-}
-
-func TestWithNoServerTellingTheTTLTheDSStepGoesByTheOneHeld(t *testing.T) {
-	logs := captureLog(t)
-	r := newSweepRig(t, "heldttl.remove.example.")
-	r.holds(roleN, dns.TypeDNSKEY)
-	r.toDSStep()
-	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTTL: 120})
-	r.next()
-	r.aged(30 * time.Minute)
-	r.next()
-	if slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
-		t.Fatalf("its DNSKEY went within the held TTL: %v", r.withdrawals)
-	}
-	if !strings.Contains(logs.String(), "no server told the zone's DNSKEY TTL") {
-		t.Errorf("no log line: %s", logs)
-	}
-	r.aged(31 * time.Minute)
-	r.next()
-	if !slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
-		t.Errorf("its DNSKEY did not go after the held TTL: %v, steps %v", r.withdrawals, r.taken())
-	}
-}
-
-// A server the parent has dropped may have served the larger TTL.
-func TestTheLargestDNSKEYTTLSeenStands(t *testing.T) {
-	r := newLeaverRig(t, "largestttl.remove.example.", "agent")
-	for _, ttl := range []uint32{600, 300, 0} {
-		r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, dnskeyTTL: ttl})
-		if seen, ok := r.conf.parentNow(r.zone); !ok || seen.dnskeyTTL != 600 {
-			t.Errorf("after a look that saw %d: %d, known %v", ttl, seen.dnskeyTTL, ok)
-		}
-	}
-}
-
-// dnskeyServer serves the zone's DNSKEY RRset over TCP only, with the TTL; with
-// none it answers empty. The address it listens on is what it returns.
-func dnskeyServer(t *testing.T, zone string, ttl uint32) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := &dns.Server{Listener: ln, Net: "tcp", Handler: dns.HandlerFunc(func(w dns.ResponseWriter, q *dns.Msg) {
-		m := new(dns.Msg)
-		m.SetReply(q)
-		if ttl != 0 {
-			rr, err := dns.NewRR(fmt.Sprintf("%s %d IN DNSKEY 257 3 15 11qYAYKxCrfVS/7TyWQHOg7nGkjJ3KgP9h8fZqXsIY8=", zone, ttl))
-			if err != nil {
-				t.Error(err)
-			}
-			m.Answer = append(m.Answer, rr)
-		}
-		if err := w.WriteMsg(m); err != nil {
-			t.Error(err)
-		}
-	})}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
-	return ln.Addr().String()
-}
-
-func TestTheServedDNSKEYTTLIsTheLargestAnyServerGives(t *testing.T) {
-	const zone = "served.remove.example."
-	closed, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	gone := closed.Addr().String()
-	closed.Close()
-	if got := servedDnskeyTTL(zone, []string{gone, dnskeyServer(t, zone, 120), dnskeyServer(t, zone, 300), dnskeyServer(t, zone, 0)}); got != 300 {
-		t.Errorf("the servers' largest: %d, want 300", got)
-	}
-	if got := servedDnskeyTTL(zone, []string{gone, dnskeyServer(t, zone, 0)}); got != 0 {
-		t.Errorf("no server tells: %d, want 0", got)
-	}
 }
 
 // syncDue makes the step's next ask of the sync due at once.
@@ -1150,11 +1053,20 @@ func TestAMemberThatNeverVotedIsNotToldSafeToRemove(t *testing.T) {
 
 // What the parent serves is matched by more than the key's tag.
 func TestAParentDSIsMatchedByMoreThanItsTag(t *testing.T) {
-	const a, b = "AAAA", "BBBB"
+	const a, b, a384 = "AAAA", "BBBB", "CCCC"
+	const noneComputed = 99
 	ds := func(tag uint16, alg, digest uint8, text string) *dns.DS {
 		return &dns.DS{KeyTag: tag, Algorithm: alg, DigestType: digest, Digest: text}
 	}
-	set := []dns.RR{ds(1, 15, dns.SHA256, a), ds(2, 15, dns.SHA256, b)}
+	intended := func(digest uint8) ([]dns.RR, bool) {
+		switch digest {
+		case dns.SHA256:
+			return []dns.RR{ds(1, 15, dns.SHA256, a), ds(2, 15, dns.SHA256, b)}, true
+		case dns.SHA384:
+			return []dns.RR{ds(1, 15, dns.SHA384, a384)}, true
+		}
+		return nil, true
+	}
 	for _, c := range []struct {
 		name   string
 		served []*dns.DS
@@ -1167,9 +1079,54 @@ func TestAParentDSIsMatchedByMoreThanItsTag(t *testing.T) {
 		{"another tag", []*dns.DS{ds(3, 15, dns.SHA256, a)}, false},
 		{"the leaver's, its tag shared", []*dns.DS{ds(1, 15, dns.SHA256, b)}, false},
 		{"another algorithm, the tag shared", []*dns.DS{ds(1, 13, dns.SHA256, a)}, false},
-		{"another digest type of a key that stays", []*dns.DS{ds(1, 15, dns.SHA384, "CCCC")}, true},
+		{"another digest type of a key that stays", []*dns.DS{ds(1, 15, dns.SHA384, a384)}, true},
+		{"the leaver's of another digest type, tag and algorithm shared", []*dns.DS{ds(1, 15, dns.SHA384, "DDDD")}, false},
+		{"beside the set, the leaver's of another digest type", []*dns.DS{ds(1, 15, dns.SHA256, a), ds(1, 15, dns.SHA384, "DDDD")}, false},
+		{"a digest type none is computed for, of a key that stays", []*dns.DS{ds(1, 15, noneComputed, "EEEE")}, true},
+		{"a digest type none is computed for, another tag", []*dns.DS{ds(3, 15, noneComputed, "EEEE")}, false},
+		{"a digest type none is computed for, another algorithm", []*dns.DS{ds(1, 13, noneComputed, "EEEE")}, false},
 	} {
-		if got := dsAllIntended(c.served, set); got != c.want {
+		if got := dsAllIntended(c.served, intended); got != c.want {
+			t.Errorf("%s: got %v", c.name, got)
+		}
+	}
+	unknown := func(uint8) ([]dns.RR, bool) { return nil, false }
+	if dsAllIntended([]*dns.DS{ds(1, 15, dns.SHA256, a)}, unknown) {
+		t.Error("with the set not known a DS passed")
+	}
+	if !dsAllIntended(nil, unknown) {
+		t.Error("with nothing served there is nothing to know")
+	}
+}
+
+// dsLeft on the set as it is computed, for each digest type served.
+func TestDSLeftComputesTheSetForTheDigestTypeServed(t *testing.T) {
+	yes := true
+	r := newComputedDSRig(t, "digests.ds.example.", []string{"us"})
+	item := invItem(t, r.mpzd.ZoneName, 257, KeyStateActive, &yes)
+	r.owner.SetInventory(r.mpzd.ZoneName, &KeyInventorySnapshot{Zone: r.mpzd.ZoneName, Inventory: []KeyInventoryItem{item}})
+	rr, err := dns.NewRR(item.KeyRR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := rr.(*dns.DNSKEY)
+	sha384 := key.ToDS(dns.SHA384)
+	collides := *sha384
+	collides.Digest = strings.Repeat("0", len(sha384.Digest))
+	noneComputed := *sha384
+	noneComputed.DigestType = 99
+	for _, c := range []struct {
+		name string
+		ds   *dns.DS
+		want bool
+	}{
+		{"SHA-256 of the key", key.ToDS(dns.SHA256), true},
+		{"SHA-384 of the key", sha384, true},
+		{"SHA-1 of the key", key.ToDS(dns.SHA1), true},
+		{"another key's SHA-384, tag and algorithm shared", &collides, false},
+		{"a digest type none is computed for", &noneComputed, true},
+	} {
+		if got := dsLeft(r.conf, r.mpzd.ZoneName, parentSeen{dsRRs: []*dns.DS{c.ds}}); got != c.want {
 			t.Errorf("%s: got %v", c.name, got)
 		}
 	}
