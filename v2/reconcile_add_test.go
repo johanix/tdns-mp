@@ -231,6 +231,32 @@ func TestANewSignerHasItsStepsFromItsLeader(t *testing.T) {
 	}
 }
 
+// Its key machine makes its first keys one at a time, and tdns takes a KSK alone for
+// a CSK: a turn between the two starts nothing, or the zone is signed by its KSK until
+// its next signing. A rig run saw that, at T9.
+func TestANewSignerDoesNotStartWithItsKSKAlone(t *testing.T) {
+	const zone = "kskalone.adding.signer.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="p2" signers="p2"`)...)
+	r.hand(joinerHandover(t, zone, 6, true), sigUs)
+	gen := func(role string) {
+		t.Helper()
+		cols := tdns.KeyRowFlags{Pub: true, Sign: true}
+		if _, _, err := r.kdb.GenerateKeypairWithColumns(zone, "test", KeyStateMpdist, dns.ED25519, role, cols, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gen("KSK")
+	r.roleTurn()
+	if len(r.started) != 0 {
+		t.Fatalf("with its KSK alone it started: %v", r.started)
+	}
+	gen("ZSK")
+	r.roleTurn()
+	if len(r.started) != 1 {
+		t.Errorf("with its KSK and ZSK, started %v, want one start", r.started)
+	}
+}
+
 // tdns signs with the rows that say sign=1: a new signer's first keys, on their way
 // through the machine, sign its zone, its own signatures replacing those of the copy
 // it relayed. That is its signing at its naming, with tdns's real start.
@@ -351,18 +377,72 @@ func TestAProviderPutBackHasItsKeysStartOverAsItsZoneIsTaken(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// what its first inventory says of them, pushed as it takes the hand-over
+	prevPush := pushSignerInventory
+	pushed := 0
+	pushSignerInventory = func(_ *Config, z string) {
+		if z != zone || pushed > 0 {
+			return
+		}
+		pushed++
+		inv, err := tdns.GetKeyInventory(r.kdb, zone)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		for _, it := range inv {
+			if it.State != KeyStateMpdist {
+				t.Errorf("its first inventory has key %d %s, want it starting over", it.KeyTag, it.State)
+			}
+		}
+	}
+	t.Cleanup(func() { pushSignerInventory = prevPush })
 	h := joinerHandover(t, zone, 6, true)
 	h.Step, h.Joining = 2, true
 	r.hand(h, sigUs)
-	r.roleTurn()
-	inv, err := tdns.GetKeyInventory(r.kdb, zone)
-	if err != nil {
-		t.Fatal(err)
+	if pushed != 1 {
+		t.Fatalf("%d inventories as it took the hand-over, want one", pushed)
 	}
-	for _, it := range inv {
-		if it.State != KeyStateMpdist {
-			t.Errorf("its key %d is %s, want it starting over", it.KeyTag, it.State)
-		}
+}
+
+// The same keys' step handed again, as a newer serial is held say, does not start
+// its keys' wait again: keys it has published since the step began would start over,
+// and again at each newer serial. Another step does.
+func TestAJoinersKeysStepHandedAgainKeepsWhenItBegan(t *testing.T) {
+	const zone = "again.adding.signer.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="p2" signers="p2"`)...)
+	h := joinerHandover(t, zone, 6, true)
+	h.Step, h.Joining = 2, true
+	r.hand(h, sigUs)
+	began, ok := r.e.wire.JoiningSince(zone)
+	if !ok {
+		t.Fatal("handed its keys' step, it does not say so")
+	}
+	time.Sleep(2 * time.Millisecond)
+	again := *h
+	again.Newest, again.Made = h.Newest+1, time.Now()
+	r.hand(&again, sigUs)
+	if held, _ := actingHeld.Load().get(zone); held.handover.Newest != again.Newest {
+		t.Fatalf("the hand-over held has newest %d, want %d", held.handover.Newest, again.Newest)
+	}
+	if since, _ := r.e.wire.JoiningSince(zone); !since.Equal(began) {
+		t.Errorf("handed again, its step began at %v, was %v", since, began)
+	}
+	next := again
+	next.Step, next.Joining, next.Made = 3, false, time.Now()
+	r.hand(&next, sigUs)
+	if _, ok := r.e.wire.JoiningSince(zone); ok {
+		t.Error("handed its next step, it still says its keys' step")
+	}
+	// any other hand-over handed again is taken when it is, as ever
+	held, _ := actingHeld.Load().get(zone)
+	before := held.since
+	time.Sleep(2 * time.Millisecond)
+	later := next
+	later.Newest, later.Made = next.Newest+1, time.Now()
+	r.hand(&later, sigUs)
+	if held, _ = actingHeld.Load().get(zone); !held.since.After(before) {
+		t.Errorf("another step handed again, taken at %v, was %v", held.since, before)
 	}
 }
 
@@ -858,14 +938,13 @@ func TestANewSignerIsTakenAndMakesItsFirstKeys(t *testing.T) {
 	if r.owner.taken(zone) {
 		t.Fatal("taken with no policy bound")
 	}
-	r.startErr = tdns.ErrKeyGenerationDeferred // an owned zone with no keys yet
 	r.hand(joinerHandover(t, zone, 6, true), sigUs)
 	r.roleTurn()
 	if bound != 1 || !r.owner.taken(zone) {
 		t.Fatalf("the policy bound %d times, the zone taken %v: want bound once and taken", bound, r.owner.taken(zone))
 	}
-	if r.mpzd.Options[tdns.OptInlineSigning] || len(r.started) != 1 {
-		t.Errorf("with no keys yet: the option %v, started %v, want one start refused", r.mpzd.Options[tdns.OptInlineSigning], r.started)
+	if r.mpzd.Options[tdns.OptInlineSigning] || len(r.started) != 0 {
+		t.Errorf("with no keys yet: the option %v, started %v, want no start", r.mpzd.Options[tdns.OptInlineSigning], r.started)
 	}
 	if !slices.Contains(r.foreignRows(t), k.KeyTag()) {
 		t.Errorf("the other signer's key is not kept: %v", r.foreignRows(t))
@@ -886,7 +965,6 @@ func TestANewSignerIsTakenAndMakesItsFirstKeys(t *testing.T) {
 			t.Errorf("its first key %d is %s, sign %v: want it on its way, signing", it.KeyTag, it.State, it.Sign)
 		}
 	}
-	r.startErr = nil
 	r.roleTurn()
 	if !r.mpzd.Options[tdns.OptInlineSigning] {
 		t.Error("its first keys are there, and it does not sign")

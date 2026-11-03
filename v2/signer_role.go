@@ -32,6 +32,7 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 )
 
 // signerRoleEvery is how often the signer looks again at every zone's role.
@@ -137,17 +138,16 @@ func (conf *Config) signerRoleTurn(ctx context.Context, zone string) {
 
 	named := self != "" && has(r.Signing, self)
 	if self != "" && has(r.KeySigners, self) && !bound && (!named || !has(r.Servers, self)) {
-		if err := bindWithoutSigning(mpzd.ZoneData); err != nil {
-			conf.roleFailure(zone, "the zone's DNSSEC policy could not be bound, so its key machine does not run; tried again", err)
-			if named {
-				return
-			}
-		} else {
-			conf.noRoleFailure(zone)
-			conf.tookRole(zone)
+		if !conf.bindForKeys(mpzd) && named {
+			return
 		}
 	}
 	if named && !signs {
+		// its key machine makes its first keys one at a time, and tdns takes a KSK
+		// alone for a CSK: it would sign the zone with that until its next signing
+		if !has(r.Servers, self) && !firstKeysThere(mpzd) {
+			return
+		}
 		switch err := startSigning(ctx, mpzd.ZoneData); {
 		case err == nil:
 			conf.noRoleFailure(zone)
@@ -181,6 +181,52 @@ func (conf *Config) handedOtherwiseMeanwhile(mpzd *MPZoneData, mp *MultiProvider
 		lgSigner.Info("the zone started signing as a hand-over took that back; acting by the hand-over", "zone", mpzd.ZoneName)
 		mpzd.actBySets(conf, r, conf.signerConfirmers(mpzd.ZoneName))
 	}
+}
+
+// firstKeysThere: a KSK and a ZSK of this provider's sign the zone.
+func firstKeysThere(mpzd *MPZoneData) bool {
+	inv, err := tdns.GetKeyInventory(mpzd.KeyDB, mpzd.ZoneName)
+	if err != nil {
+		return false
+	}
+	var ksk, zsk bool
+	for _, it := range inv {
+		switch {
+		case !it.Sign || it.State == DnskeyStateForeign:
+		case it.Flags&dns.SEP != 0:
+			ksk = true
+		default:
+			zsk = true
+		}
+	}
+	return ksk && zsk
+}
+
+// bindForKeys binds the zone's policy with no signing, so that its key machine runs.
+func (conf *Config) bindForKeys(mpzd *MPZoneData) bool {
+	zone := mpzd.ZoneName
+	if err := bindWithoutSigning(mpzd.ZoneData); err != nil {
+		conf.roleFailure(zone, "the zone's DNSSEC policy could not be bound, so its key machine does not run; tried again", err)
+		return false
+	}
+	conf.noRoleFailure(zone)
+	conf.tookRole(zone)
+	return true
+}
+
+// keysStartOver, at the hand-over of its keys' step, on the handler's own goroutine:
+// keys a joiner holds start over before its inventory says anything of them, also
+// where no first load bound its policy, as for a provider put back. Binding signs
+// nothing, so it does not wait as a start does.
+func (conf *Config) keysStartOver(mpzd *MPZoneData) {
+	mpzd.Lock()
+	bound := mpzd.DnssecPolicy != nil
+	mpzd.Unlock()
+	if bound {
+		conf.tookRole(mpzd.ZoneName)
+		return
+	}
+	conf.bindForKeys(mpzd)
 }
 
 // tookRole: the key machine may take the zone now, not at its next tick.

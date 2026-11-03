@@ -257,9 +257,9 @@ func (b *servedKeysBook) largest(mpzd *MPZoneData) (ttl time.Duration, whole, lo
 				l.served = map[string]bool{}
 			}
 			for _, ns := range served {
-				l.served[ns] = true
+				l.served[canonicalName(ns)] = true
 			}
-			missing := slices.DeleteFunc(silent, func(ns string) bool { return l.served[ns] })
+			missing := slices.DeleteFunc(silent, func(ns string) bool { return l.served[canonicalName(ns)] })
 			l.whole = len(l.served) > 0 && len(missing) == 0
 			grew, warn := l.whole && (!wasWhole || l.ttl > before), !l.whole && !l.said
 			l.said = l.said || warn

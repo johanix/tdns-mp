@@ -563,7 +563,8 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 	}
 	switch next {
 	case KeyStateMpdist:
-		l.startDistribution(keyid, false, false)
+		// T20's key is in the agent's set already: a resend has it distribute it
+		l.startDistribution(keyid, false, k.State != KeyStateCreated)
 		if len(l.dist[keyid].Expected) == 0 {
 			// nobody to wait for (T3'): published at once
 			if _, _, err := l.applyLocked(keyid, EvDistributed); err != nil {
