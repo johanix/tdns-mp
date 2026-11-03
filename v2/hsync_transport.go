@@ -2685,9 +2685,9 @@ func (tm *MPTransportBridge) noRoleWait() time.Duration {
 // dnskeyNoRoleTimedOut ends the wait of a DNSKEY distribution for the
 // members with no vote that have not answered by the time-out (design 4):
 // each counts as answered, neither applying the keys nor rejecting them,
-// with one log line, and the distribution goes on without it. A voting
-// member is waited for as before, and looked at again after another
-// time-out, in case it has no role by then.
+// with one log line, and the distribution goes on without it. A member that
+// can hold a key (canHoldAKey) is waited for as before, and looked at again
+// after another time-out, in case it cannot by then.
 func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(ctx context.Context, distID string) {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
@@ -2705,7 +2705,7 @@ func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(ctx context.Context, distID st
 		return
 	}
 	for _, a := range slices.Sorted(maps.Keys(prop.ExpectedAgents)) {
-		if prop.ExpectedAgents[a] || !nonVotingMember(prop.Zone, a) {
+		if prop.ExpectedAgents[a] || canHoldAKey(prop.Zone, a) {
 			continue
 		}
 		lgTransport.Warn("a member with no vote did not confirm in time, going on", "zone", prop.Zone, "member", a, "what", "the DNSKEY distribution "+distID)
@@ -2749,8 +2749,10 @@ func signingAgents(zone ZoneName, agents []AgentId) map[AgentId]bool {
 // whose answers it would sign (design §5.4: every signing provider has
 // applied the key). An ignored answer from a provider that does not sign
 // the zone is no obstacle. When who signs is not known here (Signing nil),
-// an ignored answer counts as it comes. What a member with no vote rejects
-// decides nothing (design 4): it stays in Results, and rejects no key.
+// an ignored answer counts as it comes. What a member that cannot hold a key
+// answers decides nothing (canHoldAKey): it stays in Results, and rejects no
+// key. This is read here, at the end, so what a leaving provider answered
+// stops counting when it leaves the key confirmers.
 func (prop *PendingDnskeyPropagation) outcome() (propagated, removed, rejected []uint16, rejectionMsg string) {
 	rejectionMsg = prop.RejectionMsg
 	agents := make([]string, 0, len(prop.Results))
@@ -2762,9 +2764,9 @@ func (prop *PendingDnskeyPropagation) outcome() (propagated, removed, rejected [
 		bad := false
 		for _, a := range agents {
 			switch r := prop.Results[AgentId(a)][kt]; {
-			case r == "rejected" && !nonVotingMember(prop.Zone, AgentId(a)):
+			case r == "rejected" && canHoldAKey(prop.Zone, AgentId(a)):
 				bad = true
-			case r == "ignored" && prop.Signing[AgentId(a)]:
+			case r == "ignored" && prop.Signing[AgentId(a)] && canHoldAKey(prop.Zone, AgentId(a)):
 				bad = true
 				if rejectionMsg == "" {
 					rejectionMsg = fmt.Sprintf("%s ignored the key, though its provider is one of the zone's signers", a)
@@ -2913,7 +2915,7 @@ func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source str
 			// a late rejection: the resend's answer decides
 		case rejectedTags[kt] || (wholeRejection && !doneTags[kt]):
 			results[kt] = "rejected"
-			if !nonVotingMember(prop.Zone, agentID) { // decides nothing (outcome)
+			if canHoldAKey(prop.Zone, agentID) { // otherwise it decides nothing (outcome)
 				prop.Rejected = true
 				if prop.RejectionMsg == "" {
 					prop.RejectionMsg = reason
@@ -3066,7 +3068,7 @@ func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent Agent
 			switch {
 			case rejectedTags[kt]:
 				results[kt] = "rejected"
-				if !nonVotingMember(prop.Zone, agent) { // decides nothing (outcome)
+				if canHoldAKey(prop.Zone, agent) { // otherwise it decides nothing (outcome)
 					prop.Rejected = true
 					if prop.RejectionMsg == "" && len(rejectedItems) > 0 {
 						prop.RejectionMsg = rejectedItems[0].Reason

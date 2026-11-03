@@ -369,7 +369,8 @@ func removalsOf(rs []InstrRemoval) []Removal {
 // nonVotingMember: id is a member of the zone with no vote under its active
 // serial (design 4): the auditor, a passive participant; an ON record in none
 // of the lists; or a provider whose removal is under way. A distribution waits
-// for it only up to multi-provider.transitions.no-role-timeout.
+// for it only up to multi-provider.transitions.no-role-timeout, unless it can
+// hold a key (canHoldAKey).
 func nonVotingMember(zone ZoneName, id AgentId) bool {
 	in := instructionsFor(zone)
 	switch st := zoneStanding(in, string(id)); {
@@ -380,6 +381,21 @@ func nonVotingMember(zone ZoneName, id AgentId) bool {
 	}
 	_, ok := instrStore.Load().removal(dns.Fqdn(string(zone)), "", string(id))
 	return ok
+}
+
+// stillConfirmsKeys: id is among the zone's KeyConfirmers at its step: a
+// leaving provider until its NS TTL has passed. Resolvers sent to it need
+// another signer's new DNSKEY (design 5.2).
+func stillConfirmsKeys(zone ZoneName, id AgentId) bool {
+	return isAmong(identities(rolesForZone(zone).KeyConfirmers), id)
+}
+
+// canHoldAKey: a DNSKEY distribution waits for id with no time-out, and what
+// id rejects rejects the key: a voting member, or a leaving provider for as
+// long as it still confirms keys, as it may still be delegated to (design 4,
+// 5.2). What any other member answers decides nothing.
+func canHoldAKey(zone ZoneName, id AgentId) bool {
+	return !nonVotingMember(zone, id) || stillConfirmsKeys(zone, id)
 }
 
 // --- The parts ---

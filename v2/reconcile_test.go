@@ -1580,3 +1580,116 @@ func TestDoneWithAWaitingSerialKeepsTheOwedList(t *testing.T) {
 		t.Errorf("the signer's hold is let go at done with 43 waiting: %v", h)
 	}
 }
+
+// TestALeavingProvidersRejectionOfAKeyCountsWhileItIsWaitedFor, by the project
+// owner's ruling: a leaving provider may still be delegated to (design 5.2), so
+// while it is among the key confirmers a distribution has no time-out for it,
+// and what it rejects or ignores holds the key. Once a step takes it out it
+// decides nothing, what it answered before included. A member with no role
+// never does, and a leaving provider's rejection of anything else does not
+// (nonVotingMember, TestARejectionFromAMemberWithNoVoteDecidesNothing).
+func TestALeavingProvidersRejectionOfAKeyCountsWhileItIsWaitedFor(t *testing.T) {
+	r := newMemberRig(t, "leaverkey.reconcile.example.")
+	zone := ZoneName(r.zone)
+	tm := r.conf.InternalMp.MPTransport
+	tm.noRoleTimeout = time.Hour // the test ends the wait itself
+
+	key := testDnskeyRR(t, r.zone, 257)
+	kt := key.KeyTag()
+	track := func(distID string) *PendingDnskeyPropagation {
+		tm.TrackDnskeyPropagation(t.Context(), zone, distID, []uint16{kt}, nil, []AgentId{roleB, roleN})
+		tm.dnskeyPropMu.Lock()
+		defer tm.dnskeyPropMu.Unlock()
+		return tm.pendingDnskeyPropagations[distID]
+	}
+	refused := func(distID string) {
+		tm.ProcessDnskeyConfirmation(distID, roleN, transport.ConfirmRejected.String(), nil, []RejectedItemInfo{{Record: key.String(), Reason: "n refuses"}})
+	}
+	applied := func(distID string) {
+		tm.ProcessDnskeyConfirmation(distID, roleB, transport.ConfirmSuccess.String(), []string{key.String()}, nil)
+	}
+	waits := func(distID string) bool {
+		tm.dnskeyPropMu.Lock()
+		defer tm.dnskeyPropMu.Unlock()
+		_, ok := tm.pendingDnskeyPropagations[distID]
+		return ok
+	}
+	step := func(n int, stillConfirms bool) {
+		t.Helper()
+		sets := rolesFor(r.v, r.v, 0)
+		if stillConfirms {
+			sets.KeyConfirmers = append(slices.Clone(sets.KeyConfirmers), Provider{Label: "n"})
+		}
+		r.hear(roleB, r.leaderStep(n, sets, []string{"x"}, InstrRemoval{Label: "n", Identity: roleN}), true)
+		r.conf.thawTurn(r.zone)
+		if st, ok := r.step(); !ok || st.Number != n {
+			t.Fatalf("the member's step: %+v", st)
+		}
+		if got := stillConfirmsKeys(zone, roleN); got != stillConfirms {
+			t.Fatalf("at step %d n still confirms keys: %v", n, got)
+		}
+	}
+
+	// a member with no role, not leaving: its rejection decides nothing
+	if st := zoneStanding(instructionsFor(zone), roleN); st != standingNoRole {
+		t.Fatalf("n's standing is %d, want a member with no role", st)
+	}
+	p := track("none")
+	refused("none")
+	if propagated, _, rejected, _ := p.outcome(); len(propagated) != 1 || len(rejected) != 0 {
+		t.Errorf("the key a member with no role rejected: propagated %v rejected %v", propagated, rejected)
+	}
+	tm.ProcessDnskeyConfirmation("none", roleB, transport.ConfirmSuccess.String(), []string{key.String()}, nil)
+
+	// leaving, and still among the key confirmers
+	step(1, true)
+	if !nonVotingMember(zone, roleN) {
+		t.Error("n has a vote: what it rejects other than a key would decide")
+	}
+	p = track("rejects")
+	refused("rejects")
+	applied("rejects")
+	if _, _, rejected, msg := p.outcome(); len(rejected) != 1 || msg != "n refuses" {
+		t.Errorf("the key the leaver rejected while waited for: rejected %v, reason %q", rejected, msg)
+	}
+	ign := track("ignores")
+	if !ign.Signing[roleN] {
+		t.Fatal("the leaver is not among the signing agents")
+	}
+	tm.ProcessDnskeyConfirmation("ignores", roleN, transport.ConfirmIgnored.String(), nil, nil)
+	if _, _, rejected, _ := ign.outcome(); len(rejected) != 1 {
+		t.Errorf("the key the leaver ignored while waited for: rejected %v", rejected)
+	}
+	track("waits")
+	applied("waits")
+	tm.dnskeyNoRoleTimedOut(t.Context(), "waits")
+	if !waits("waits") {
+		t.Error("the distribution went on without a leaver that still confirms keys")
+	}
+	before := track("before")
+	refused("before")
+
+	// a step takes it out
+	step(2, false)
+	if _, _, rejected, _ := before.outcome(); len(rejected) != 0 {
+		t.Errorf("what the leaver rejected before it left still rejects the key: %v", rejected)
+	}
+	if _, _, rejected, _ := ign.outcome(); len(rejected) != 0 {
+		t.Errorf("what the leaver ignored before it left still rejects the key: %v", rejected)
+	}
+	p = track("after")
+	refused("after")
+	if propagated, _, rejected, _ := p.outcome(); len(propagated) != 1 || len(rejected) != 0 {
+		t.Errorf("the key the leaver rejected after it left: propagated %v rejected %v", propagated, rejected)
+	}
+	tm.dnskeyNoRoleTimedOut(t.Context(), "waits")
+	if waits("waits") {
+		t.Error("the distribution still waits for a provider that left the key confirmers, after the time-out")
+	}
+	// b, a voting member, decides throughout
+	p = track("voter")
+	tm.ProcessDnskeyConfirmation("voter", roleB, transport.ConfirmRejected.String(), nil, []RejectedItemInfo{{Record: key.String(), Reason: "b refuses"}})
+	if _, _, rejected, msg := p.outcome(); len(rejected) != 1 || msg != "b refuses" {
+		t.Errorf("the key b rejected: rejected %v, reason %q", rejected, msg)
+	}
+}
