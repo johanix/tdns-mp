@@ -54,6 +54,68 @@ func (s *InstructionStore) reading(zone string) *Instructions {
 	return nil
 }
 
+// namedAgain is the serial above the active one that names local, when the
+// active one does not: a provider whose removal is over, put back by the owner
+// (design 5.1). None for a provider still leaving: it has its record under the
+// active serial, or is reconciling to the serial that took it, one edit taking
+// its roles and its record included. None from a serial the judge refuses, or
+// under an owner error. Called with the store's lock held.
+func (z *zoneSerials) namedAgain(local string) *heldSerial {
+	if z.Active == nil || z.OwnerError != "" || z.reconciling() {
+		return nil
+	}
+	if members, _, _ := participantsOf(z.Active.Reading); memberSetOf(members).has(local) {
+		return nil
+	}
+	for i := range z.Held {
+		if members, _, _ := participantsOf(z.Held[i].Reading); len(z.Held[i].Refused) == 0 && memberSetOf(members).has(local) {
+			return &z.Held[i]
+		}
+	}
+	return nil
+}
+
+// startOver has an agent the owner names again know no active serial: its
+// serials are held, none judged, as at a first load, and what the active serial
+// left goes. False when the zone is not one for it (namedAgain).
+func (s *InstructionStore) startOver(zone, local string) (was, named SerialDigest, ok bool, err error) {
+	s.mu.Lock()
+	z := s.zones[zone]
+	due := z != nil && z.namedAgain(local) != nil
+	s.mu.Unlock()
+	if !due {
+		return was, named, false, nil
+	}
+	err = s.update(zone, func(z *zoneSerials) error {
+		h := z.namedAgain(local)
+		if h == nil {
+			return nil
+		}
+		was, named, ok = z.Active.SerialDigest, h.SerialDigest, true
+		for i := range z.Held {
+			z.Held[i].Refused = nil
+		}
+		z.Active, z.LastFrom, z.LastThaw, z.NamedAt = nil, nil, nil, h.Serial
+		z.Step, z.Taken, z.StepOf, z.StepWhat, z.Excused, z.ParentWords = 0, nil, 0, "", nil, nil
+		return nil
+	})
+	return was, named, ok && err == nil, err
+}
+
+// namedAt is the serial that named this agent again (zoneSerials.NamedAt), 0
+// with none.
+func (s *InstructionStore) namedAt(zone string) uint32 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if z := s.zones[zone]; z != nil {
+		return z.NamedAt
+	}
+	return 0
+}
+
 // newestReading is the store's name for zone, named in any case, the newest
 // serial held of it and its owner error, for a zone the store knows no
 // active serial of; a nil serial otherwise.
@@ -84,6 +146,8 @@ type restartView struct {
 	fetch  []restartFetch
 	waits  []string // whom the leader waits for
 	differ []string // the voting members with a record, and what each tells
+	// namedAt: the serial that named this agent again; nothing below it counts
+	namedAt uint32
 	// reconciling: those it is taken from tell a transition to it under
 	// way (plan S12)
 	reconciling bool
@@ -107,15 +171,41 @@ func (v restartView) line() string {
 		return "active not known since the start; waiting for " + strings.Join(v.waits, ", ")
 	case len(v.fetch) > 0:
 		return fmt.Sprintf("active not known since the start; fetching serial %d from %s", v.fetch[0].sd.Serial, v.fetch[0].member)
+	case v.namedAt != 0 && !v.leads:
+		return fmt.Sprintf("named again by serial %d; active not known; waiting for the leader's word", v.namedAt)
 	case !v.leads:
 		return "active not known since the start; waiting for the leader's word"
 	}
 	return "active not known since the start"
 }
 
-// restartView is the restart rule for zone at now (design 3.4); false when
-// this agent knows the zone's active serial, or keeps no serials of it.
+// notBelow takes out of the view what it would fetch or take below the serial
+// that named this agent again: the leader may tell the serial this agent dropped
+// until it thaws, and a stamp from before the removal's end stays in the table.
+func (v *restartView) notBelow(serial uint32) {
+	if serial == 0 {
+		return
+	}
+	v.namedAt = serial
+	v.fetch = slices.DeleteFunc(v.fetch, func(f restartFetch) bool { return CompareSerial(f.sd.Serial, serial) < 0 })
+	if v.take != nil && CompareSerial(v.take.Serial, serial) < 0 {
+		v.take, v.thaw = nil, nil
+	}
+}
+
+// restartView is the restart rule for zone at now (design 3.4), for an agent
+// named again no lower than the serial that named it; false when this agent
+// knows the zone's active serial, or keeps no serials of it.
 func (conf *Config) restartView(zone string, now time.Time) (restartView, bool) {
+	v, ok := conf.restartRule(zone, now)
+	if ok {
+		v.notBelow(conf.InternalMp.Instructions.namedAt(zone))
+	}
+	return v, ok
+}
+
+// restartRule is the restart rule as design 3.4 has it.
+func (conf *Config) restartRule(zone string, now time.Time) (restartView, bool) {
 	s := conf.InternalMp.Instructions
 	name, newest, ownerError := s.newestReading(zone)
 	mp := conf.MpConfig()
@@ -366,6 +456,35 @@ func (conf *Config) know(zone string, sd SerialDigest, th *Thaw, reconciling boo
 		conf.InternalMp.CatchUp.askUnasked(ZoneName(zone))
 	}
 	conf.askThaw(zone)
+}
+
+// startOverIfNamedAgain is the zone's turn for an agent the owner names again
+// after its removal (startOver). No member tells it anything, as it shares
+// nothing with them under its active serial. It starts over as a newcomer does:
+// the readers read the newest serial, so its peers are named again and discovery
+// and comms run, every record entering as at a first load, and it takes the
+// leader's word for the active serial (knowActive).
+func (conf *Config) startOverIfNamedAgain(zone string) {
+	mp := conf.MpConfig()
+	if mp == nil || mp.Identity == "" {
+		return
+	}
+	s := conf.InternalMp.Instructions
+	was, named, ok, err := s.startOver(zone, dns.Fqdn(mp.Identity))
+	if err != nil {
+		lg.Warn("the zone names this provider again, and its active serial could not be dropped", "zone", zone, "err", err)
+		return
+	}
+	if !ok {
+		return
+	}
+	lg.Info("the zone names this provider again: its active serial has no record of it, so it starts over as a newcomer", "zone", zone, "active_was", was.Serial, "named_by", named.Serial)
+	conf.InternalMp.CatchUp.activeChanged(ZoneName(zone))
+	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil && mpzd.Ready {
+		mpzd.onActiveChanged(conf.InternalMp.MPTransport, nil, s.reading(zone))
+		conf.onSetsChanged(mpzd, true)
+		conf.InternalMp.CatchUp.askUnasked(ZoneName(zone))
+	}
 }
 
 // placeGroupsAtStart places the zones in their groups before their first
