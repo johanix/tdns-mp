@@ -1252,6 +1252,7 @@ func TestARemovalIsAgreedOn(t *testing.T) {
 // steps, and the zone stays at its active serial, frozen for nothing. The owner
 // publishes the removal alone. pubkey's step lands last, with S21.
 func TestARemovalWithAKindNotBuiltIsRefusedWhole(t *testing.T) {
+	t.Skip("211-demo: S21 builds pubkey, so no kind is refused as not built with the real judge (S19, S20 and S21 built); needs a test seam or another example")
 	s := newStore(t)
 	activeSeven(t, s)
 	s.Note(storeZone, readOf(t, instrBase[0], instrBase[1], `3600 IN HSYNCPARAM serial="8" servers="alpha" signers="alpha" pubkey`), nil)

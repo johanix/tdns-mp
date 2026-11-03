@@ -355,6 +355,7 @@ func TestARefusedSerialIsJudgedAgainWhenTheActiveSerialChanges(t *testing.T) {
 // active serial, frozen for nothing, and the owner's way out is a higher serial
 // without it. pubkey's step lands last, with S21, which takes this test away.
 func TestANotBuiltChangeStaysRefused(t *testing.T) {
+	t.Skip("211-demo: S21 builds pubkey, so no kind is refused as not built with the real judge (S19, S20 and S21 built); needs a test seam or another example")
 	seven := jAt(t, 7, jServers2, jAlpha, jBeta)
 	s := newStore(t)
 	noteKnown(t, s, storeZone, seven)
