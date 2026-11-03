@@ -10,12 +10,15 @@ package tdnsmp
 
 import (
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
+	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -92,6 +95,146 @@ func (r *notifyRig) heldCsync(t *testing.T, rec string) TrackedRRInfo {
 		return false
 	})
 	return held
+}
+
+const newcomerThird = "agent.third.example."
+
+// newcomerRig is the receiving rig as a provider that joins a zone: the peer
+// and a third agent vote in it, serial 41 lists those two and serial 42 lists
+// the agent too, with no role. The agent holds 41 from its first load, knows
+// no active serial, and has its own group manager, gossip table, election
+// manager and hsync engine, wired as the agent wires them.
+func newcomerRig(t *testing.T, zone string) (r *notifyRig, v, n *Instructions) {
+	t.Helper()
+	asMPAgent(t)
+	r = newNotifyRigWith(t, zone, "NOTIFY", true, func(r *notifyRig) {
+		logTo(t, lg, slog.NewTextHandler(r.log, nil))
+		record := func(id string) string { return `3600 IN HSYNC3 ON ` + shortLabel(id) + ` ` + id + ` .` }
+		param := `servers="` + shortLabel(r.peer.Identity) + `,` + shortLabel(newcomerThird) + `"`
+		v = jAt(t, 41, param, record(r.peer.Identity), record(newcomerThird))
+		n = jAt(t, 42, param, record(r.peer.Identity), record(newcomerThird), record(r.us.Identity))
+		store := newStore(t)
+		store.Note(zone, v, nil)
+		if !store.activeUnknown(zone) {
+			t.Fatal("setup: an active serial is known")
+		}
+		withStore(t, store)
+		kept, err := loadKeptLists(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ar := r.us.Registry
+		r.conf.InternalMp.Instructions, r.conf.InternalMp.Kept = store, kept
+		r.conf.InternalMp.AgentRegistry = ar
+		r.us.Bridge.stamps = newStampTable(r.us.Identity, store, 1, false, nil)
+		r.peer.Bridge.stamps = newStampTable(r.peer.Identity, nil, 1, false, nil)
+		r.mpzd.Options[tdns.OptMultiProvider] = true
+		ar.LeaderElectionManager = r.lem
+		r.lem.SetProviderGroupManager(ar.ProviderGroupManager)
+		r.lem.SetOnLeaderNamed(r.conf.askLeaderWaits)
+		ar.HsyncEngine = newAgentHsyncEngine(r.conf)
+		ar.ProviderGroupManager.RecomputeGroups()
+	}, repeat(time.Minute, 4)...)
+	return r, v, n
+}
+
+// votersBeat is the peer's beat to the agent, with the peer leading the
+// zone's group under in at term 1: the gossip the peer builds, as it reaches
+// the agent's bridge.
+func (r *notifyRig) votersBeat(t *testing.T, in *Instructions) {
+	t.Helper()
+	peer, us := r.peer.Identity, r.us.Identity
+	m := zoneMakeUp(r.mpzd.ZoneName, in)
+	pgm := r.peer.Registry.ProviderGroupManager
+	pgm.RecomputeGroups()
+	lem := NewLeaderElectionManager(AgentId(peer), time.Hour, func(ZoneName, string, map[string][]string) error { return nil })
+	t.Cleanup(func() { stopElectionTimers(lem) })
+	lem.groupElections[ComputeGroupHash(m.voting, m.auditors, m.noRole)] = &LeaderElection{Term: 1, Leader: AgentId(peer), leaderTerm: 1, LeaderExpiry: time.Now().Add(time.Hour)}
+	gossip, err := json.Marshal(r.peer.Registry.GossipStateTable.BuildGossipForPeer(us, pgm, lem))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(transport.DnsBeatPayload{MessageType: "beat", MyIdentity: peer, YourIdentity: us, Gossip: gossip})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.us.Bridge.routeBeatMessage(&transport.IncomingMessage{TypeToken: "beat", SenderID: peer, TransportSender: peer,
+		Mechanism: transport.MechanismDNS, Zone: r.mpzd.ZoneName, Payload: body, ReceivedAt: time.Now(), SourceAddr: "127.0.0.1:0"})
+}
+
+// A provider that joins with no role and has the serial naming it from a
+// member before its own refresh brings it. The serial fetched moves what the
+// zone reads, so the zone moves to its group under that serial, and the
+// refresh and the serial's becoming known find nothing left to do. The voting
+// member's beat is taken, the leader is known, and the leader's answer kept
+// for it is judged. The zone used to stay in its group under the old serial:
+// gossip for the group it should be in was not taken, and the answer stayed
+// kept.
+func TestANewcomerThatFetchesBeforeItsRefreshLearnsTheLeader(t *testing.T) {
+	r, v, n := newcomerRig(t, "fetchfirst.join.example.")
+	z, peer := r.mpzd.ZoneName, r.peer.Identity
+	hashOf := func(in *Instructions) string {
+		m := zoneMakeUp(z, in)
+		return ComputeGroupHash(m.voting, m.auditors, m.noRole)
+	}
+	before, after := hashOf(v), hashOf(n)
+	placed := func(what, want string) {
+		t.Helper()
+		pg := r.us.Registry.ProviderGroupManager.GetGroupForZone(ZoneName(z))
+		if pg == nil || pg.GroupHash != want {
+			t.Fatalf("%s: the zone's group is %+v, want %s", what, pg, want)
+		}
+	}
+	placed("at the first load", before)
+
+	if !r.conf.holdFetched(z, n, peer) {
+		t.Fatal("the serial fetched is not held")
+	}
+	placed("after the fetch", after)
+	r.logs(t, `msg="an HSYNC3 record and no role: member, no vote, no edits"`)
+	r.logs(t, fmt.Sprintf(`msg="the zone joined a provider group" zone=%s group=%s was_in=%s`, z, shortHash(after), shortHash(before)))
+
+	s := r.conf.InternalMp.Instructions
+	s.Note(z, n, nil) // the refresh
+	r.conf.know(z, sd(n), nil, false, peer, knownFromRecords)
+	placed("once the serial is known", after)
+	if votesInZone(ZoneName(z), AgentId(r.us.Identity)) {
+		t.Fatal("the newcomer votes")
+	}
+
+	op, rec := csyncOp(z, 1000)
+	distID := r.receives(t, peer, peer, op)
+	r.pendingSays(t, distID, keptNoLeader)
+	r.keptForLeader(t, 1)
+
+	r.votersBeat(t, n)
+	if got, ok := r.lem.ZoneLeader(ZoneName(z)); !ok || string(got) != peer {
+		t.Fatalf("the leader known here is %q %v, want %s", got, ok, peer)
+	}
+	r.heldCsync(t, rec)
+	r.keptForLeader(t, 0)
+	r.logs(t, fmt.Sprintf(`msg="a kept distribution is released" zone=%s`, z))
+}
+
+// With an active serial known a serial fetched moves nothing: the zone reads
+// its active serial, and stays in its group until the thaw.
+func TestAFetchedSerialMovesNoZoneThatKnowsItsActiveSerial(t *testing.T) {
+	r, v, n := newcomerRig(t, "fetchknown.join.example.")
+	z := ZoneName(r.mpzd.ZoneName)
+	r.conf.know(string(z), sd(v), nil, false, r.peer.Identity, knownFromRecords)
+	want := r.us.Registry.ProviderGroupManager.GetGroupForZone(z)
+	if want == nil {
+		t.Fatal("setup: the zone has no group")
+	}
+	if !r.conf.holdFetched(string(z), n, r.peer.Identity) {
+		t.Fatal("the serial fetched is not held")
+	}
+	if got := r.us.Registry.ProviderGroupManager.GetGroupForZone(z); got == nil || got.GroupHash != want.GroupHash {
+		t.Errorf("the zone's group moved to %+v, from %s", got, want.GroupHash)
+	}
+	if r.logCount(`msg="the zone's active instructions changed"`) != 0 {
+		t.Error("the fetch ran what a change of the active instructions runs")
+	}
 }
 
 // The agent knows no leader of the zone yet: a CSYNC is kept, whole, and

@@ -1140,6 +1140,11 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 // leader that acts only when the views of a zone agree is what closes that
 // window (the membership design).
 func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string) {
+	was := "no group"
+	if from != "" {
+		was = shortHash(from)
+	}
+	lg.Info("the zone joined a provider group", "zone", zone, "group", shortHash(to), "was_in", was)
 	// The parent work under way for the zone belongs to the hold of the lead
 	// it began in, the zone's own election's or the group's it left. From
 	// now on a loss of the new group's lead is the one that ends this
@@ -1162,10 +1167,6 @@ func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string
 		lgElect.Info("zone joined a group this agent leads, but this agent does not vote in the zone: it does not take the zone up",
 			"zone", zone, "group", shortHash(to))
 		return
-	}
-	was := "no group"
-	if from != "" {
-		was = shortHash(from)
 	}
 	lgElect.Info("zone joined a group this agent leads, asking for its delegation sync",
 		"zone", zone, "group", shortHash(to), "was_in", was)
