@@ -403,15 +403,13 @@ func TestANewerSerialDuringAgreeingIsTheOneAgreedOn(t *testing.T) {
 	}
 }
 
-// A refused newer serial does not replace the serial agreed on: a record
-// and then its role, published before the first is thawed. The first is
-// thawed, and the second is judged again against it: refused only as not
-// built, it waits while the transition reconciles, and the steady zone then
-// follows it (the not-built fallback).
+// A refused newer serial does not replace the serial agreed on: published
+// before the first is thawed, it is judged again against the first, and waits
+// on past that transition's "done".
 func TestARefusedNewerSerialDoesNotReplaceTheSerialAgreedOn(t *testing.T) {
-	r := newThawRig(t, "record-then-role.thaw.example.", roleA)
+	r := newThawRig(t, "refused-newer.thaw.example.", roleA)
 	r.agree()
-	w := freezeAt(t, 43, "v", "a,b,n", "") // n's role: refused until S18a
+	w := freezeAt(t, 43, "v", "a,b,z", "") // refused: a role for z, which has no record
 	r.store.Note(r.zone, w, nil)
 	st := status(t, r.store, r.zone)
 	if st.Agreeing == nil || st.Agreeing.Serial != 42 || st.Newest.Serial != 43 || len(st.Refused) == 0 {
@@ -421,16 +419,16 @@ func TestARefusedNewerSerialDoesNotReplaceTheSerialAgreedOn(t *testing.T) {
 	r.hear(roleB, r.agreeing(), true)
 	r.conf.thawTurn(r.zone)
 	st = status(t, r.store, r.zone)
-	if st.Active.Serial != 42 || st.Newest.Serial != 43 || len(st.Refused) == 0 || st.Follows != "" || st.Agreeing != nil {
-		t.Fatalf("after the thaw: active %s, newest %s, refused %v, follows %q, agreeing %s", serialOf(st.Active), serialOf(st.Newest), st.Refused, st.Follows, serialOf(st.Agreeing))
+	if st.Active.Serial != 42 || st.Newest.Serial != 43 || len(st.Refused) == 0 || st.Agreeing != nil {
+		t.Fatalf("after the thaw: active %s, newest %s, refused %v, agreeing %s", serialOf(st.Active), serialOf(st.Newest), st.Refused, serialOf(st.Agreeing))
 	}
 	// TestARefusedNewerSerialIsJudgedAgainAfterDone
 	if err := r.store.Done(r.zone); err != nil {
 		t.Fatal(err)
 	}
 	st = status(t, r.store, r.zone)
-	if st.Active.Serial != 43 || st.Follows == "" || st.Agreeing != nil || st.DoneAt.IsZero() {
-		t.Fatalf("after done: active %s, follows %q, agreeing %s, done at %v", serialOf(st.Active), st.Follows, serialOf(st.Agreeing), st.DoneAt)
+	if st.Active.Serial != 42 || st.Newest.Serial != 43 || len(st.Refused) == 0 || st.Agreeing != nil || st.DoneAt.IsZero() {
+		t.Fatalf("after done: active %s, newest %s, refused %v, agreeing %s, done at %v", serialOf(st.Active), serialOf(st.Newest), st.Refused, serialOf(st.Agreeing), st.DoneAt)
 	}
 }
 
@@ -463,6 +461,11 @@ func TestAZoneWithNoVotingMemberUnderNThawsWhenTheNewVotersAgree(t *testing.T) {
 	r.holdUnjudged(v, time.Now())
 	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleB+" (not heard)" {
 		t.Fatalf("before b tells: %q", vw.waits)
+	}
+	// heard, but telling nothing of the zone (plan S22): not "not heard"
+	r.operational(roleB)
+	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleB+" (tells nothing of the zone)" {
+		t.Fatalf("b heard, telling nothing of the zone: %q", vw.waits)
 	}
 	st := tells(n, v)
 	st.Agreeing, st.AgreeingDigest = 62, v.Digest()
@@ -634,6 +637,46 @@ func TestALostLeaderThatIsNotLeavingStallsItsGroup(t *testing.T) {
 	}
 	if line := vw.line(); !strings.Contains(line, "no leader ("+roleB+" not heard since never); waiting for it or for the owner to remove it") {
 		t.Errorf("the status: %q", line)
+	}
+	// its last beat told nothing of the zone (plan S22): heard then all the
+	// same (N3 of the external review)
+	r.seq++
+	r.stamps.note(&GossipMessage{GroupHash: stampGroupHash, Members: map[string]*MemberState{
+		roleB: {Identity: roleB, Timestamp: time.Now(), Epoch: 1, Seq: r.seq, Crypto: true}}}, roleB, transport.MechanismDNS)
+	if vw := r.view(); vw.noLeader != roleB+" not heard since "+r.stamps.heard(roleB).Heard.Format(time.TimeOnly) {
+		t.Errorf("no leader, after its beat with no zone: %q", vw.noLeader)
+	}
+}
+
+// A voting member new under V tells nothing the thaw waits for but its
+// payload encryption, which its stamp row tells while it tells nothing of
+// the zone, at rest; one not heard is not heard (S1 of the external review).
+func TestANewVoterAtRestHoldsTheThawOnlyForItsPayloadEncryption(t *testing.T) {
+	r := newThawRig(t, "newvoter.thaw.example.", roleA)
+	n, v := freezeAt(t, 41, "n", "a,b", ""), freezeAt(t, 42, "v", "a,b,n", "")
+	if err := r.store.Forget(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	knownAs(t, r.store, r.zone, n)
+	r.n, r.v = n, v
+	r.holdUnjudged(v, time.Now())
+	r.hold()
+	r.hear(roleB, r.agreeing(), true)
+	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleN+" (not heard)" {
+		t.Fatalf("n not heard: %q", vw.waits)
+	}
+	row := func(crypto bool) {
+		r.seq++
+		r.stamps.note(&GossipMessage{GroupHash: stampGroupHash, Members: map[string]*MemberState{
+			roleN: {Identity: roleN, Timestamp: time.Now(), Epoch: 1, Seq: r.seq, Crypto: crypto}}}, roleN, transport.MechanismDNS)
+	}
+	row(true)
+	if vw := r.view(); !vw.ready() {
+		t.Errorf("n at rest, payload encryption on: %q", vw.waits)
+	}
+	row(false)
+	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleN+" (payload encryption off)" {
+		t.Errorf("n at rest, payload encryption off: %q", vw.waits)
 	}
 }
 
@@ -1079,5 +1122,25 @@ func TestAnExcusalNeverEmptiesTheGate(t *testing.T) {
 	gst.CheckGroupState("g", []string{roleA, roleB})
 	if ops != 0 {
 		t.Error("a gate whose voters are all excused opened by itself")
+	}
+}
+
+// A member heard that tells nothing of the zone is told apart from one not
+// heard (plan S22): at rest a member lists none of its zones, until it
+// hears the others' stamps of it.
+func TestAHeardMemberThatTellsNothingOfTheZoneIsNotNotHeard(t *testing.T) {
+	r := newThawRig(t, "nothing.thaw.example.", roleA)
+	r.agree()
+	r.hold()
+	if v := r.view(); v.ready() || len(v.waits) != 1 || v.waits[0] != roleB+" (not heard)" {
+		t.Errorf("b not heard at all: %q", v.waits)
+	}
+	r.operational(roleB)
+	if v := r.view(); v.ready() || len(v.waits) != 1 || v.waits[0] != roleB+" (tells nothing of the zone)" {
+		t.Errorf("b heard, with no stamp of the zone: %q", v.waits)
+	}
+	r.hear(roleB, r.agreeing(), true)
+	if v := r.view(); !v.ready() {
+		t.Errorf("b telling agreement: %q", v.waits)
 	}
 }

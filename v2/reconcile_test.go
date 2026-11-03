@@ -392,6 +392,10 @@ func TestALeaderWithoutTheStateTakesItFromTheMembersStamps(t *testing.T) {
 	if line := r.conf.thawLine(r.zone); !strings.Contains(line, "waiting for the leader's step, waiting for "+roleB+" (not heard)") {
 		t.Errorf("the status: %q", line)
 	}
+	r.operational(roleB) // heard, but telling nothing of the zone (plan S22)
+	if line := r.conf.thawLine(r.zone); !strings.Contains(line, "waiting for "+roleB+" (tells nothing of the zone)") {
+		t.Errorf("the status with b heard: %q", line)
+	}
 	if r.wanted() != nil && r.conf.wantedHandover(r.zone) != nil {
 		t.Error("a leader with no step's sets hands its parts something new")
 	}
@@ -689,6 +693,63 @@ func TestAMemberWithNoRoleIsWaitedForWithATimeOut(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), `msg="a member with no role did not confirm in time, going on"`) {
 		t.Errorf("no log line: %s", logs)
+	}
+}
+
+// A member with no role that tells no active serial, or one above V, cannot
+// hold a step of V, so no step waits for it (plan S12, status item 9): the
+// transition goes on to done. One that tells V or a serial below it can come
+// to hold the step, and is waited for.
+func TestAMemberWithNoRoleThatCannotHoldTheStepIsNotWaitedFor(t *testing.T) {
+	for _, c := range []struct {
+		name, zone string
+		tells      func(r *reconcileRig, st *InstrStamp)
+		waits      bool
+	}{
+		{"it knows no active serial", "unknown.norole.reconcile.example.", func(_ *reconcileRig, st *InstrStamp) {
+			st.Known, st.Active, st.ActiveDigest, st.Reconciling, st.Step, st.StepHeld = false, 0, "", false, nil, false
+		}, false},
+		{"it tells a serial above V", "above.norole.reconcile.example.", func(r *reconcileRig, st *InstrStamp) {
+			st.Active, st.ActiveDigest, st.Step, st.StepHeld = r.v.Serial+2, "above", nil, false
+		}, false},
+		{"it tells V, the step not held", "atv.norole.reconcile.example.", func(_ *reconcileRig, st *InstrStamp) {
+			st.StepHeld = false
+		}, true},
+		{"it tells a serial below V", "below.norole.reconcile.example.", func(r *reconcileRig, st *InstrStamp) {
+			st.Active, st.ActiveDigest, st.Reconciling, st.Step, st.StepHeld = r.n.Serial, r.n.Digest(), false, nil, false
+		}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newReconcileRig(t, c.zone, roleA)
+			r.agree()
+			r.thawNow()
+			r.partsTake()
+			r.holdsToo(roleB)
+			st := r.own()
+			c.tells(r, &st)
+			r.hear(roleN, st, true)
+			r.turn(time.Now())
+			step, _ := r.step()
+			if c.waits {
+				if step.Number != 0 {
+					t.Fatalf("went on without n: %+v", step)
+				}
+				if line := r.conf.thawLine(r.zone); !strings.HasSuffix(line, "waiting for "+roleN+" (no role)") {
+					t.Errorf("the status: %q", line)
+				}
+				return
+			}
+			if step.Number != 1 {
+				t.Fatalf("step 0 waited for n: %+v, status %q", step, r.conf.thawLine(r.zone))
+			}
+			r.partsTake()
+			r.holdsToo(roleB)
+			r.hear(roleN, st, true)
+			r.turn(time.Now())
+			if s := status(t, r.store, r.zone); s.Phase != PhaseSteady {
+				t.Errorf("not done: %+v, status %q", s, r.conf.thawLine(r.zone))
+			}
+		})
 	}
 }
 

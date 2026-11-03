@@ -274,36 +274,30 @@ func TestTheSweepRunsBeforeAWaitingSerialIsAgreed(t *testing.T) {
 	}
 }
 
-// A newer serial refused only for kinds not built is followed in the very
-// store update that ends V's transition (#350's fallback; CodeRabbit on
-// #352). 43 gives n a server role again and takes b's, unenforced. The sweep
-// runs all the same: what neither entitles goes (n's DNSKEY), what 43 gives
-// stays (n's NS), and what only 43 takes away stays (b's NS).
-func TestTheSweepRunsWhenDoneFollowsASerialNotBuilt(t *testing.T) {
-	r := newSweepRig(t, "followed.sweep.example.")
+// A refused newer serial stays where it is at V's "done", so the sweep goes by
+// V: what V does not entitle goes (n's), and what it does stays (b's). 43 gives
+// a role to z, which has no record: a refusal that stays as steps land.
+func TestTheSweepRunsWithARefusedSerialWaiting(t *testing.T) {
+	r := newSweepRig(t, "refused.sweep.example.")
 	r.holds(roleN, dns.TypeNS, dns.TypeDNSKEY)
 	r.holds(roleB, dns.TypeNS)
-	r.store.Note(r.zone, removalAt(t, 43, "agent", "a,n", "a"), nil)
+	r.store.Note(r.zone, removalAt(t, 43, "agent", "a,b,z", "a"), nil)
 	r.run()
-	if st := status(t, r.store, r.zone); st.Active.Serial != 43 || st.Follows == "" {
-		t.Fatalf("43 is not followed at done: %s", st.Line())
+	if st := status(t, r.store, r.zone); st.Active.Serial != 42 || st.Newest.Serial != 43 || len(st.Refused) == 0 || st.Agreeing != nil {
+		t.Fatalf("43 is no refused serial waiting at done: %s", st.Line())
 	}
-	if r.has(roleN, dns.TypeDNSKEY) {
-		t.Error("n's DNSKEY stays: no serial entitles it")
-	}
-	if !r.has(roleN, dns.TypeNS) {
-		t.Error("n's NS went: 43 gives n the role")
+	if r.has(roleN, dns.TypeNS) || r.has(roleN, dns.TypeDNSKEY) {
+		t.Errorf("n's stay: NS %v, DNSKEY %v", r.has(roleN, dns.TypeNS), r.has(roleN, dns.TypeDNSKEY))
 	}
 	if !r.has(roleB, dns.TypeNS) {
-		t.Error("b's NS went: only 43 takes it away, unenforced")
+		t.Error("b's NS went: V entitles it")
 	}
-	if !slices.Equal(r.purged, []string{"n.role.example DNSKEY"}) {
+	if !slices.Equal(r.purged, []string{"n.role.example NS", "n.role.example DNSKEY"}) {
 		t.Errorf("the purges: %v", r.purged)
 	}
 }
 
-// A sweep by a serial no longer active does nothing, unless the fallback
-// followed the active one.
+// A sweep by a serial no longer active does nothing.
 func TestASweepByAnotherSerialDoesNothing(t *testing.T) {
 	r := newSweepRig(t, "other.sweep.example.")
 	r.run()

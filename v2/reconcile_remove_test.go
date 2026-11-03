@@ -1176,3 +1176,66 @@ func TestAFullEngineQueueDoesNotHoldTheTurn(t *testing.T) {
 		t.Fatal("the turn waits for a full queue")
 	}
 }
+
+// activeSeven is the zone's active serial 7 in the judge's tests below: alpha
+// and beta serve, alpha signs.
+func activeSeven(t *testing.T, s *InstructionStore) {
+	t.Helper()
+	noteKnown(t, s, storeZone, readOf(t, instrBase[0], instrBase[1], `3600 IN HSYNCPARAM serial="7" servers="alpha,beta" signers="alpha"`))
+}
+
+// A removal has its steps: it is agreed on, the zone frozen and the active
+// serial where it was.
+func TestARemovalIsAgreedOn(t *testing.T) {
+	s := newStore(t)
+	activeSeven(t, s)
+	s.Note(storeZone, readOf(t, instrBase[0], instrBase[1], `3600 IN HSYNCPARAM serial="8" servers="alpha" signers="alpha"`), nil)
+	st := status(t, s, storeZone)
+	if st.Active == nil || st.Active.Serial != 7 {
+		t.Fatalf("a removal took effect at once: %s", st.Line())
+	}
+	if st.Agreeing == nil || st.Agreeing.Serial != 8 || len(st.Refused) != 0 || len(s.frozen(storeZone)) == 0 {
+		t.Errorf("a removal not agreed on: %s", st.Line())
+	}
+}
+
+// A serial is judged whole: a removal in one edit with a kind not built has no
+// steps, and the zone stays at its active serial, frozen for nothing. The owner
+// publishes the removal alone. pubkey's step lands last, with S21.
+func TestARemovalWithAKindNotBuiltIsRefusedWhole(t *testing.T) {
+	s := newStore(t)
+	activeSeven(t, s)
+	s.Note(storeZone, readOf(t, instrBase[0], instrBase[1], `3600 IN HSYNCPARAM serial="8" servers="alpha" signers="alpha" pubkey`), nil)
+	st := status(t, s, storeZone)
+	if st.Active == nil || st.Active.Serial != 7 || st.Agreeing != nil || len(s.frozen(storeZone)) != 0 {
+		t.Fatalf("a removal with a kind not built: %s", st.Line())
+	}
+	if len(st.Refused) == 0 || st.Refused[0].Code != RefusedNotBuilt {
+		t.Errorf("the refusal: %v", st.Refused)
+	}
+}
+
+// Removing a record that still has a role is a rule of the design, not a step
+// missing (S17b leaves it so): refused.
+func TestRemovingARecordThatStillHasARoleStaysRefused(t *testing.T) {
+	s := newStore(t)
+	activeSeven(t, s)
+	s.Note(storeZone, readOf(t, instrBase[0], `3600 IN HSYNCPARAM serial="8" servers="alpha" signers="alpha"`), nil)
+	st := status(t, s, storeZone)
+	if st.Active == nil || st.Active.Serial != 7 || st.Agreeing != nil {
+		t.Fatalf("a record with a role removed: %s", st.Line())
+	}
+	if len(st.Refused) == 0 || st.Refused[0].Code != RefusedRecordWithRoleRemoved {
+		t.Errorf("the refusal: %v", st.Refused)
+	}
+}
+
+// The owner's order: the roles first, the record later. With the roles gone,
+// removing the record has nothing to carry out, and is agreed on.
+func TestARecordRemovedAfterItsRolesIsAgreed(t *testing.T) {
+	noRole := readOf(t, instrBase[0], instrBase[1], `3600 IN HSYNCPARAM serial="8" servers="alpha" signers="alpha"`)
+	gone := readOf(t, instrBase[0], `3600 IN HSYNCPARAM serial="9" servers="alpha" signers="alpha"`)
+	if refs := judgeTransition(noRole, gone); len(refs) != 0 {
+		t.Errorf("the record of a provider with no role: %v", refs)
+	}
+}

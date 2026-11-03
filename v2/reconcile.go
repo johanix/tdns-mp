@@ -333,7 +333,6 @@ type reconcileInputs struct {
 	excused     []string
 	enforced    bool
 	reconciling bool
-	follows     string // why the not-built fallback follows the active serial
 }
 
 // reconcileInputs is what the store holds of zone, the zone named in any
@@ -349,7 +348,7 @@ func (s *InstructionStore) reconcileInputs(zone string) (reconcileInputs, bool) 
 		return reconcileInputs{}, false
 	}
 	in := reconcileInputs{name: name, active: *z.Active, removals: slices.Clone(z.Removals),
-		excused: slices.Clone(z.Excused), enforced: z.Enforced, reconciling: z.reconciling(), follows: z.Follows}
+		excused: slices.Clone(z.Excused), enforced: z.Enforced, reconciling: z.reconciling()}
 	if z.From != nil {
 		f := *z.From
 		in.from = &f
@@ -638,7 +637,7 @@ func (conf *Config) reconcileView(in reconcileInputs, told map[string]toldStamp,
 	if !in.hasStep && len(unheard) > 0 {
 		v.adopt = nil
 		for _, id := range unheard {
-			v.waits = append(v.waits, id+" (not heard)")
+			v.waits = append(v.waits, id+" ("+conf.unheard(id)+")")
 		}
 		return v
 	}
@@ -705,8 +704,9 @@ func (conf *Config) reconcileView(in reconcileInputs, told map[string]toldStamp,
 
 // stepWaits adds to v whom the step held waits for: this agent's parts;
 // every other voting member under V, without a time-out; a member with no
-// role under V that is heard, up to no-role-timeout from the step (design
-// 4): a newcomer whose agent is not running holds nothing up. A leaving
+// role under V that is heard and tells V or a serial below it, up to
+// no-role-timeout from the step (design 4, plan S12's item 9): a newcomer
+// whose agent is not running holds nothing up. A leaving
 // member (voting under N and not under V, or one whose removal is under
 // way) has no role too: a step waits for it, while it is heard, until it has
 // not confirmed a step for leaving-timeout, and it is then excused (design
@@ -791,6 +791,12 @@ func (conf *Config) stepWaits(in reconcileInputs, told map[string]toldStamp, vot
 	for _, id := range noRoleIDs {
 		st, heard := told[canonicalName(id)]
 		if !heard || now.Sub(st.heard) > timeout || holds(st) {
+			continue
+		}
+		// one that knows no active serial, or one above V, cannot hold a step
+		// of V: the leader's word may need an election it cannot hear, and
+		// waiting would only run out the time-out at every step
+		if !st.Known || CompareSerial(st.Active, in.active.Serial) > 0 {
 			continue
 		}
 		if now.Sub(in.step.at) < noRole {
