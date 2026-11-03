@@ -1122,6 +1122,59 @@ func TestTheLeavingProviderIsToldSafeToRemove(t *testing.T) {
 	}
 }
 
+// A member with no role that never voted is not told safe to remove: with no
+// thaw kept, and after a thaw from a serial with no records.
+func TestAMemberThatNeverVotedIsNotToldSafeToRemove(t *testing.T) {
+	for name, from := range map[string]*heldSerial{"no thaw kept": nil, "no records before": {Reading: &Instructions{Serial: 40}}} {
+		t.Run(name, func(t *testing.T) {
+			r := newReconcileRig(t, "never.remove.example.", roleA)
+			if err := r.store.update(r.zone, func(z *zoneSerials) error {
+				z.Enforced, z.LastFrom = true, from
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			mp := r.conf.MpConfig()
+			id := mp.Identity
+			mp.Identity = roleN
+			defer func() { mp.Identity = id }()
+			if st := zoneStanding(r.store.activeReading(r.zone), roleN); st != standingNoRole {
+				t.Fatalf("n's standing: %v", st)
+			}
+			if r.conf.safeToRemove(r.zone) {
+				t.Error("n is told safe to remove")
+			}
+		})
+	}
+}
+
+// What the parent serves is matched by more than the key's tag.
+func TestAParentDSIsMatchedByMoreThanItsTag(t *testing.T) {
+	const a, b = "AAAA", "BBBB"
+	ds := func(tag uint16, alg, digest uint8, text string) *dns.DS {
+		return &dns.DS{KeyTag: tag, Algorithm: alg, DigestType: digest, Digest: text}
+	}
+	set := []dns.RR{ds(1, 15, dns.SHA256, a), ds(2, 15, dns.SHA256, b)}
+	for _, c := range []struct {
+		name   string
+		served []*dns.DS
+		want   bool
+	}{
+		{"nothing served", nil, true},
+		{"the set", []*dns.DS{ds(1, 15, dns.SHA256, a), ds(2, 15, dns.SHA256, b)}, true},
+		{"part of the set", []*dns.DS{ds(2, 15, dns.SHA256, b)}, true},
+		{"the digest in another case", []*dns.DS{ds(1, 15, dns.SHA256, "aaaa")}, true},
+		{"another tag", []*dns.DS{ds(3, 15, dns.SHA256, a)}, false},
+		{"the leaver's, its tag shared", []*dns.DS{ds(1, 15, dns.SHA256, b)}, false},
+		{"another algorithm, the tag shared", []*dns.DS{ds(1, 13, dns.SHA256, a)}, false},
+		{"another digest type of a key that stays", []*dns.DS{ds(1, 15, dns.SHA384, "CCCC")}, true},
+	} {
+		if got := dsAllIntended(c.served, set); got != c.want {
+			t.Errorf("%s: got %v", c.name, got)
+		}
+	}
+}
+
 // withoutN is the owner's edit that takes n's record, the role already gone.
 func withoutN(t *testing.T, serial uint32) *Instructions {
 	t.Helper()
