@@ -405,6 +405,33 @@ func TestAProviderPutBackHasItsKeysStartOverAsItsZoneIsTaken(t *testing.T) {
 	}
 }
 
+// A start-over that has not happened, as its write failed say: its signer does not
+// say it signs, so its agent does not hold the keys' step, the leader takes no next
+// step, and the hand-over that has the next tick try again stays.
+func TestASignerWhoseKeysAreDueToStartOverDoesNotSayItSigns(t *testing.T) {
+	const zone = "due.adding.signer.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="p2" signers="p2"`)...)
+	h := joinerHandover(t, zone, 6, true)
+	h.Step, h.Joining = 2, true
+	r.hand(h, sigUs)
+	r.mpzd.SetRuntimeOption(tdns.OptInlineSigning, true)
+	if m := r.conf.inventoryMarksOf(zone, nil); !m.signs {
+		t.Fatalf("nothing due, and it does not say it signs: %+v", m)
+	}
+	if _, _, err := r.kdb.GenerateKeypair(zone, "earlier", tdns.DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, "ZSK", nil); err != nil {
+		t.Fatal(err)
+	}
+	if m := r.conf.inventoryMarksOf(zone, nil); m.signs {
+		t.Errorf("a key is due to start over, and it says it signs: %+v", m)
+	}
+	if err := r.e.driver(zone).StartOver(); err != nil {
+		t.Fatal(err)
+	}
+	if m := r.conf.inventoryMarksOf(zone, nil); !m.signs {
+		t.Errorf("started over, and it does not say it signs: %+v", m)
+	}
+}
+
 // The same keys' step handed again, as a newer serial is held say, does not start
 // its keys' wait again: keys it has published since the step began would start over,
 // and again at each newer serial. Another step does.

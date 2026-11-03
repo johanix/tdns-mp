@@ -665,21 +665,42 @@ func (l *ZoneKeyLifecycle) StartOver() error {
 // T3 in this joining, and stays. What a provider's steps read as its keys having
 // propagated must have been so in this joining.
 func (l *ZoneKeyLifecycle) startOverLocked(all map[uint16]tdns.DnssecKeyWithTimestamps) error {
-	since, joining := l.Wire.JoiningSince(l.Zone)
-	if !joining {
-		return nil
-	}
-	since = since.Truncate(time.Second)
-	for _, keyid := range keytagsOf(all) {
-		k := all[keyid]
-		if k.State != KeyStateActive && k.State != KeyStateStandby || k.PublishedAt != nil && !k.PublishedAt.Before(since) {
-			continue
-		}
+	for _, keyid := range l.dueToStartOver(all) {
 		if _, _, err := l.applyLocked(keyid, EvStartOver); err != nil {
 			return fmt.Errorf("start key %d of %s over: %w", keyid, l.Zone, err)
 		}
 	}
 	return nil
+}
+
+// dueToStartOver are the keys T20 is for, while this provider's keys-step is held.
+func (l *ZoneKeyLifecycle) dueToStartOver(all map[uint16]tdns.DnssecKeyWithTimestamps) []uint16 {
+	since, joining := l.Wire.JoiningSince(l.Zone)
+	if !joining {
+		return nil
+	}
+	since = since.Truncate(time.Second)
+	var due []uint16
+	for _, keyid := range keytagsOf(all) {
+		k := all[keyid]
+		if (k.State == KeyStateActive || k.State == KeyStateStandby) && (k.PublishedAt == nil || k.PublishedAt.Before(since)) {
+			due = append(due, keyid)
+		}
+	}
+	return due
+}
+
+// StartOverDue: a start-over has not happened, as its write failed say. Its signer
+// then does not say it signs, so its agent does not hold the keys' step and the step
+// stays, whose hand-over is what has the next tick try again. Not known counts as due.
+func (l *ZoneKeyLifecycle) StartOverDue() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	all, err := l.rows()
+	if err != nil {
+		return true
+	}
+	return len(l.dueToStartOver(all)) > 0
 }
 
 // signsFromTheStart: k, on its way to state, is a first key that signs before T9
