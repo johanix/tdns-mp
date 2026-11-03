@@ -1413,7 +1413,9 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			mpzd.MPOptions = newMpzd.MPOptions
 			mpzd.Unlock()
 		}
-		if unhanded && !waits && !mpzd.Ready {
+		// only before its first publish: a copy once served stays so, as one released
+		// that has nothing servable yet
+		if unhanded && !waits && !mpzd.Ready && !mpzd.HasPublishedData() {
 			if err := mpzd.Withhold(); err != nil {
 				lg.Error("the zone could not be withheld until its signer knows its role", "zone", mpzd.ZoneName, "err", err)
 			}

@@ -6,7 +6,7 @@ replace github.com/johanix/tdns-mp/v2 => ../../v2
 
 require (
 	github.com/johanix/tdns-mp/v2 v2.0.0-20260526134639-0f2c99fa4d2c
-	github.com/johanix/tdns/v2 v2.0.0-20261102143859-91b4e41c48b6
+	github.com/johanix/tdns/v2 v2.0.0-20261103165957-47290130e05a
 	github.com/mattn/go-sqlite3 v1.14.52
 )
 

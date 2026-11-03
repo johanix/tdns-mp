@@ -1529,12 +1529,11 @@ func TestAWithheldZoneReportsAtEveryRound(t *testing.T) {
 	const none = "noreading.rounds.withheld.signer.example."
 	o := newSignerRig(t, none, sigRecords(`servers="us,p2" signers="us,p2"`)...)
 	o.conf.InternalMp.MPZoneNames = []string{none}
-	o.mpzd.Lock()
-	o.mpzd.Ready = false
-	o.mpzd.Unlock()
+	o.restart(t)
 	if err := o.mpzd.Withhold(); err != nil {
 		t.Fatal(err)
 	}
+	o.mpzd.InstallInitialSnapshot()
 	reported = map[string]bool{}
 	for round := 1; round <= 3; round++ {
 		o.conf.signerStartReport(reported)
@@ -2414,12 +2413,12 @@ func TestAJoinersWaitIsItsOwnAndAsksInTurn(t *testing.T) {
 	if w.asked == asked {
 		t.Error("past the time between looks it did not look again")
 	}
+	if got := w.after(time.Hour); got != "" {
+		t.Fatalf("past the TTL it waits for %q", got)
+	}
 	b := &w.r.conf.InternalMp.signerAdds
 	if got := b.keysPropagated(w.r.conf, w.r.zone, roleB); got == "" {
 		t.Error("another joiner has the first's wait behind it")
-	}
-	if got := w.after(time.Hour); got != "" {
-		t.Fatalf("past the TTL it waits for %q", got)
 	}
 	b.mu.Lock()
 	for _, l := range b.zones {
