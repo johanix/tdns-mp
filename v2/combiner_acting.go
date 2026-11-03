@@ -290,6 +290,7 @@ func (conf *Config) combinerTakeHandover(msg *AgentMsgPostPlus, localAgents map[
 	// Before the hand-over is kept: a stop between the two finds the same
 	// change at the next hand-over, and drops what is left (design 5.4).
 	if store.changesNSmgmt(h) {
+		readContributionsAgain(conf, mpzd, zone)
 		dropped, err := mpzd.dropStoredNS()
 		if err != nil {
 			return refuse(fmt.Sprintf("the stored NS could not be dropped: %v", err))

@@ -222,6 +222,7 @@ func TestAHandOverWhoseDropCannotBeKeptIsRefusedAndTriedAgain(t *testing.T) {
 	if _, _, _, err := mpzd.ReplaceCombinerDataByRRtype(actOther, zone, dns.TypeNS, nsRRs(t, zone, "ns.beta.example.")); err != nil {
 		t.Fatal(err)
 	}
+	mpzd.MP.ContributionsRead = true
 	mpzd.MP.PersistContributions = func(string, string, map[string]map[uint16]core.RRset) error { return errors.New("the disk is full") }
 	h := stepHandover(t, zone, 1, core.HsyncNSmgmtOWNER, records("6", "owner")...)
 	if resp := handTo(conf, h, actUs); resp.Status != "error" || !strings.Contains(resp.Message, "the disk is full") {
@@ -239,6 +240,131 @@ func TestAHandOverWhoseDropCannotBeKeptIsRefusedAndTriedAgain(t *testing.T) {
 	}
 	if got := storedNS(mpzd, actOther); len(got) != 0 {
 		t.Errorf("after the hand-over again the NS is still stored: %v", got)
+	}
+}
+
+// unreadStoreCombiner is a combiner whose read of its stored contributions
+// failed at the zone's start, handed serial 5: the store holds an origin's NS
+// and CSYNC, and memory nothing.
+func unreadStoreCombiner(t *testing.T, zone, nsmgmt string) (*Config, *MPZoneData, *HsyncDB) {
+	t.Helper()
+	hdb := NewHsyncDB(newMPTestKeyDB(t))
+	if err := hdb.InitCombinerEditTables(); err != nil {
+		t.Fatalf("the combiner's tables: %v", err)
+	}
+	records := actRecords(`serial="5" servers="alpha,beta" nsmgmt="` + nsmgmt + `"`)
+	conf, mpzd := actingCombiner(t, zone, records...)
+	conf.InternalMp.HsyncDB = hdb
+	mpzd.restoreContributions(hdb, nil, false)
+	withActing(t, hdb)
+	if resp := handTo(conf, handoverFor(t, zone, records...), actUs); resp.Status != "ok" {
+		t.Fatalf("refused: %s", resp.Message)
+	}
+	contribs := map[string]map[uint16]core.RRset{zone: {
+		dns.TypeNS:    {RRs: nsRRs(t, zone, "ns.stale.example.")},
+		dns.TypeCSYNC: {RRs: []dns.RR{mustRR(t, zone+" 3600 IN CSYNC 7 1 NS")}},
+	}}
+	if err := SaveContributions(hdb, zone, actOther, contribs); err != nil {
+		t.Fatal(err)
+	}
+	return conf, mpzd, hdb
+}
+
+// storeHoldsNS: the store holds the origin's NS for the zone. The origin's
+// CSYNC has to be there: the drop touches no other type.
+func storeHoldsNS(t *testing.T, hdb *HsyncDB, zone, origin string) bool {
+	t.Helper()
+	stored, err := LoadAllContributions(hdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stored[zone][origin][zone][dns.TypeCSYNC]; !ok {
+		t.Error("the store no longer holds the CSYNC")
+	}
+	_, ok := stored[zone][origin][zone][dns.TypeNS]
+	return ok
+}
+
+// A combiner whose read at the zone's start failed reads its store before it
+// drops, either way: read later, by the next RFI EDITS, the NS would come
+// back, and to the agents it would be served.
+func TestAChangeOfNsmgmtOnAnUnreadStoreDropsWhatTheStoreHolds(t *testing.T) {
+	for _, tc := range []struct {
+		zone, from, to string
+		handed         uint8
+	}{
+		{"unreadagents.nsmgmt.example.", "owner", "agent", core.HsyncNSmgmtAGENT},
+		{"unreadowner.nsmgmt.example.", "agent", "owner", core.HsyncNSmgmtOWNER},
+	} {
+		t.Run(tc.to, func(t *testing.T) {
+			conf, mpzd, hdb := unreadStoreCombiner(t, tc.zone, tc.from)
+			v := actRecords(`serial="6" servers="alpha,beta" nsmgmt="` + tc.to + `"`)
+			if resp := handTo(conf, stepHandover(t, tc.zone, 1, tc.handed, v...), actUs); resp.Status != "ok" {
+				t.Fatalf("refused: %s", resp.Message)
+			}
+			if storeHoldsNS(t, hdb, tc.zone, actOther) {
+				t.Error("the store still holds the NS")
+			}
+			// the read an agent's RFI EDITS makes brings nothing back
+			sendEditsToAgent(context.Background(), conf, nil, actUs, tc.zone, "n")
+			req := editsAnswerFor(mpzd, conf.MpConfig().Identity, tc.zone, "n")
+			if req.Message != editsLoaded {
+				t.Errorf("the answer to an RFI EDITS: %q", req.Message)
+			}
+			if got := storedNS(mpzd, actOther); len(got) != 0 {
+				t.Errorf("the NS came back: %v", got)
+			}
+			if _, err := mpzd.CombineWithLocalChanges(); err != nil {
+				t.Fatal(err)
+			}
+			if got := nsTargets(servedTypes(t, mpzd, dns.TypeNS)); !slices.Equal(got, []string{"ns1." + tc.zone}) {
+				t.Errorf("the zone serves %v, want the owner's alone", got)
+			}
+		})
+	}
+}
+
+// While the store cannot be read, or the zone has not loaded, a hand-over that
+// changes nsmgmt is refused and the role stays. The same hand-over drops the
+// NS once the store can be read.
+func TestAHandOverThatCannotReadTheStoreIsRefusedAndTriedAgain(t *testing.T) {
+	const zone = "unreadfail.nsmgmt.example."
+	conf, mpzd, hdb := unreadStoreCombiner(t, zone, "owner")
+	store := actingHeld.Load()
+	h := stepHandover(t, zone, 1, core.HsyncNSmgmtAGENT, actRecords(`serial="6" servers="alpha,beta" nsmgmt="agent"`)...)
+	refused := func(when string) {
+		t.Helper()
+		if resp := handTo(conf, h, actUs); resp.Status != "error" || !strings.Contains(resp.Message, "not read") {
+			t.Fatalf("%s, the answer: %s %q", when, resp.Status, resp.Message)
+		}
+		if held, ok := store.get(zone); !ok || held.handover.Serial != 5 {
+			t.Errorf("%s, the refused hand-over was kept: %+v", when, held.handover)
+		}
+		if p := mpzd.getEditPolicy(); p.NSmgmt != core.HsyncNSmgmtOWNER {
+			t.Errorf("%s, nsmgmt %d: the role changed", when, p.NSmgmt)
+		}
+	}
+	rename := func(from, to string) {
+		t.Helper()
+		if _, err := hdb.DB.Exec(`ALTER TABLE ` + from + ` RENAME TO ` + to); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rename("CombinerContributions", "CombinerContributionsAside")
+	refused("while the read fails")
+	rename("CombinerContributionsAside", "CombinerContributions")
+	mpzd.Ready = false
+	refused("before the zone has loaded")
+	mpzd.Ready = true
+
+	if resp := handTo(conf, h, actUs); resp.Status != "ok" {
+		t.Fatalf("refused again: %s", resp.Message)
+	}
+	if storeHoldsNS(t, hdb, zone, actOther) {
+		t.Error("the store still holds the NS")
+	}
+	if held, ok := store.get(zone); !ok || held.handover.Serial != 6 {
+		t.Errorf("the hand-over held: %+v", held.handover)
 	}
 }
 
