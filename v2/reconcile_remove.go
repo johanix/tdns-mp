@@ -949,7 +949,9 @@ func (conf *Config) lookAgainAtDnskeyWaits(zone ZoneName) {
 
 // safeToRemove: this agent no longer has a role in the zone, the transition
 // that took its last role away is done, and nothing is under way: its operator
-// may take the zone away (design 5.2).
+// may take the zone away (design 5.2). So too when the last thaw took its
+// record: a leader thaws only after "done", and the thaw's own transition is
+// done here.
 func (conf *Config) safeToRemove(zone string) bool {
 	mp := conf.MpConfig()
 	if mp == nil {
@@ -960,5 +962,19 @@ func (conf *Config) safeToRemove(zone string) bool {
 	if !ok || !in.enforced || in.reconciling {
 		return false
 	}
-	return zoneStanding(in.active.Reading, mp.Identity) == standingNoRole && votesIn(s.lastFromReading(zone), AgentId(mp.Identity))
+	from := s.lastFromReading(zone)
+	switch zoneStanding(in.active.Reading, mp.Identity) {
+	case standingNoRole:
+		return votesIn(from, AgentId(mp.Identity))
+	case standingNone:
+		return from != nil && zoneStanding(from, mp.Identity) != standingNone
+	}
+	return false
+}
+
+// recordGone: safeToRemove because the last thaw took this agent's record. It
+// has no part in what the others agree on next.
+func (conf *Config) recordGone(zone string) bool {
+	mp := conf.MpConfig()
+	return mp != nil && conf.safeToRemove(zone) && zoneStanding(conf.InternalMp.Instructions.activeReading(zone), mp.Identity) == standingNone
 }
