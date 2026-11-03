@@ -1,8 +1,10 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * A signer added, and a server that becomes a signer (design 5.1, 5.3, plan
- * S18b). The leader's steps, each confirmed by every voting member:
+ * A signer added (design 5.1, plan S18b). A server that becomes a signer is
+ * refused for now (design 5.3, the owner's decision of 2026-11-03), so a joiner
+ * has no role of its own yet. The leader's steps, each confirmed by every voting
+ * member:
  *
  *  1. Its keys. The joiner enters KeySigners and KeyConfirmers, and once every
  *     member's parts hold that, its signer is handed it too: another signer's
@@ -425,7 +427,10 @@ func (conf *Config) ownSignerSigns(zone string) bool {
 	return snap != nil && snap.Signs
 }
 
-// servesUnder: the step's sets give id a server role.
+// servesUnder: the step's sets give id a server role. A joiner's sets do not, even
+// one that V makes a server too, whose role comes at the last step: only a server
+// that moves into signers= has one here, and the judge refuses that (design 5.3).
+// So its nameservers are asked nothing at step 3 today, and it hands no MinSerial.
 func servesUnder(step InstrStep, id string) bool {
 	var sets Roles
 	if err := json.Unmarshal(step.Sets, &sets); err != nil {

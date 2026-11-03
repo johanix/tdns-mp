@@ -212,22 +212,53 @@ func TestAnUpstreamChangeIsRefusedUntilItsStepExists(t *testing.T) {
 }
 
 func TestAMoveIntoSignersIsRefusedUntilItsStepExists(t *testing.T) {
-	from := jAt(t, 41, jServers3, jAlpha, jBeta, jCharlie)
-	to := jAt(t, 42, `servers="alpha,beta,charlie" signers="alpha,charlie"`, jAlpha, jBeta, jCharlie)
+	from := jAt(t, 41, jServers2, jAlpha, jBeta, jCharlie)
+	to := jAt(t, 42, `servers="alpha,beta" signers="alpha,charlie"`, jAlpha, jBeta, jCharlie)
 	wantRefusals(t, "before P5", judge(from, to, builtKinds&^kindSignerRole, carriedKinds&^kindSignerRole), Refusal{RefusedStepMissing, "moves agent.charlie.example. into signers=, a step that cannot be carried out yet"})
 	wantRefusals(t, "P5", judge(from, to, builtKinds&^kindSignerRole, carriedKinds), Refusal{RefusedNotBuilt, "moves agent.charlie.example. into signers=: not built yet"})
 	wantRefusals(t, "S18b", judgeTransition(from, to))
 }
 
-// A server that moves into signers= and names no upstream any more serves its
-// own signer's copy from then on, which the move's steps bring about (design
-// 5.3). Any other change of an upstream waits for its own step (S21), and so
-// does one that moves it to another signer as it moves into signers=.
-func TestAServerMovedIntoSignersDropsItsUpstreamWithNoStepOfItsOwn(t *testing.T) {
+// A server that moves into signers= is refused, by the owner's decision of
+// 2026-11-03 (design 5.3), under a code of its own: a decision, not a step to
+// come, whatever is built. A zone nobody signs yet is no exception.
+func TestAServerMovedIntoSignersIsRefused(t *testing.T) {
+	const a, b = `3600 IN HSYNC3 ON a a.role.example. .`, `3600 IN HSYNC3 ON b b.role.example. .`
+	moved := Refusal{RefusedServerToSigner, "moves the server b.role.example. into signers="}
+	from := jAt(t, 41, `servers="a,b" signers="a"`, a, b)
+	to := jAt(t, 42, `servers="a,b" signers="a,b"`, a, b)
+	wantRefusals(t, "the move", judgeTransition(from, to), moved)
+	wantRefusals(t, "every kind built", judge(from, to, allKinds, allKinds), moved)
+	wantRefusals(t, "a zone nobody signs", judgeTransition(jAt(t, 41, `servers="a,b"`, a, b), jAt(t, 42, `servers="a,b" signers="b"`, a, b)), moved)
+	// after a signer's move the other way, in the rules' order
+	wantRefusals(t, "both moves", judge(from, jAt(t, 42, `servers="a,b" signers="b"`, a, b), allKinds, allKinds),
+		Refusal{RefusedSignerToServer, "moves the signer a.role.example. to servers= only"}, moved)
+}
+
+// A provider with no role yet may enter signers=: the rig's A2 and AS1 edits, a
+// signer given its server role after them, and both roles in one edit.
+func TestANewSignerIsNotCaughtByTheRefusalOfAServer(t *testing.T) {
+	const a, b, n = `3600 IN HSYNC3 ON a a.role.example. .`, `3600 IN HSYNC3 ON b b.role.example. a`, `3600 IN HSYNC3 ON n n.role.example. .`
+	from := jAt(t, 41, `servers="a,b" signers="a"`, a, b, n)
+	signer := jAt(t, 42, `servers="a,b" signers="a,n"`, a, b, n)
+	wantRefusals(t, "signers= alone", judgeTransition(from, signer))
+	wantRefusals(t, "then servers=", judgeTransition(signer, jAt(t, 43, `servers="a,b,n" signers="a,n"`, a, b, n)))
+	wantRefusals(t, "both in one edit", judgeTransition(from, jAt(t, 42, `servers="a,b,n" signers="a,n"`, a, b, n)))
+	wantRefusals(t, "a zone's first signer", judgeTransition(jAt(t, 41, `servers="a"`, a, n), jAt(t, 42, `servers="a" signers="n"`, a, n)))
+	// its record may have named an upstream while it had no role
+	named := jAt(t, 41, `servers="a,b" signers="a"`, a, b, `3600 IN HSYNC3 ON n n.role.example. a`)
+	wantRefusals(t, "drops the upstream its record named", judgeTransition(named, signer))
+}
+
+// A server that moves into signers= and names no upstream any more is refused for
+// the move alone: the rig's R cells make this edit, and a second reason for it
+// would read as a step still to come. Any other change of an upstream waits for
+// its own step (S21).
+func TestAServerThatDropsItsUpstreamAsItMovesIntoSignersIsRefusedOnce(t *testing.T) {
 	const a, b = `3600 IN HSYNC3 ON a a.role.example. .`, `3600 IN HSYNC3 ON b b.role.example. a`
 	from := jAt(t, 41, `servers="a,b" signers="a"`, a, b)
 	to := jAt(t, 42, `servers="a,b" signers="a,b"`, a, `3600 IN HSYNC3 ON b b.role.example. .`)
-	wantRefusals(t, "the move", judgeTransition(from, to))
+	wantRefusals(t, "the move", judgeTransition(from, to), Refusal{RefusedServerToSigner, "moves the server b.role.example. into signers="})
 	stays := jAt(t, 42, `servers="a,b" signers="a"`, a, `3600 IN HSYNC3 ON b b.role.example. .`)
 	wantRefusals(t, "no move", judgeTransition(from, stays), Refusal{RefusedStepMissing, "changes the upstream of b.role.example., a step that cannot be carried out yet"})
 }
