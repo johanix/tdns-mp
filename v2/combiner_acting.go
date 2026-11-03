@@ -226,6 +226,11 @@ func (s *actingStore) take(h *ActingHandover, by string) (prev *ActingHandover, 
 		return prev, true, nil
 	}
 	now := time.Now()
+	// a joiner's keys' step handed again, as a newer serial is held say: keys it has
+	// published since the step began are not to start over (JoiningSince)
+	if cur := s.zones[key]; cur != nil && h.Joining && cur.handover.Joining && cur.handover.Serial == h.Serial && cur.handover.Digest == h.Digest && cur.handover.Step == h.Step {
+		now = cur.since
+	}
 	if s.hdb != nil {
 		js, err := json.Marshal(&stored)
 		if err != nil {

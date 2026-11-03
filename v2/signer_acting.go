@@ -99,6 +99,9 @@ func (conf *Config) signerTakeHandover(sig *KeystateSignalMsg) {
 	if err == nil {
 		refusalLogged.Delete(handoverKey(zone))
 		conf.signerHold(zone, h.Sets.Hold)
+		if h.Joining {
+			conf.keysStartOver(mpzd)
+		}
 		conf.askSignerRole(zone)
 	}
 	if err == nil && h.Refresh {

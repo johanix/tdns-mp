@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"testing"
@@ -913,6 +914,13 @@ func TestAJoinersKeysStartOverAtItsKeysStep(t *testing.T) {
 	d.wire.joiningSince = time.Now()
 	if err := d.l.StartOver(); err != nil {
 		t.Fatal(err)
+	}
+	// the agent holds them already: only a resend has it distribute them (#256)
+	d.wire.mu.Lock()
+	resent := slices.Clone(d.wire.resends)
+	d.wire.mu.Unlock()
+	if !slices.Contains(resent, ksk) || !slices.Contains(resent, zsk) {
+		t.Errorf("starting over, resent %v: want both keys resent", resent)
 	}
 	for _, id := range []uint16{ksk, zsk} {
 		if s := d.state(id); s != KeyStateMpdist {

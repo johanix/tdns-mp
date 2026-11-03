@@ -255,6 +255,7 @@ func (conf *Config) inventoryMarksOf(zone string, items []KeyInventoryItem) inve
 	var f rolloverFlags
 	if e := conf.InternalMp.KeyLifecycle; e != nil {
 		if l := e.driver(zone); l != nil {
+			m.signs = m.signs && !l.StartOverDue()
 			// by the hold this inventory confirms: a hand-over keeps it between
 			// the machine's ticks (standbyAdditions)
 			var err error
