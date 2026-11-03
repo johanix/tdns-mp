@@ -1163,9 +1163,9 @@ func TestALeaverOutOfWordOfDoneFollowsTheThawThatTakesItsRecord(t *testing.T) {
 	n := newLeaverRigAt(t, zone, n41, n42, a.parent)
 	n.stamps.localID = roleN
 	mp := n.conf.MpConfig()
-	id := mp.Identity
-	mp.Identity = roleN
-	defer func() { mp.Identity = id }()
+	id, names := mp.Identity, mp.Local.Nameservers
+	mp.Identity, mp.Local.Nameservers = roleN, []string{"ns1.n.example."}
+	defer func() { mp.Identity, mp.Local.Nameservers = id, names }()
 	n.holdUnjudged(n43, time.Now())
 
 	n.stamps.note(reconciling, roleA, transport.MechanismDNS)
