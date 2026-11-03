@@ -351,7 +351,6 @@ type reconcileInputs struct {
 	excused     []string
 	enforced    bool
 	reconciling bool
-	follows     string // why the not-built fallback follows the active serial
 }
 
 // reconcileInputs is what the store holds of zone, the zone named in any
@@ -367,7 +366,7 @@ func (s *InstructionStore) reconcileInputs(zone string) (reconcileInputs, bool) 
 		return reconcileInputs{}, false
 	}
 	in := reconcileInputs{name: name, active: *z.Active, removals: slices.Clone(z.Removals),
-		excused: slices.Clone(z.Excused), enforced: z.Enforced, reconciling: z.reconciling(), follows: z.Follows}
+		excused: slices.Clone(z.Excused), enforced: z.Enforced, reconciling: z.reconciling()}
 	if z.From != nil {
 		f := *z.From
 		in.from = &f
