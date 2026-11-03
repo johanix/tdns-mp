@@ -1,6 +1,6 @@
 # Changes to the zone owner's instructions: numbered by the owner, agreed before they act, carried out by the leader
 
-**Status:** PROPOSAL, 2026-10-18, revision 6 (2026-10-26); rule 2 amended 2026-10-28; sections 4, 5.2 and 6 amended 2026-11-02.
+**Status:** PROPOSAL, 2026-10-18, revision 6 (2026-10-26); rule 2 amended 2026-10-28; sections 4, 5.2 and 6 amended 2026-11-02; section 5.2 amended 2026-11-03.
 
 This document describes how tdns-mp handles a change of a zone owner's instructions: every edit of the zone's HSYNC3 or HSYNCPARAM records. It describes the design as it is meant to stand. The difference from today's code and the steps of the work are in the plan beside it, `2026-10-18-owner-instruction-transitions-plan.md`, whose section 6 lists the decisions this design rests on and the parts of the membership design it changes.
 
@@ -202,7 +202,7 @@ The owner's order stays: the roles first, the record later. The leader under V r
 4. After the DS RRset's TTL, waiting for an emergency rollover, its DNSKEYs are withdrawn, and it leaves the providers whose keys are published and who sign: then it stops signing.
 5. Its operator is told that the zone is safe to remove.
 
-**The withdrawal.** The leader withdraws another provider's records by an operation of its own: an empty `replace` of one RRtype, which names the provider in a field of its own (the message's sender is the leader). It may only delete. A member applies it when the sender is the zone's leader under the active serial and the active instructions do not list the provider in the list that RRtype depends on: `servers=` for NS records, `signers=` for DNSKEY and CDS records. Its confirmation goes to the leader. Withdrawals and the provider's own operations are ordered by the active serial stamped at their send, then by their creation time.
+**The withdrawal.** The leader withdraws another provider's records by an operation of its own: an empty `replace` of one RRtype, which names the provider in a field of its own (the message's sender is the leader). It may only delete. A member applies it when the sender is the zone's leader under the active serial and the active instructions do not list the provider in the list that RRtype depends on: `servers=` for NS records, `signers=` for DNSKEY and CDS records. Its confirmation goes to the leader. Withdrawals and the provider's own operations are ordered by the active serial stamped at their send, then by their creation time. *Amended 2026-11-03 (the project owner: "the auditor is a passive participant, it must not be allowed to affect progress"):* a withdrawal waits for the combiner and the members with a vote. A member with no vote is sent it all the same, and is not waited for.
 
 **Waiting for a leaving provider.** A distribution waits for a leaving provider's confirmation with a time-out (section 4), except a distribution of another signer's new DNSKEY while the leaving provider is still delegated to: resolvers sent to it need that key. After the time-out the leader goes on, and for a CDS or a CSYNC the parent's own check of the nameservers decides.
 
