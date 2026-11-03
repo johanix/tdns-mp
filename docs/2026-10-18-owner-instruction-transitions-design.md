@@ -217,6 +217,8 @@ The owner's order stays: the roles first, the record later. The leader under V r
 
   *Amended 2026-11-03 (the owner's decision):* refused for now, whatever is built: the judge's `server-to-signer`, a decision and not a step to come. Serials were the original reason it was shelved. A provider with no role may still enter `signers=` (5.1). The later way is two mpsigners in the provider: a plain pass-through, and a signing one with a policy and no downstream servers, whose keys propagate at their own pace; the switch is the servers fetching from the second. Open for it: the second's serial may be below what the servers serve, so they would refuse the move; and which signer the agent talks to. One mpsigner doing it all is dropped.
 
+  *Note, 2026-11-03 (the owner's word), replacing the two mpsigners above:* the owner does not suggest two mpsigners. The later way is a distribution master in the provider: transfers go from the local mpsigner or a remote mpsigner to the distribution master, which fans out to the downstream servers, so switching the upstream is one atomic operation in the distribution master. Serials: unixtime serials rather than an incrementing uint32, so the concern becomes correct clocks. Details are on tdns-mp #370. The refusal stands.
+
 - **A signer becomes a server only.** Refused (3.1). The owner removes the provider and adds it back.
 
 ### 5.4 NS management
