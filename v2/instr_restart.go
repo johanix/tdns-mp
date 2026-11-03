@@ -140,7 +140,7 @@ func (conf *Config) restartView(zone string, now time.Time) (restartView, bool) 
 	}
 	if !v.leads {
 		conf.leadersWord(&v, newest, told)
-		if v.take == nil && len(v.fetch) == 0 {
+		if v.take == nil {
 			conf.votersWord(&v, told, now)
 		}
 		return v, true
@@ -254,15 +254,25 @@ func (conf *Config) leadersWord(v *restartView, newest *heldSerial, told map[str
 // it, and a member with no record is no objection, as for a leader with no
 // record. A voting member that tells another serial it votes under differs
 // too, whoever votes under the first, so with two such serials it takes
-// neither: the older may be one a leaving member has not moved on from.
+// neither: the older may be one a leaving member has not moved on from. A
+// telling not heard lately stops only an older serial: a serial told stays told
+// (design 3.7), and a member gone on an older one says nothing against this
+// one.
 func (conf *Config) votersWord(v *restartView, told map[string]toldStamp, now time.Time) {
 	s := conf.InternalMp.Instructions
 	mp := conf.MpConfig()
 	local, timeout := dns.Fqdn(mp.Identity), leavingTimeoutFor(mp)
+	var silent []uint32 // the serials told by those not heard lately
+	for _, f := range v.fetch {
+		if now.Sub(told[canonicalName(f.member)].heard) <= timeout {
+			return
+		}
+		silent = append(silent, f.sd.Serial)
+	}
 	readings := map[SerialDigest]*Instructions{}
 	for _, key := range slices.Sorted(maps.Keys(told)) {
 		st := told[key]
-		if !st.Known || st.ActiveDigest == "" || now.Sub(st.heard) > timeout {
+		if !st.Known || st.ActiveDigest == "" {
 			continue
 		}
 		sd := SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}
@@ -270,16 +280,25 @@ func (conf *Config) votersWord(v *restartView, told map[string]toldStamp, now ti
 		if reading == nil {
 			continue
 		}
-		if _, voters := participantsOf(reading); isAmong(voters, AgentId(st.identity)) {
-			readings[sd] = reading
+		if _, voters := participantsOf(reading); !isAmong(voters, AgentId(st.identity)) {
+			continue
 		}
+		if now.Sub(st.heard) > timeout {
+			silent = append(silent, sd.Serial)
+			continue
+		}
+		readings[sd] = reading
 	}
 	if len(readings) != 1 {
 		return
 	}
 	for sd, reading := range readings {
+		if slices.ContainsFunc(silent, func(n uint32) bool { return CompareSerial(n, sd.Serial) > 0 }) {
+			return
+		}
 		if w, ok := everyVoterTells(reading, sd, local, timeout, told, now); ok {
 			v.take, v.by, v.from, v.reconciling, v.thaw = w.take, w.by, knownFromRecords, w.reconciling, w.thaw
+			v.fetch = nil
 		}
 	}
 }
