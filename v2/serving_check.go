@@ -18,6 +18,7 @@ import (
 	"log"
 	"net"
 	"slices"
+	"sync"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -231,4 +232,128 @@ func signedByOwnKSK(rrset *core.RRset, ksks []*dns.DNSKEY, now time.Time) bool {
 			return dk.KeyTag() == sig.KeyTag && dk.Algorithm == sig.Algorithm && sig.Verify(dk, rrset.RRs) == nil
 		})
 	})
+}
+
+// dnskeyTTLOf is the largest TTL among rrset's DNSKEYs, and whether it holds one.
+func dnskeyTTLOf(rrset *core.RRset) (time.Duration, bool) {
+	var largest time.Duration
+	found := false
+	if rrset != nil {
+		for _, rr := range rrset.RRs {
+			if _, ok := rr.(*dns.DNSKEY); ok {
+				largest, found = max(largest, time.Duration(rr.Header().Ttl)*time.Second), true
+			}
+		}
+	}
+	return largest, found
+}
+
+// largestServedDnskeyTTL is the largest TTL any of the zone's nameservers, by the
+// NS RRset of its copy, serves its DNSKEY RRset with. Each is asked under a bound of
+// its own. One that does not answer with the RRset hands it to nobody; with none
+// that does nothing is known.
+func largestServedDnskeyTTL(mpzd *MPZoneData) (time.Duration, error) {
+	rrset, err := mpzd.GetRRset(mpzd.ZoneName, dns.TypeNS)
+	if err != nil {
+		return 0, err
+	}
+	var largest time.Duration
+	found := false
+	last := errors.New("the zone's copy names no nameserver")
+	if rrset != nil {
+		for _, rr := range rrset.RRs {
+			ns, ok := rr.(*dns.NS)
+			if !ok {
+				continue
+			}
+			ctx, cancel := lookCtx()
+			keys, err := servingKeysLookup(ctx, mpzd.ZoneName, ns.Ns)
+			cancel()
+			if err != nil {
+				last = fmt.Errorf("%s: %w", ns.Ns, err)
+				continue
+			}
+			if ttl, ok := dnskeyTTLOf(keys); ok {
+				largest, found = max(largest, ttl), true
+			} else {
+				last = fmt.Errorf("%s serves no DNSKEY for the zone", ns.Ns)
+			}
+		}
+	}
+	if !found {
+		return 0, last
+	}
+	return largest, nil
+}
+
+// servedKeysEvery is how often a signer asks a zone it does not sign yet's
+// nameservers what they serve its DNSKEY RRset with.
+const servedKeysEvery = time.Minute
+
+// servedKeysBook is what a signer has seen the nameservers of the zones it does
+// not sign yet serve their DNSKEY RRsets with, by zone. In memory: after a restart
+// it looks again.
+type servedKeysBook struct {
+	mu    sync.Mutex
+	zones map[string]*servedKeysLook
+	// start runs a look; nil: in a goroutine of its own. A test runs it in place.
+	start func(look func())
+}
+
+type servedKeysLook struct {
+	ttl     time.Duration // the largest seen: a cache may hold what was served before
+	known   bool
+	said    bool // that nothing is known, once
+	at      time.Time
+	running bool
+}
+
+// largest is the largest TTL seen for the zone, and whether any server has
+// answered. It never waits for a look: it runs under the key machine's lock.
+func (b *servedKeysBook) largest(mpzd *MPZoneData) (time.Duration, bool) {
+	zone := mpzd.ZoneName
+	key := canonicalName(zone)
+	b.mu.Lock()
+	if b.zones == nil {
+		b.zones = map[string]*servedKeysLook{}
+	}
+	l := b.zones[key]
+	if l == nil {
+		l = &servedKeysLook{}
+		b.zones[key] = l
+	}
+	due := !l.running && time.Since(l.at) >= servedKeysEvery
+	if due {
+		l.running = true
+	}
+	start := b.start
+	b.mu.Unlock()
+	if due {
+		look := func() {
+			ttl, err := largestServedDnskeyTTL(mpzd)
+			b.mu.Lock()
+			l.running, l.at = false, time.Now()
+			grew, warn := err == nil && (!l.known || ttl > l.ttl), err != nil && !l.known && !l.said
+			if err == nil {
+				l.ttl, l.known = max(l.ttl, ttl), true
+			} else {
+				l.said = true
+			}
+			b.mu.Unlock()
+			switch {
+			case grew:
+				lgSigner.Info("the zone's new keys wait the TTL its servers serve its DNSKEY RRset with", "zone", zone, "ttl", ttl)
+			case warn:
+				lgSigner.Warn("what the zone's servers serve its DNSKEY RRset with could not be read; its new keys wait its copy's TTL", "zone", zone, "err", err)
+			}
+		}
+		if start != nil {
+			start(look)
+		} else {
+			go look()
+		}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return l.ttl, l.known
 }

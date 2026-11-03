@@ -72,7 +72,8 @@ type Wire interface {
 	Strip(zone string, keyid uint16) error
 	// Resign asks tdns to re-sign the zone.
 	Resign(zone string)
-	// ServedDnskeyTTL is the TTL the DNSKEY RRset is served with.
+	// ServedDnskeyTTL is the TTL the zone's DNSKEY RRset is served with: how
+	// long a cache may hold the set from before a new key was in it (E5).
 	ServedDnskeyTTL(zone string) time.Duration
 	// Report surfaces something an operator must see: a rejected key.
 	Report(zone string, keyid uint16, what string)

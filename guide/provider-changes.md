@@ -139,6 +139,12 @@ step 2 (its DS at the parent)`). Charlie's signer starts
 signing with no restart, at its last step, above the serial
 its servers served. Until then it relays its copy.
 
+Until it signs, charlie's signer asks the zone's nameservers
+what TTL they serve the DNSKEY RRset with, and its new keys
+wait the largest: that is what caches hold. A signer that
+reaches none of them says so in its log, and its keys wait
+the TTL in its own copy, which can be longer.
+
 A server that becomes a signer goes on serving its upstream's
 copy until its status and its agent's log say `the provider
 may switch its servers to its own signer`. Its operator then
