@@ -6,6 +6,7 @@ package tdnsmp
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"slices"
 	"strings"
@@ -977,6 +978,54 @@ func TestANewLeaderPlansTheRemovalAgainFromWhatIsInPlace(t *testing.T) {
 	r.next()
 	if got := r.taken(); !slices.Equal(got, []string{"names", "ns", "confirmers", "ds"}) {
 		t.Errorf("planned without its from-serial: %v (told %v)", got, told.Step.Taken)
+	}
+}
+
+// The NS step's wait logs its terms once, and again when one changes or the
+// clock starts over, so that a wait can be read from the log.
+func TestTheNSWaitLogsItsTerms(t *testing.T) {
+	alog := &lockedBuffer{}
+	logTo(t, lg, slog.NewTextHandler(alog, nil))
+	r := newLeaverRig(t, "nsterms.remove.example.", "agent")
+	r.next()
+	r.next()
+	lines := func() []string {
+		var got []string
+		for _, line := range strings.Split(alog.String(), "\n") {
+			if strings.Contains(line, "counts its wait") {
+				got = append(got, line)
+			}
+		}
+		return got
+	}
+	if got := lines(); len(got) != 0 {
+		t.Fatalf("no wait counts while the parent names the names: %v", got)
+	}
+	gone := parentSeen{ns: []string{"ns1.a.example.", "ns1.b.example."}, nsTTL: 600, nsServer: "192.0.2.1:53"}
+	r.served(gone)
+	r.next()
+	r.next()
+	got := lines()
+	if len(got) != 1 {
+		t.Fatalf("the same terms were logged %d times: %v", len(got), got)
+	}
+	for _, term := range []string{"zone=nsterms.remove.example.", "parent_ns_ttl=600", "parent_server=192.0.2.1:53", "zone_ns_ttl=", "delay=0s", "since=", "until="} {
+		if !strings.Contains(got[0], term) {
+			t.Errorf("no %s in %q", term, got[0])
+		}
+	}
+	gone.nsTTL = 300
+	r.served(gone)
+	r.next()
+	if got := lines(); len(got) != 2 || !strings.Contains(got[1], "parent_ns_ttl=300") {
+		t.Errorf("a term changed: %v", got)
+	}
+	r.served(parentSeen{ns: []string{"ns1.n.example."}, nsTTL: 300, nsServer: "192.0.2.1:53"}) // named again
+	r.next()
+	r.served(gone)
+	r.next()
+	if got := lines(); len(got) != 3 {
+		t.Errorf("the clock started over: %v", got)
 	}
 }
 
