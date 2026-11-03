@@ -308,6 +308,62 @@ func TestAMemberTakesNeitherOfTwoSerialsThatPass(t *testing.T) {
 	}
 }
 
+// A telling not heard lately stops only an older serial. A serial told stays
+// told (design 3.7), so the one that passes is not taken below it, held or not.
+// A member gone on an older serial says nothing against the one every other
+// voting member tells, and a fetch it will not answer holds no zone (external
+// review of #360, N1). Heard lately, an older serial told is fetched first as
+// any other.
+func TestATellingNotHeardLatelyStopsOnlyAnOlderSerial(t *testing.T) {
+	for _, c := range []struct {
+		name         string
+		passes, told uint32
+		held, lately bool
+		take         uint32
+		fetch        uint32
+	}{
+		{name: "newer held", passes: 41, told: 42, held: true},
+		{name: "newer not held", passes: 41, told: 42, fetch: 42},
+		{name: "older held", passes: 42, told: 41, held: true, take: 42},
+		{name: "older not held", passes: 42, told: 41, take: 42},
+		{name: "older not held heard lately", passes: 42, told: 41, lately: true, fetch: 41},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newThawRig(t, strings.ReplaceAll(c.name, " ", "-")+".silent.othergroup.restart.example.", "")
+			passes, told, newest := freezeAt(t, c.passes, "x", "a,b", ""), freezeAt(t, c.told, "y", "a,n", ""), voters3(t, 43, "z")
+			copies := []*Instructions{passes, newest}
+			if c.held {
+				copies = append(copies, told)
+			}
+			slices.SortFunc(copies, func(a, b *Instructions) int { return CompareSerial(a.Serial, b.Serial) })
+			r.noRecord(copies...)
+			r.hear(roleB, tells(passes, newest), true)
+			r.hear(roleN, tells(told, newest), true)
+			if !c.lately {
+				r.stamps.mu.Lock()
+				r.stamps.kept[canonicalName(roleN)].ZoneHeard[r.zone] = time.Now().Add(-2 * time.Hour)
+				r.stamps.mu.Unlock()
+			}
+			v, ok := r.conf.restartView(r.zone, time.Now())
+			if !ok {
+				t.Fatal("no view")
+			}
+			switch {
+			case c.take == 0 && v.take != nil:
+				t.Errorf("%d taken", v.take.Serial)
+			case c.take != 0 && (v.take == nil || v.take.Serial != c.take):
+				t.Errorf("want %d taken, the view takes %+v: %s", c.take, v.take, v.line())
+			}
+			switch {
+			case c.fetch == 0 && len(v.fetch) != 0:
+				t.Errorf("a fetch left in the view: %+v", v.fetch)
+			case c.fetch != 0 && (len(v.fetch) != 1 || v.fetch[0].sd.Serial != c.fetch):
+				t.Errorf("want serial %d fetched, the view fetches %+v", c.fetch, v.fetch)
+			}
+		})
+	}
+}
+
 // An agent that lost its store, and whose copy gives it no role, hears the
 // voting members tell the zone's active serial and asks one of them for it.
 // Its admission read that copy, so it refused the answer to its own request,
