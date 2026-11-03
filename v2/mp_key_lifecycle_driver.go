@@ -73,8 +73,9 @@ type Wire interface {
 	// Resign asks tdns to re-sign the zone.
 	Resign(zone string)
 	// ServedDnskeyTTL is the TTL the zone's DNSKEY RRset is served with: how
-	// long a cache may hold the set from before a new key was in it (E5).
-	ServedDnskeyTTL(zone string) time.Duration
+	// long a cache may hold the set from before a new key was in it (E5), and
+	// whether anything is known of it yet: until it is, the key waits.
+	ServedDnskeyTTL(zone string) (time.Duration, bool)
 	// Report surfaces something an operator must see: a rejected key.
 	Report(zone string, keyid uint16, what string)
 	// KeysChanged tells the surroundings a key row changed (state or any
@@ -300,12 +301,13 @@ func (l *ZoneKeyLifecycle) zoneView(k tdns.DnssecKeyWithTimestamps, all map[uint
 		Pending:          map[string]bool{},
 		Rejected:         map[string]bool{},
 		PropagationDelay: l.Policy.PropagationDelay,
-		ServedDnskeyTTL:  l.Wire.ServedDnskeyTTL(l.Zone),
 		Margin:           l.Policy.Margin,
 		ParentKnown:      l.parentKnown,
 		ParentServesNoDS: l.parentEmpty,
 		Now:              l.Clock.Now(),
 	}
+	ttl, known := l.Wire.ServedDnskeyTTL(l.Zone)
+	z.ServedDnskeyTTL, z.ServedTTLUnknown = ttl, !known
 	if d := l.dist[k.KeyTag]; d != nil {
 		z.Applied, z.Pending, z.Rejected = d.Applied, d.Pending, d.Rejected
 		// the expected set is the set at distribution time, minus a signer

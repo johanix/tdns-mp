@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -17,6 +18,7 @@ import (
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -1400,11 +1402,155 @@ func servedKeyTTLs(t *testing.T, zone string, ttls map[string]time.Duration) {
 	t.Cleanup(func() { servingKeysLookup = prev })
 }
 
+// holdSignerAddStep has the store hold a joiner's step part, with the sets' parent
+// sync.
+func holdSignerAddStep(t *testing.T, s *InstructionStore, zone, id, part string, parentSync uint8) {
+	t.Helper()
+	raw, err := json.Marshal(Roles{ParentSync: parentSync})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.update(zone, func(z *zoneSerials) error {
+		z.Step, z.StepOf, z.Sets, z.Taken = 3, 6, raw, []string{signerAddKey + part + " " + canonicalName(id)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The leader's sync is what adds a joiner's DS, and it waits for the zone's key
+// before the freeze looks at it. A leader whose key the freeze kept from being
+// published would wait for the step, and the step for it. It ends with the step:
+// the step's ask lets the key out, its poll ends, the sync goes, and the step
+// finishes. The two ways in: a key never polled here, and one on record as trusted,
+// as a key taken from the signer before it.
+func TestAJoinersDSStepFinishesThroughALeaderWhoseKeyIsNotPublished(t *testing.T) {
+	for name, state := range map[string]uint8{
+		"never polled here": edns0.KeyStateUnknown,
+		"trusted on record": edns0.KeyStateTrusted,
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newKeyHoldRigFor(t, "elected.adding.signer.example.", true)
+			r.notifyRig.us.Bridge.combinerID = rigCombiner
+			tdns.UpdateParentState(r.mpzd.KeyDB, string(r.zone), r.key.keyid, state)
+			r.parent.holdsDS() // the parent has no DS for it yet: the sync's cause is the DS set
+			freezeServed(t, r.conf, r.mpzd)
+			if err := r.conf.leaderKeySetup(r.ctx, r.zone, true); !errors.Is(err, errHeldDuringTransition) {
+				t.Fatalf("the set-up during the freeze: %v\n%s", err, r.log)
+			}
+			if _, why := r.conf.keyHold(r.ctx, r.zone); why != "not published" {
+				t.Fatalf("the hold after the set-up: %q", why)
+			}
+
+			zone, id := string(r.zone), r.conf.MpConfig().Identity
+			holdSignerAddStep(t, r.conf.InternalMp.Instructions, zone, id, signerAddDS, core.HsyncParentSyncAgent)
+			adds := &r.conf.InternalMp.signerAdds
+			adds.start = func(look func()) { look() }
+			prev := parentDSLook
+			parentDSLook = func(*Config, string) (parentDSSeen, error) {
+				return parentDSSeen{tags: map[uint16]bool{r.ksk.KeyTag: r.parent.updatesSeen() > 0}}, nil
+			}
+			t.Cleanup(func() { parentDSLook = prev })
+			r.inventory(r.ksk)
+
+			if r.conf.joinerDSAtParent(zone, id) {
+				t.Fatal("the step is over before the parent has seen anything")
+			}
+			time.Sleep(200 * time.Millisecond)
+			if n := r.parent.updatesSeen(); n != 0 {
+				t.Fatalf("%d UPDATEs reached the parent with the key not published", n)
+			}
+			if !r.conf.wantsZoneKey(r.ctx, r.zone) {
+				t.Fatal("the key rounds do not look at a key not published")
+			}
+			r.conf.decideZoneKey(r.ctx, r.zone, nil) // the round the step's ask starts
+			select {
+			case <-r.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("the key's poll did not start as a step\n%s", r.log)
+			}
+			close(r.release)
+			waitUntil(t, "the key's hold ended with the poll", func() bool { return r.conf.keyHoldReason(r.ctx, r.zone) == "" })
+			// the step's next ask
+			adds.mu.Lock()
+			for _, l := range adds.zones {
+				l.syncAt = time.Time{}
+			}
+			adds.mu.Unlock()
+			r.conf.joinerDSAtParent(zone, id)
+			waitUntil(t, "the step's sync went out\n"+r.log.String(), func() bool { return r.parent.updatesSeen() > 0 })
+			waitUntil(t, "the step finished", func() bool {
+				adds.mu.Lock()
+				for _, l := range adds.zones {
+					l.parentAt = time.Time{}
+				}
+				adds.mu.Unlock()
+				return r.conf.joinerDSAtParent(zone, id)
+			})
+		})
+	}
+}
+
+// The sync a joiner's DS step asks may wait for the zone's key, whose rounds nothing
+// else opens during the freeze: the ask opens them.
+func TestAJoinersDSAskOpensTheKeyRounds(t *testing.T) {
+	r := newSignerAddRig(t, "rounds.adding.example.", "agent").thawed()
+	tr := newCatchUpTracker(AgentId(r.conf.MpConfig().Identity), []string{r.zone}, time.Hour)
+	r.conf.InternalMp.CatchUp = tr
+	r.at(r.next(), signerAddAccept)
+	r.at(r.next(), signerAddMint)
+	r.keys(KeyStatePublished, KeyStatePublished)
+	r.at(r.next(), signerAddDS)
+	tr.mu.Lock()
+	tr.keyChecks = nil
+	tr.mu.Unlock()
+	r.parentLooks()
+	r.conf.InternalMp.signerAdds.mu.Lock()
+	for _, l := range r.conf.InternalMp.signerAdds.zones {
+		l.syncAt = time.Time{}
+	}
+	r.conf.InternalMp.signerAdds.mu.Unlock()
+	r.conf.joinerDSAtParent(r.zone, signerAddSelf)
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if !tr.keyChecks[ZoneName(dns.Fqdn(r.zone))] {
+		t.Error("the step's ask did not open the key rounds")
+	}
+}
+
+// The key's offers pass for a joiner's DS step alone, and only where the leader's
+// sync is what adds the DS. Under parentsync=owner, or at any other step, they wait
+// for the transition's end.
+func TestTheKeysOffersPassForAJoinersDSStepAloneUnderTheFreeze(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		part       string
+		parentSync uint8
+		passes     bool
+	}{
+		{"its DS, the leader's sync", signerAddDS, core.HsyncParentSyncAgent, true},
+		{"its DS, the owner's", signerAddDS, core.HsyncParentSyncOwner, false},
+		{"its first keys", signerAddMint, core.HsyncParentSyncAgent, false},
+		{"the caches' time", signerAddCaches, core.HsyncParentSyncAgent, false},
+		{"its own signatures", signerAddOwn, core.HsyncParentSyncAgent, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newNotifyRig(t, "offers.adding.signer.example.", "UPDATE")
+			freezeServed(t, r.conf, r.mpzd)
+			holdSignerAddStep(t, r.conf.InternalMp.Instructions, r.mpzd.ZoneName, r.conf.MpConfig().Identity, tc.part, tc.parentSync)
+			if held, _ := r.conf.offerHeld(r.ctx, ZoneName(r.mpzd.ZoneName)); held == tc.passes {
+				t.Errorf("the key's offer: held %v, want %v", held, !tc.passes)
+			}
+		})
+	}
+}
+
 // A joiner's first keys wait what the zone's servers serve its DNSKEY RRset with
 // (E5, T8), the largest of them: that is what caches hold. Its copy's TTL is the
 // data's, and its policy's is what it will serve itself, nothing a cache has seen.
 // Each case runs its real machine past its wait, the policy below and above its
-// copy's TTL. Its copy's TTL counts only until a server has answered.
+// copy's TTL. Its copy's TTL is the floor until every server has answered: one that
+// has not may serve above the others.
 func TestAJoinersT8WaitsWhatTheZonesServersServe(t *testing.T) {
 	const fivemin, hour, day = 5 * time.Minute, time.Hour, 24 * time.Hour
 	const p1, p2 = "ns1.%s", "ns.p2.example."
@@ -1419,7 +1565,8 @@ func TestAJoinersT8WaitsWhatTheZonesServersServe(t *testing.T) {
 		{"policy above its copy, its servers serve the higher", day, []time.Duration{hour}, map[string]time.Duration{p1: hour, p2: day}, day},
 		{"policy above its copy, which nothing serves", day, []time.Duration{hour}, map[string]time.Duration{p1: hour, p2: hour}, hour},
 		{"policy below what another signer serves", fivemin, []time.Duration{hour}, map[string]time.Duration{p1: fivemin, p2: hour}, hour},
-		{"one server does not answer", fivemin, []time.Duration{hour}, map[string]time.Duration{p2: fivemin}, fivemin},
+		{"one server does not answer, the other serves below its copy", fivemin, []time.Duration{hour}, map[string]time.Duration{p2: fivemin}, hour},
+		{"one server does not answer, the other serves above its copy", fivemin, []time.Duration{hour}, map[string]time.Duration{p2: day}, day},
 		{"policy below its copy, no server answers", fivemin, []time.Duration{hour}, nil, hour},
 		{"policy above its copy, no server answers", day, []time.Duration{hour}, nil, hour},
 		{"no server answers, the longer TTL in its copy not first", fivemin, []time.Duration{hour, day}, nil, day},
@@ -1474,8 +1621,71 @@ func TestAProviderThatSignsWaitsTheTTLItServesAndAsksNobody(t *testing.T) {
 		return nil, errors.New("no answer")
 	}
 	t.Cleanup(func() { servingKeysLookup = prev })
-	if got := r.e.wire.ServedDnskeyTTL(zone); got != 5*time.Minute {
-		t.Errorf("it waits %s, want its own copy's 5m0s", got)
+	if got, known := r.e.wire.ServedDnskeyTTL(zone); got != 5*time.Minute || !known {
+		t.Errorf("it waits %s (known %v), want its own copy's 5m0s", got, known)
+	}
+}
+
+// After a restart the book is empty and the key may have waited long enough by its
+// copy: T8 waits for the first look, and then for what that saw.
+func TestAJoinersT8WaitsItsFirstLookAfterARestart(t *testing.T) {
+	const zone = "restart.adding.signer.example."
+	k := testDnskey(t, zone, 256)
+	records := append(sigRecords(`serial="5" servers="us,p2" signers="p2"`),
+		fmt.Sprintf("3600 IN DNSKEY %d %d %d %s", k.Flags, k.Protocol, k.Algorithm, k.PublicKey))
+	servedKeyTTLs(t, zone, map[string]time.Duration{"ns1." + zone: 2 * time.Hour})
+	r, clk := joinerKeysPublished(t, zone, records)
+	delay := r.e.driver(zone).Policy.PropagationDelay
+	clk.Advance(delay + 90*time.Minute)
+
+	var looks []func()
+	r.conf.InternalMp.servedKeys = servedKeysBook{start: func(look func()) { looks = append(looks, look) }}
+	r.e.tickOwned()
+	if n := ownKeysIn(t, r, zone, KeyStatePublished); n != 2 || len(looks) == 0 {
+		t.Fatalf("with its first look under way: %d of its keys still published after %d looks, want 2 and a look", n, len(looks))
+	}
+	looks[0]()
+	r.e.tickOwned()
+	if n := ownKeysIn(t, r, zone, KeyStatePublished); n != 2 {
+		t.Errorf("past its copy's TTL and short of what its server serves: %d of its keys still published, want 2", n)
+	}
+	clk.Advance(time.Hour)
+	r.e.tickOwned()
+	if n := ownKeysIn(t, r, zone, KeyStatePublished); n != 0 {
+		t.Errorf("past what its server serves: %d of its keys still published, want none", n)
+	}
+}
+
+// Every server the copy names counts once it has answered, in whichever look.
+func TestAJoinersWaitDropsBelowItsCopyOnlyOnceEveryServerHasAnswered(t *testing.T) {
+	const zone = "whole.adding.signer.example."
+	const p2 = "ns.p2.example."
+	k := testDnskey(t, zone, 256)
+	records := append(sigRecords(`serial="5" servers="us,p2" signers="p2"`), `3600 IN NS `+p2,
+		fmt.Sprintf("3600 IN DNSKEY %d %d %d %s", k.Flags, k.Protocol, k.Algorithm, k.PublicKey))
+	r := newSignerRig(t, zone, records...)
+	r.hand(joinerHandover(t, zone, 6, false), sigUs)
+	b := &r.conf.InternalMp.servedKeys
+	b.start = func(look func()) { look() }
+	look := func(ttls map[string]time.Duration) time.Duration {
+		t.Helper()
+		servedKeyTTLs(t, zone, ttls)
+		b.mu.Lock()
+		if l := b.zones[canonicalName(zone)]; l != nil {
+			l.at = time.Time{}
+		}
+		b.mu.Unlock()
+		got, known := r.e.wire.ServedDnskeyTTL(zone)
+		if !known {
+			t.Error("a look has finished and nothing is known")
+		}
+		return got
+	}
+	if got := look(map[string]time.Duration{"ns1." + zone: 5 * time.Minute}); got != time.Hour {
+		t.Errorf("with one of two seen it waits %s, want its copy's 1h0m0s", got)
+	}
+	if got := look(map[string]time.Duration{p2: 5 * time.Minute}); got != 5*time.Minute {
+		t.Errorf("with the other seen in a later look it waits %s, want 5m0s", got)
 	}
 }
 
@@ -1494,15 +1704,15 @@ func TestAServersLowerTTLOrSilenceDoesNotShortenAJoinersWait(t *testing.T) {
 	ns1 := "ns1." + zone
 	servedKeyTTLs(t, zone, map[string]time.Duration{ns1: time.Hour})
 
-	if got := r.e.wire.ServedDnskeyTTL(zone); got != 2*time.Hour || len(looks) != 1 {
-		t.Fatalf("with a look under way it waits %s after %d looks, want its copy's 2h0m0s and one", got, len(looks))
+	if _, known := r.e.wire.ServedDnskeyTTL(zone); known || len(looks) != 1 {
+		t.Fatalf("with a look under way, known %v after %d looks, want nothing known and one", known, len(looks))
 	}
-	if got := r.e.wire.ServedDnskeyTTL(zone); got != 2*time.Hour || len(looks) != 1 {
-		t.Errorf("a second tick waits %s after %d looks, want 2h0m0s and still one", got, len(looks))
+	if _, known := r.e.wire.ServedDnskeyTTL(zone); known || len(looks) != 1 {
+		t.Errorf("a second tick, known %v after %d looks, want nothing known and still one", known, len(looks))
 	}
 	looks[0]()
-	if got := r.e.wire.ServedDnskeyTTL(zone); got != time.Hour {
-		t.Errorf("once a server answered it waits %s, want 1h0m0s", got)
+	if got, _ := r.e.wire.ServedDnskeyTTL(zone); got != time.Hour {
+		t.Errorf("once its server answered it waits %s, want 1h0m0s", got)
 	}
 
 	again := func(ttls map[string]time.Duration) time.Duration {
@@ -1513,7 +1723,8 @@ func TestAServersLowerTTLOrSilenceDoesNotShortenAJoinersWait(t *testing.T) {
 		b.mu.Unlock()
 		r.e.wire.ServedDnskeyTTL(zone)
 		looks[len(looks)-1]()
-		return r.e.wire.ServedDnskeyTTL(zone)
+		got, _ := r.e.wire.ServedDnskeyTTL(zone)
+		return got
 	}
 	if got := again(map[string]time.Duration{ns1: 5 * time.Minute}); got != time.Hour {
 		t.Errorf("after its servers went lower it waits %s, want 1h0m0s", got)

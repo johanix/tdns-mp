@@ -142,9 +142,11 @@ type ZoneView struct {
 	Pending  map[string]bool
 	Rejected map[string]bool
 	// PropagationDelay plus ServedDnskeyTTL is the wait behind E5; Margin
-	// the wait behind E8.
+	// the wait behind E8. ServedTTLUnknown: nothing is known of the TTL yet,
+	// and E5 waits for it.
 	PropagationDelay time.Duration
 	ServedDnskeyTTL  time.Duration
+	ServedTTLUnknown bool
 	Margin           time.Duration
 	// ActiveOfRoleAndAlg reports another active key of the key's role and
 	// algorithm on this provider. RolloverRequested says the promotion is a
@@ -280,7 +282,7 @@ var KeyLifecycleTable = []Transition{
 	{"T7'", KeyStatePublished, CmdWithdraw, nil, KeyStateMpremove, "a served key given up on: the removal distributed"},
 	{"T7''", KeyStateStandby, CmdWithdraw, nil, KeyStateMpremove, "as T7'"},
 	{"T8", KeyStatePublished, EvPropagated, func(k KeyView, z ZoneView) bool {
-		return !k.PublishedAt.IsZero() && !z.Now.Before(k.PublishedAt.Add(z.PropagationDelay+z.ServedDnskeyTTL))
+		return !z.ServedTTLUnknown && !k.PublishedAt.IsZero() && !z.Now.Before(k.PublishedAt.Add(z.PropagationDelay+z.ServedDnskeyTTL))
 	}, KeyStateStandby, "a KSK's ds=1 puts its DS into the zone's DS set"},
 	{"T9", KeyStateStandby, EvPromote, func(k KeyView, z ZoneView) bool {
 		return (!z.ActiveOfRoleAndAlg || z.RolloverRequested || z.AlgRollInFlight) && !distributionIncomplete(z) && parentDSWaitMet(k, z)

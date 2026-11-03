@@ -249,17 +249,14 @@ func dnskeyTTLOf(rrset *core.RRset) (time.Duration, bool) {
 }
 
 // largestServedDnskeyTTL is the largest TTL any of the zone's nameservers, by the
-// NS RRset of its copy, serves its DNSKEY RRset with. Each is asked under a bound of
-// its own. One that does not answer with the RRset hands it to nobody; with none
-// that does nothing is known.
-func largestServedDnskeyTTL(mpzd *MPZoneData) (time.Duration, error) {
+// NS RRset of its copy, serves its DNSKEY RRset with, the servers that served it and
+// those that did not, and why the last of those did not. Each is asked under a bound
+// of its own.
+func largestServedDnskeyTTL(mpzd *MPZoneData) (largest time.Duration, served, silent []string, err error) {
 	rrset, err := mpzd.GetRRset(mpzd.ZoneName, dns.TypeNS)
 	if err != nil {
-		return 0, err
+		return 0, nil, nil, err
 	}
-	var largest time.Duration
-	found := false
-	last := errors.New("the zone's copy names no nameserver")
 	if rrset != nil {
 		for _, rr := range rrset.RRs {
 			ns, ok := rr.(*dns.NS)
@@ -267,23 +264,26 @@ func largestServedDnskeyTTL(mpzd *MPZoneData) (time.Duration, error) {
 				continue
 			}
 			ctx, cancel := lookCtx()
-			keys, err := servingKeysLookup(ctx, mpzd.ZoneName, ns.Ns)
+			keys, lookErr := servingKeysLookup(ctx, mpzd.ZoneName, ns.Ns)
 			cancel()
-			if err != nil {
-				last = fmt.Errorf("%s: %w", ns.Ns, err)
+			ttl, found := dnskeyTTLOf(keys)
+			switch {
+			case lookErr != nil:
+				err = fmt.Errorf("%s: %w", ns.Ns, lookErr)
+			case !found:
+				err = fmt.Errorf("%s serves no DNSKEY for the zone", ns.Ns)
+			default:
+				largest = max(largest, ttl)
+				served = append(served, ns.Ns)
 				continue
 			}
-			if ttl, ok := dnskeyTTLOf(keys); ok {
-				largest, found = max(largest, ttl), true
-			} else {
-				last = fmt.Errorf("%s serves no DNSKEY for the zone", ns.Ns)
-			}
+			silent = append(silent, ns.Ns)
 		}
 	}
-	if !found {
-		return 0, last
+	if len(served) == 0 && err == nil {
+		err = errors.New("the zone's copy names no nameserver")
 	}
-	return largest, nil
+	return largest, served, silent, err
 }
 
 // servedKeysEvery is how often a signer asks a zone it does not sign yet's
@@ -301,16 +301,19 @@ type servedKeysBook struct {
 }
 
 type servedKeysLook struct {
-	ttl     time.Duration // the largest seen: a cache may hold what was served before
-	known   bool
-	said    bool // that nothing is known, once
+	ttl     time.Duration   // the largest seen: a cache may hold what was served before
+	served  map[string]bool // the servers seen serving it: one gone quiet has served what it served
+	whole   bool            // every server the copy names has been seen serving it
+	looked  bool            // a look has finished since the start
+	said    bool            // that it is not whole, once
 	at      time.Time
 	running bool
 }
 
-// largest is the largest TTL seen for the zone, and whether any server has
-// answered. It never waits for a look: it runs under the key machine's lock.
-func (b *servedKeysBook) largest(mpzd *MPZoneData) (time.Duration, bool) {
+// largest is the largest TTL seen for the zone, whether every nameserver its copy
+// names has been seen serving the RRset, and whether a look has finished since the
+// start. It never waits for a look: it runs under the key machine's lock.
+func (b *servedKeysBook) largest(mpzd *MPZoneData) (ttl time.Duration, whole, looked bool) {
 	zone := mpzd.ZoneName
 	key := canonicalName(zone)
 	b.mu.Lock()
@@ -330,21 +333,28 @@ func (b *servedKeysBook) largest(mpzd *MPZoneData) (time.Duration, bool) {
 	b.mu.Unlock()
 	if due {
 		look := func() {
-			ttl, err := largestServedDnskeyTTL(mpzd)
+			seen, served, silent, err := largestServedDnskeyTTL(mpzd)
 			b.mu.Lock()
-			l.running, l.at = false, time.Now()
-			grew, warn := err == nil && (!l.known || ttl > l.ttl), err != nil && !l.known && !l.said
-			if err == nil {
-				l.ttl, l.known = max(l.ttl, ttl), true
-			} else {
-				l.said = true
+			l.running, l.at, l.looked = false, time.Now(), true
+			before, wasWhole := l.ttl, l.whole
+			l.ttl = max(l.ttl, seen)
+			if l.served == nil {
+				l.served = map[string]bool{}
 			}
+			for _, ns := range served {
+				l.served[ns] = true
+			}
+			missing := slices.DeleteFunc(silent, func(ns string) bool { return l.served[ns] })
+			l.whole = len(l.served) > 0 && len(missing) == 0
+			grew, warn := l.whole && (!wasWhole || l.ttl > before), !l.whole && !l.said
+			l.said = l.said || warn
+			now := l.ttl
 			b.mu.Unlock()
 			switch {
 			case grew:
-				lgSigner.Info("the zone's new keys wait the TTL its servers serve its DNSKEY RRset with", "zone", zone, "ttl", ttl)
+				lgSigner.Info("the zone's new keys wait the TTL its servers serve its DNSKEY RRset with", "zone", zone, "ttl", now)
 			case warn:
-				lgSigner.Warn("what the zone's servers serve its DNSKEY RRset with could not be read; its new keys wait its copy's TTL", "zone", zone, "err", err)
+				lgSigner.Warn("not every server of the zone has served its DNSKEY RRset; its new keys wait at least its copy's TTL", "zone", zone, "silent", missing, "err", err)
 			}
 		}
 		if start != nil {
@@ -355,5 +365,5 @@ func (b *servedKeysBook) largest(mpzd *MPZoneData) (time.Duration, bool) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return l.ttl, l.known
+	return l.ttl, l.whole, l.looked
 }

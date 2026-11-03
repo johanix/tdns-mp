@@ -29,7 +29,12 @@ type keyHoldRig struct {
 
 func newKeyHoldRig(t *testing.T, zone string) *keyHoldRig {
 	t.Helper()
-	h := newHoldRig(t, zone, "UPDATE", false, repeat(time.Hour, 4)...)
+	return newKeyHoldRigFor(t, zone, false)
+}
+
+func newKeyHoldRigFor(t *testing.T, zone string, signed bool) *keyHoldRig {
+	t.Helper()
+	h := newHoldRig(t, zone, "UPDATE", signed, repeat(time.Hour, 4)...)
 	r := &keyHoldRig{holdRig: h, zone: ZoneName(h.mpzd.ZoneName), entered: make(chan struct{}, 4), release: make(chan struct{})}
 	r.key = testSig0Key(t, h.mpzd.KeyDB, h.mpzd.ZoneName)
 	trustKey(h.mpzd.KeyDB, h.mpzd.ZoneName, r.key.keyid) // the parent trusts the zone's key

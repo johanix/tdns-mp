@@ -272,24 +272,32 @@ func (w *signerWire) Resign(zone string) {
 // caches hold is what the zone's servers served. Its copy's TTL is the data's, and
 // a signer's ceiling can have it served lower; its policy says what it will serve
 // itself, and a signer beside it can serve longer. So it waits the largest TTL the
-// zone's servers were seen serving (servedKeysBook), and its copy's only until
-// one has answered.
-func (w *signerWire) ServedDnskeyTTL(zone string) time.Duration {
+// zone's servers were seen serving (servedKeysBook). Its copy's TTL is the floor
+// until every server has been seen: one that was not may serve above the others.
+// Until a first look since the start has finished nothing is known, and the key
+// waits for it.
+func (w *signerWire) ServedDnskeyTTL(zone string) (time.Duration, bool) {
 	mpzd := w.mpzd(zone)
 	if mpzd == nil {
-		return tdns.DefaultDnskeyTTL
+		return tdns.DefaultDnskeyTTL, true
 	}
-	if self, r, _ := w.sets(zone); self != "" && !has(r.Signing, self) {
-		if ttl, known := w.conf.InternalMp.servedKeys.largest(mpzd); known {
-			return ttl
-		}
-	}
+	own := tdns.DefaultDnskeyTTL
 	if rrset, err := mpzd.GetRRset(mpzd.ZoneName, dns.TypeDNSKEY); err == nil {
 		if ttl, ok := dnskeyTTLOf(rrset); ok {
-			return ttl
+			own = ttl
 		}
 	}
-	return tdns.DefaultDnskeyTTL
+	if self, r, _ := w.sets(zone); self != "" && !has(r.Signing, self) {
+		ttl, whole, looked := w.conf.InternalMp.servedKeys.largest(mpzd)
+		switch {
+		case !looked:
+			return own, false
+		case whole:
+			return ttl, true
+		}
+		return max(ttl, own), true
+	}
+	return own, true
 }
 
 // KeysChanged: a fresh inventory to every agent, on every column change,

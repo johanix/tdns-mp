@@ -258,6 +258,9 @@ func (conf *Config) joinerDSAtParent(zone, id string) bool {
 		return true
 	}
 	if rolesForZone(ZoneName(zone)).ParentSync == core.HsyncParentSyncAgent && conf.InternalMp.signerAdds.syncDue(conf, zone) {
+		// the sync may wait for the zone's key, whose offers now pass
+		// (offerHeld): the key rounds look at once
+		conf.InternalMp.CatchUp.keyCheck(ZoneName(zone))
 		askJoinersDS(conf, zone, fmt.Sprintf("the parent does not serve the DS of %s yet", id))
 	}
 	return false
@@ -265,6 +268,18 @@ func (conf *Config) joinerDSAtParent(zone, id string) bool {
 
 // askJoinersDS asks the leader's delegation sync; a test stands in for it.
 var askJoinersDS = func(conf *Config, zone, why string) { conf.requestDelegationSync(nil, zone, why) }
+
+// joinersDSAsked: the step held is a joiner's DS, and under parentsync=agent the
+// leader's sync is what adds it: the step's own, so the zone's key is published
+// and offered for it (offerHeld).
+func (conf *Config) joinersDSAsked(zone string) bool {
+	in, ok := conf.InternalMp.Instructions.reconcileInputs(zone)
+	if !ok || !in.hasStep {
+		return false
+	}
+	_, part, add := signerAddOf(in.step.InstrStep)
+	return add && part == signerAddDS && rolesForZone(ZoneName(zone)).ParentSync == core.HsyncParentSyncAgent
+}
 
 // parentDSSeen is what the parent serves of the zone's DS RRset: the key tags
 // that every server that answered holds, and the largest TTL they gave it.
