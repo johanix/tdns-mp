@@ -324,7 +324,7 @@ func (conf *Config) withdrawalDone(zdr *ZoneDataRepo, zone ZoneName, provider Ag
 			if c, ok := tr.Confirmations[r]; ok && c.Status != "pending" {
 				continue
 			}
-			if !memberWithTimeOut(zone, AgentId(r)) || now.Sub(start) < wait {
+			if !nonVotingMember(zone, AgentId(r)) || now.Sub(start) < wait {
 				return false
 			}
 		}

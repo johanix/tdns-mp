@@ -1052,14 +1052,17 @@ func (zdr *ZoneDataRepo) setExpectedRecipients(zone ZoneName, agent AgentId, dis
 }
 
 // allRecipientsConfirmed returns true if every expected recipient has sent a
-// non-pending confirmation.
-func allRecipientsConfirmed(tr *TrackedRR) bool {
+// non-pending confirmation. A member with no vote holds no record's state
+// (design 4): it is sent to all the same, and what it answers is recorded. An
+// auditor's answer names a removal's records as applied (auditorConfirms), so
+// it would never count for a removal.
+func allRecipientsConfirmed(zone ZoneName, tr *TrackedRR) bool {
 	if len(tr.ExpectedRecipients) == 0 {
 		return true // No tracking — behave as before
 	}
 	for _, r := range tr.ExpectedRecipients {
 		c, ok := tr.Confirmations[r]
-		if !ok || c.Status == "pending" {
+		if (!ok || c.Status == "pending") && !nonVotingMember(zone, AgentId(r)) {
 			return false
 		}
 	}
@@ -1069,10 +1072,11 @@ func allRecipientsConfirmed(tr *TrackedRR) bool {
 // anyRecipientAccepted returns true if at least one expected recipient has
 // sent an "accepted" confirmation. Used to distinguish RRStateAccepted
 // (at least one combiner applied) from RRStateIgnored (all combiners
-// merely persisted).
-func anyRecipientAccepted(tr *TrackedRR) bool {
+// merely persisted). A member with no vote applies nothing here, and whether
+// it has answered yet must not decide the state.
+func anyRecipientAccepted(zone ZoneName, tr *TrackedRR) bool {
 	for _, r := range tr.ExpectedRecipients {
-		if c, ok := tr.Confirmations[r]; ok && c.Status == "accepted" {
+		if c, ok := tr.Confirmations[r]; ok && c.Status == "accepted" && !nonVotingMember(zone, AgentId(r)) {
 			return true
 		}
 	}
@@ -1213,7 +1217,7 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 						setConfirmation(tr, "accepted", "")
 						tr.UpdatedAt = now
 						matched++
-						if allRecipientsConfirmed(tr) {
+						if allRecipientsConfirmed(detail.Zone, tr) {
 							tr.State = RRStateAccepted
 							tr.Reason = ""
 						}
@@ -1221,10 +1225,10 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 						setConfirmation(tr, "ignored", "")
 						tr.UpdatedAt = now
 						matched++
-						if allRecipientsConfirmed(tr) {
+						if allRecipientsConfirmed(detail.Zone, tr) {
 							// If ANY recipient accepted, the RR is accepted.
 							// Only if ALL reported ignored does it go to RRStateIgnored.
-							if anyRecipientAccepted(tr) {
+							if anyRecipientAccepted(detail.Zone, tr) {
 								tr.State = RRStateAccepted
 							} else {
 								tr.State = RRStateIgnored
@@ -1244,7 +1248,7 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 						setConfirmation(tr, "removed", "")
 						tr.UpdatedAt = now
 						matched++
-						if allRecipientsConfirmed(tr) {
+						if allRecipientsConfirmed(detail.Zone, tr) {
 							zdr.deleteRRFromRepo(detail.Zone, agentId, rrtype, tr.RR)
 							tr.State = RRStateRemoved
 							tr.Reason = ""

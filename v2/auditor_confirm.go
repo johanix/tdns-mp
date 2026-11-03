@@ -19,7 +19,7 @@ package tdnsmp
 // OnRemoteConfirmationReady, to answerTo: the originator, or the leader that
 // delivered a withdrawal. An auditor never delays or gates a change: it
 // confirms every distribution it receives, at once, and one that cannot be
-// reached is waited for only up to no-role-timeout (memberWithTimeOut).
+// reached is waited for only up to no-role-timeout (nonVotingMember).
 // AuditorEngine.recordSyncMsg calls it after the event is logged; an RFI,
 // or a message with no distribution ID, gets no confirmation.
 func auditorConfirms(msgQs *MsgQs, msg *AgentMsgPostPlus, answerTo, zone string) {

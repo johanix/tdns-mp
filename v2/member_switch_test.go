@@ -160,7 +160,7 @@ func TestAProviderWhoseRemovalIsUnderWayStaysAMemberWhateverItsRecordSays(t *tes
 		if isVotingMember(zone, id) || slices.Contains(AuditorsForZone(zone), AgentId(id)) {
 			t.Errorf("%s, whose removal is under way, has a role", id)
 		}
-		if !noRoleMember(zone, AgentId(id)) {
+		if !nonVotingMember(zone, AgentId(id)) {
 			t.Errorf("%s is not waited for as a member with no role", id)
 		}
 	}
@@ -255,19 +255,19 @@ func TestADistributionWaitsForTheAuditor(t *testing.T) {
 
 // An auditor is waited for up to no-role-timeout too (design 4, amended
 // 2026-11-02): for the zone's CSYNC and for the new KEY of a roll
-// (noRoleOnly).
+// (nonVotingOnly).
 func TestAnAuditorIsWaitedForWithTheTimeOut(t *testing.T) {
 	withStore(t, nil)
 	mpzd := instrTestZone(t, "auditor.timeout.s15.example.", s15Records(7)...)
 	zone := ZoneName(mpzd.ZoneName)
-	if !memberWithTimeOut(zone, acGamma) || !memberWithTimeOut(zone, s15Delta) || memberWithTimeOut(zone, acBeta) {
+	if !nonVotingMember(zone, acGamma) || !nonVotingMember(zone, s15Delta) || nonVotingMember(zone, acBeta) {
 		t.Fatal("those with a time-out: want gamma, the auditor, and delta, with no role")
 	}
 	now, timeout := time.Now(), 10*time.Minute
-	if only, wait := noRoleOnly(zone, []string{acGamma}, now.Add(-4*time.Minute), now, timeout); !only || wait != 6*time.Minute {
+	if only, wait := nonVotingOnly(zone, []string{acGamma}, now.Add(-4*time.Minute), now, timeout); !only || wait != 6*time.Minute {
 		t.Errorf("the auditor alone awaited: only %v, wait %s; want true and 6m0s", only, wait)
 	}
-	if only, _ := noRoleOnly(zone, []string{acGamma, acBeta}, now, now, timeout); only {
+	if only, _ := nonVotingOnly(zone, []string{acGamma, acBeta}, now, now, timeout); only {
 		t.Error("a voting member awaited beside the auditor: the wait has a time-out")
 	}
 }
@@ -279,14 +279,14 @@ func TestAMemberWithNoRoleIsWaitedForWithTheTimeOut(t *testing.T) {
 	withStore(t, nil)
 	mpzd := instrTestZone(t, "timeout.s15.example.", s15Records(7)...)
 	zone := ZoneName(mpzd.ZoneName)
-	if !noRoleMember(zone, s15Delta) || noRoleMember(zone, acBeta) || noRoleMember(zone, acGamma) {
+	if !nonVotingMember(zone, s15Delta) || nonVotingMember(zone, acBeta) {
 		t.Fatal("the members with no role: want delta alone")
 	}
 	now, timeout := time.Now(), 10*time.Minute
-	if only, wait := noRoleOnly(zone, []string{s15Delta}, now.Add(-4*time.Minute), now, timeout); !only || wait != 6*time.Minute {
+	if only, wait := nonVotingOnly(zone, []string{s15Delta}, now.Add(-4*time.Minute), now, timeout); !only || wait != 6*time.Minute {
 		t.Errorf("delta alone awaited: only %v, wait %s; want true and 6m0s", only, wait)
 	}
-	if only, _ := noRoleOnly(zone, []string{s15Delta, acBeta}, now, now, timeout); only {
+	if only, _ := nonVotingOnly(zone, []string{s15Delta, acBeta}, now, now, timeout); only {
 		t.Error("a voting member awaited beside delta: the wait has a time-out")
 	}
 }

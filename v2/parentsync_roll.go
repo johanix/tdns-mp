@@ -742,7 +742,7 @@ func (conf *Config) rollKEYAwaited(zone ZoneName, st rollKEY) ([]string, error) 
 		}
 	}
 	if len(awaited) > 0 {
-		only, wait := noRoleOnly(zone, awaited, st.since, time.Now(), noRoleTimeoutFor(conf.MpConfig()))
+		only, wait := nonVotingOnly(zone, awaited, st.since, time.Now(), noRoleTimeoutFor(conf.MpConfig()))
 		if !only || wait > 0 {
 			return awaited, nil
 		}
