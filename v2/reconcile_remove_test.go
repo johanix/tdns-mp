@@ -1122,6 +1122,117 @@ func TestTheLeavingProviderIsToldSafeToRemove(t *testing.T) {
 	}
 }
 
+// withoutN is the owner's edit that takes n's record, the role already gone.
+func withoutN(t *testing.T, serial uint32) *Instructions {
+	t.Helper()
+	return jAt(t, serial, fmt.Sprintf(`servers="a,b" signers="a" nsmgmt="agent" suffix="%d"`, serial), freezeRecords[:2]...)
+}
+
+// The owner takes n's record before "done": the leader says "done" and thaws
+// in one turn, so no stamp of the zone at 42 says it (design 5.2). What the
+// leader's beats tell n after the thaw is what n needs: n follows, is told
+// safe to remove, and holds nothing up. On the real stamps, leader to leaver.
+func TestALeaverOutOfWordOfDoneFollowsTheThawThatTakesItsRecord(t *testing.T) {
+	const zone = "follows.remove.example."
+	a := newLeaverRig(t, zone, "agent")
+	n41, n42, n43 := a.n, a.v, withoutN(t, 43)
+	a.holdUnjudged(n43, time.Now())
+	a.run()
+	a.n, a.v = n42, n43
+	a.thawNow()
+	if a.active() != 43 {
+		t.Fatalf("a is at %d", a.active())
+	}
+	reconciling := a.stamps.entryFor(roleN)
+	if reconciling == nil {
+		t.Fatal("the thaw leaves a nothing to tell n")
+	}
+	st := reconciling.Members[roleA].Instr[zone]
+	if st.Active != 43 || !st.Reconciling || st.Thaw == nil || st.Thaw.From != sd(n42) || st.Thaw.To != sd(n43) {
+		t.Fatalf("what a tells n: %+v", st)
+	}
+	a.stamps.acknowledged(roleN, reconciling)
+	if err := a.store.Done(zone); err != nil {
+		t.Fatal(err)
+	}
+	done := a.stamps.entryFor(roleN)
+	if done == nil || done.Members[roleA].Instr[zone].Reconciling {
+		t.Fatalf("a's word of done to n: %+v", done)
+	}
+
+	n := newLeaverRigAt(t, zone, n41, n42, a.parent)
+	n.stamps.localID = roleN
+	mp := n.conf.MpConfig()
+	id := mp.Identity
+	mp.Identity = roleN
+	defer func() { mp.Identity = id }()
+	n.holdUnjudged(n43, time.Now())
+
+	n.stamps.note(reconciling, roleA, transport.MechanismDNS)
+	n.conf.thawTurn(zone)
+	if n.active() != 43 {
+		t.Fatalf("n stays at %d, told of the thaw", n.active())
+	}
+	if n.conf.safeToRemove(zone) {
+		t.Error("n is told safe to remove with the transition under way")
+	}
+	n.stamps.note(done, roleA, transport.MechanismDNS)
+	n.conf.thawTurn(zone)
+	if st := status(t, n.store, zone); st.Phase != PhaseSteady {
+		t.Fatalf("n after a's word of done: phase %s", st.Phase)
+	}
+	if !n.conf.safeToRemove(zone) {
+		t.Error("n is not told safe to remove")
+	}
+	if line := n.conf.thawLine(zone); !strings.HasSuffix(line, "; safe to remove") {
+		t.Errorf("n's status: %q", line)
+	}
+
+	// the owner's next edit is the others' to agree on
+	n.holdUnjudged(withoutN(t, 44), time.Now())
+	if line := n.conf.thawLine(zone); !strings.HasSuffix(line, "; safe to remove") {
+		t.Errorf("n's status with a serial held above: %q", line)
+	}
+	if _, ok := n.conf.thawView(zone, time.Now()); !ok {
+		t.Error("nothing is agreed on: the status was not put to the test")
+	}
+}
+
+// A provider the owner's records never named is not told safe to remove, and
+// a's stamps go only to whom the last thaw took out, until the next thaw.
+func TestOnlyTheProviderTheThawTookOutIsToldAndSafe(t *testing.T) {
+	const stranger = "x.role.example."
+	r := newLeaverRig(t, "only.remove.example.", "agent")
+	n43, n44 := withoutN(t, 43), withoutN(t, 44)
+	r.holdUnjudged(n43, time.Now())
+	r.run()
+	r.n, r.v = r.v, n43
+	r.thawNow()
+	if r.stamps.entryFor(stranger) != nil {
+		t.Error("a stranger is told")
+	}
+	if r.stamps.entryFor(roleN) == nil {
+		t.Error("n is not told of the thaw that took its record")
+	}
+	if err := r.store.Done(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	mp := r.conf.MpConfig()
+	id := mp.Identity
+	mp.Identity = stranger
+	if r.conf.safeToRemove(r.zone) {
+		t.Error("a stranger is told safe to remove")
+	}
+	mp.Identity = id
+
+	r.holdUnjudged(n44, time.Now())
+	r.n, r.v = n43, n44
+	r.thawNow()
+	if r.stamps.entryFor(roleN) != nil {
+		t.Error("n is told after the next thaw")
+	}
+}
+
 // A step's own sync passes the freeze, as it asks; one of no step's is owed.
 func TestAStepsOwnSyncPassesTheFreezeAndMakesItsCSYNC(t *testing.T) {
 	r := newLeaverRig(t, "ownsync.remove.example.", "agent")

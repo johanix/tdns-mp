@@ -224,7 +224,7 @@ func (t *stampTable) entryFor(peer string) *GossipMessage {
 	if t == nil {
 		return nil
 	}
-	zones := t.store.sharedWith(t.localID, peer)
+	zones := t.store.toldTo(t.localID, peer)
 	if len(zones) == 0 {
 		return nil
 	}
@@ -1143,6 +1143,41 @@ func (z *zoneSerials) shares(local, peer string) bool {
 		}
 	}
 	return slices.ContainsFunc(z.Removals, func(r Removal) bool { return core.EqualNames(r.Identity, dns.Fqdn(peer)) })
+}
+
+// toldTo is every zone this agent tells peer of in its beats: those the two
+// share (sharedWith), and those whose last thaw took peer's record away
+// (leftOut). Sorted.
+func (s *InstructionStore) toldTo(local, peer string) []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for zone, z := range s.zones {
+		if z.shares(local, peer) || z.leftOut(local, peer) {
+			out = append(out, zone)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// leftOut: the zone's last thaw took peer's record away, and local has one.
+// The stamps are all peer hears of the zone, and the thaw shares it with peer
+// no more: a serial that waited thaws in the turn that says "done", so peer
+// may have heard neither (design 5.2). It is told until the next thaw, while
+// the beats to it last, and moves to that serial on it (activateOnTellings).
+// Called with the store's lock held.
+func (z *zoneSerials) leftOut(local, peer string) bool {
+	if z.Active == nil || z.LastFrom == nil {
+		return false
+	}
+	before, _, _ := participantsOf(z.LastFrom.Reading)
+	now, _, _ := participantsOf(z.Active.Reading)
+	set := memberSetOf(now)
+	return memberSetOf(before).has(peer) && set.has(local) && !set.has(peer)
 }
 
 // stampOf is what this agent tells of zone (rule 4), from the serials it
