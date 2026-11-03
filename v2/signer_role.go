@@ -28,11 +28,11 @@ package tdnsmp
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
-	"github.com/miekg/dns"
 )
 
 // signerRoleEvery is how often the signer looks again at every zone's role.
@@ -183,23 +183,18 @@ func (conf *Config) handedOtherwiseMeanwhile(mpzd *MPZoneData, mp *MultiProvider
 	}
 }
 
-// firstKeysThere: a KSK and a ZSK of this provider's sign the zone.
+// firstKeysThere: tdns would sign with a KSK and a ZSK of this provider's, by the
+// same read of its signing keys as a start makes, not the rows: a row just written
+// is not in it yet. A KSK alone reads as a ZSK too, as a CSK.
 func firstKeysThere(mpzd *MPZoneData) bool {
-	inv, err := tdns.GetKeyInventory(mpzd.KeyDB, mpzd.ZoneName)
-	if err != nil {
+	if mpzd.KeyDB == nil {
 		return false
 	}
-	var ksk, zsk bool
-	for _, it := range inv {
-		switch {
-		case !it.Sign || it.State == DnskeyStateForeign:
-		case it.Flags&dns.SEP != 0:
-			ksk = true
-		default:
-			zsk = true
-		}
+	dak, err := mpzd.KeyDB.GetDnssecKeys(mpzd.ZoneName, tdns.DnskeyStateActive)
+	if err != nil || dak == nil || len(dak.KSKs) == 0 {
+		return false
 	}
-	return ksk && zsk
+	return slices.ContainsFunc(dak.ZSKs, func(z *tdns.PrivateKeyCache) bool { return z.KeyId != dak.KSKs[0].KeyId })
 }
 
 // bindForKeys binds the zone's policy with no signing, so that its key machine runs.
