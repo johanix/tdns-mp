@@ -2749,7 +2749,8 @@ func signingAgents(zone ZoneName, agents []AgentId) map[AgentId]bool {
 // whose answers it would sign (design §5.4: every signing provider has
 // applied the key). An ignored answer from a provider that does not sign
 // the zone is no obstacle. When who signs is not known here (Signing nil),
-// an ignored answer counts as it comes.
+// an ignored answer counts as it comes. What a member with no vote rejects
+// decides nothing (design 4): it stays in Results, and rejects no key.
 func (prop *PendingDnskeyPropagation) outcome() (propagated, removed, rejected []uint16, rejectionMsg string) {
 	rejectionMsg = prop.RejectionMsg
 	agents := make([]string, 0, len(prop.Results))
@@ -2761,7 +2762,7 @@ func (prop *PendingDnskeyPropagation) outcome() (propagated, removed, rejected [
 		bad := false
 		for _, a := range agents {
 			switch r := prop.Results[AgentId(a)][kt]; {
-			case r == "rejected":
+			case r == "rejected" && !nonVotingMember(prop.Zone, AgentId(a)):
 				bad = true
 			case r == "ignored" && prop.Signing[AgentId(a)]:
 				bad = true
@@ -2912,9 +2913,11 @@ func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source str
 			// a late rejection: the resend's answer decides
 		case rejectedTags[kt] || (wholeRejection && !doneTags[kt]):
 			results[kt] = "rejected"
-			prop.Rejected = true
-			if prop.RejectionMsg == "" {
-				prop.RejectionMsg = reason
+			if !nonVotingMember(prop.Zone, agentID) { // decides nothing (outcome)
+				prop.Rejected = true
+				if prop.RejectionMsg == "" {
+					prop.RejectionMsg = reason
+				}
 			}
 			lgTransport.Warn("DNSKEY confirmation rejected a key", "zone", prop.Zone, "distributionID", distID, "agent", source, "keytag", kt, "status", status, "reason", reason)
 		case doneTags[kt] || success:
@@ -3063,9 +3066,11 @@ func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent Agent
 			switch {
 			case rejectedTags[kt]:
 				results[kt] = "rejected"
-				prop.Rejected = true
-				if prop.RejectionMsg == "" && len(rejectedItems) > 0 {
-					prop.RejectionMsg = rejectedItems[0].Reason
+				if !nonVotingMember(prop.Zone, agent) { // decides nothing (outcome)
+					prop.Rejected = true
+					if prop.RejectionMsg == "" && len(rejectedItems) > 0 {
+						prop.RejectionMsg = rejectedItems[0].Reason
+					}
 				}
 			case success && covered:
 				results[kt] = "applied"
