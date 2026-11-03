@@ -24,6 +24,7 @@ const (
 	RefusedRoleWithoutRecord     = "role-without-record"
 	RefusedIdentityChanged       = "identity-changed"
 	RefusedSignerToServer        = "signer-to-server"
+	RefusedServerToSigner        = "server-to-signer"
 	RefusedSignersEmptied        = "signers-emptied"
 	RefusedUpstreamDangling      = "upstream-dangling"
 	RefusedUpstreamSignerRemoved = "upstream-signer-removed"
@@ -33,8 +34,8 @@ const (
 
 var refusalRank = map[string]int{
 	RefusedRecordWithRoleRemoved: 1, RefusedRoleWithoutRecord: 2, RefusedIdentityChanged: 3,
-	RefusedSignerToServer: 4, RefusedSignersEmptied: 5, RefusedUpstreamDangling: 6,
-	RefusedUpstreamSignerRemoved: 7, RefusedStepMissing: 8, RefusedNotBuilt: 9,
+	RefusedSignerToServer: 4, RefusedServerToSigner: 5, RefusedSignersEmptied: 6, RefusedUpstreamDangling: 7,
+	RefusedUpstreamSignerRemoved: 8, RefusedStepMissing: 9, RefusedNotBuilt: 10,
 }
 
 // Refusal is one reason the judge refuses a transition: its code, and the
@@ -62,7 +63,7 @@ type changeKind uint
 const (
 	kindRolesTaken changeKind = 1 << iota // a role taken away: S17b
 	kindServerRole                        // a server role given: S18a
-	kindSignerRole                        // a move into signers=: S18b, with P5
+	kindSignerRole                        // a provider with no role into signers=: S18b, with P5
 	kindNSmgmt                            // S19
 	kindParentSync                        // S20
 	kindUpstream                          // an upstream changed: S21
@@ -71,8 +72,10 @@ const (
 
 // builtKinds are the kinds whose steps are built (decision 29), and
 // carriedKinds the kinds whose step can be carried out at all: a signer role
-// needs P5. Each step that builds a kind adds it here; the judge reads no
-// config.
+// needs P5, an upstream needs its agent's check of the new transfer (S21).
+// Each step that builds a kind adds it here; the judge reads no config. A
+// server that moves into signers= is none of these: it is refused by
+// decision, whatever is built (RefusedServerToSigner).
 const (
 	builtKinds   changeKind = kindServerRole | kindRolesTaken | kindNSmgmt | kindUpstream | kindPubkey | kindSignerRole | kindParentSync
 	carriedKinds changeKind = kindRolesTaken | kindServerRole | kindNSmgmt | kindParentSync | kindUpstream | kindPubkey | kindSignerRole
@@ -124,6 +127,13 @@ func judge(from, to *Instructions, built, carried changeKind) []Refusal {
 			j.refuse(RefusedSignerToServer, "moves the signer %s to servers= only", j.name(label))
 		}
 	}
+	// A decision, not a step to come (design 5.3, the owner's decision of
+	// 2026-11-03): a provider with no role yet may enter signers=.
+	for _, label := range setMinus(tSigners, fSigners) {
+		if slices.Contains(fServers, label) {
+			j.refuse(RefusedServerToSigner, "moves the server %s into signers=", j.name(label))
+		}
+	}
 	if len(fSigners) > 0 && len(tSigners) == 0 {
 		j.refuse(RefusedSignersEmptied, "empties signers=, which lists %s under %d", strings.Join(fSigners, ","), from.Serial)
 	}
@@ -165,9 +175,9 @@ func judge(from, to *Instructions, built, carried changeKind) []Refusal {
 	}
 	for _, f := range from.Records {
 		if t, ok := to.record(f.Label); ok && core.EqualNames(f.Identity, t.Identity) && f.Upstream != t.Upstream {
-			// a server that moves into signers= and names no upstream any more
-			// serves its own signer's copy, which the move's steps bring about
-			// (design 5.3): no upstream step of its own
+			// a provider that enters signers= and names no upstream any more
+			// serves its own signer's copy, with no upstream step of its own. A
+			// server that does is refused above, for that alone (design 5.3).
 			if t.Upstream == "" && !slices.Contains(fSigners, f.Label) && slices.Contains(tSigners, f.Label) {
 				continue
 			}

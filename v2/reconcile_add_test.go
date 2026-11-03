@@ -56,10 +56,15 @@ func newSignerAddRig(t *testing.T, zone, parentsync string) *signerAddRig {
 	return r
 }
 
-// thawed has the zone thawed to V, with step 0 held here and at b.
+// thawed has the zone thawed to V, with step 0 held here and at b. This agent is
+// the leader and the joiner, so that one agent shows the leader's plan and the
+// joiner's own part. A leader votes, so it has a role under N, and the one that
+// lets it join is a server's: a move the judge refuses (design 5.3), held here
+// unjudged. The steps do not read the role it had; TestANewSignerHasItsStepsFromItsLeader
+// has a joiner with none.
 func (r *signerAddRig) thawed() *signerAddRig {
 	r.t.Helper()
-	r.agree()
+	r.holdUnjudged(r.v, time.Now())
 	r.thawNow()
 	r.partsTake()
 	r.holdsToo(roleB)
@@ -159,6 +164,110 @@ func (r *signerAddRig) ownKSK(t *testing.T) (*dns.DNSKEY, crypto.Signer) {
 	mpzd.MP.LocalDNSKEYs = []dns.RR{key}
 	mpzd.Unlock()
 	return key, priv
+}
+
+// The zone's leader plans a new signer's steps, through the judge: a provider with
+// no role entering signers= is not the move it refuses (design 5.3).
+func TestALeaderPlansTheStepsOfASignerWithNoRoleYet(t *testing.T) {
+	r := newSignerAddRig(t, "planned.adding.example.", "owner")
+	r.n = jAt(t, 41, `servers="a,b" signers="a" nsmgmt="owner" parentsync="owner" suffix="n"`, freezeRecords...)
+	knownAs(t, r.store, r.zone, r.n)
+	r.v = jAt(t, 42, `servers="a,b" signers="a,n" nsmgmt="owner" parentsync="owner" suffix="n"`, freezeRecords...)
+	r.agree()
+	r.hear(roleN, r.agreeing(), true)
+	r.thawNow()
+	r.partsTake()
+	r.holdsToo(roleB)
+	r.holdsToo(roleN)
+	r.turn(time.Now())
+	st, _ := r.step()
+	if id, part, ok := signerAddOf(st); !ok || part != signerAddAccept || !core.EqualNames(id, roleN) {
+		t.Errorf("the step is %q of %q (%v), want n's %s", part, id, ok, signerAddAccept)
+	}
+}
+
+// A new signer does not vote, so it has its steps from its leader, as any member
+// does, and at its own agent they do what they do at a leader that joins: its
+// combiner holds the key sets at once, its signer at the step after.
+func TestANewSignerHasItsStepsFromItsLeader(t *testing.T) {
+	r := newSignerAddRig(t, "led.adding.example.", "owner")
+	r.lead(roleB, time.Now().Add(time.Hour))
+	r.n = jAt(t, 41, `servers="b" signers="b" nsmgmt="owner" parentsync="owner" suffix="n"`, freezeRecords...)
+	knownAs(t, r.store, r.zone, r.n)
+	r.v = jAt(t, 42, `servers="b" signers="a,b" nsmgmt="owner" parentsync="owner" suffix="n"`, freezeRecords...)
+	r.agree()
+	st := tells(r.v, r.v)
+	st.Thaw, st.Reconciling = &Thaw{From: sd(r.n), To: sd(r.v)}, true
+	r.hear(roleB, st, true)
+	r.conf.thawTurn(r.zone)
+	if r.active() != r.v.Serial {
+		t.Fatalf("not thawed on its leader's word: active %d", r.active())
+	}
+	sets := rolesFor(r.n, r.n, 0)
+	joiner := Provider{Label: "a", Identity: roleA}
+	sets.KeySigners, sets.KeyConfirmers = addProvider(sets.KeySigners, joiner), addProvider(sets.KeyConfirmers, joiner)
+	key := func(part string) string { return signerAddKey + part + " " + canonicalName(roleA) }
+	r.hear(roleB, r.leaderStep(1, sets, []string{key(signerAddAccept)}), true)
+	r.conf.thawTurn(r.zone)
+	got, ok := r.step()
+	if !ok {
+		t.Fatal("no step held")
+	}
+	r.at(got, signerAddAccept)
+	if h := r.wantedBy(r.combiner); h == nil || !has(h.Sets.KeySigners, "a") {
+		t.Errorf("the combiner is handed %+v at its first step, want a in the key sets", h)
+	}
+	if h := r.wantedBy(r.signer); h == nil || has(h.Sets.KeySigners, "a") {
+		t.Errorf("the signer is handed %+v at its first step, want the step without a", h)
+	}
+	r.hear(roleB, r.leaderStep(2, sets, []string{key(signerAddAccept), key(signerAddMint)}), true)
+	r.conf.thawTurn(r.zone)
+	if got, ok = r.step(); !ok {
+		t.Fatal("no step held")
+	}
+	r.at(got, signerAddMint)
+	if h := r.wantedBy(r.signer); h == nil || !has(h.Sets.KeySigners, "a") {
+		t.Errorf("the signer is handed %+v at its second step, want a in the key sets", h)
+	}
+}
+
+// A first load handed Signing, over a copy that carries another's signatures, as
+// from a stanza naming another provider's signer: tdns would take them for the
+// zone's own and leave them, so the zone relays that copy, and it is StartSigning
+// that replaces them (signerRoleTurn). A copy with none signs at its first load.
+func TestAFirstLoadOverASignedCopyLeavesTheSwitchToStartSigning(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		signed bool
+	}{{"unsigned", false}, {"signed", true}} {
+		t.Run(c.name, func(t *testing.T) {
+			zone := c.name + ".firstcopy.signer.example."
+			records := sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)
+			r := newSignerRig(t, zone, records...)
+			r.hand(handoverFor(t, zone, records...), sigUs)
+			// not loaded yet: nothing published, as the config parse leaves it
+			fresh := &tdns.ZoneData{ZoneName: zone, ZoneStore: tdns.MapZone, ZoneType: tdns.Primary, Logger: r.mpzd.Logger,
+				Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}, KeyDB: r.kdb}
+			tdns.Zones.Set(zone, fresh)
+			Zones.Invalidate(zone)
+			mpzd, ok := Zones.Get(zone)
+			if !ok {
+				t.Fatal("no zone")
+			}
+			mpzd.EnsureMP()
+			if c.signed {
+				records = append(records, `3600 IN RRSIG SOA 15 3 3600 20351231000000 20250101000000 4711 `+zone+` AAAA`)
+			}
+			incoming := incomingCopy(t, zone, records...)
+			mpzd.MPPreRefresh(incoming, nil, nil, r.conf.MpConfig())
+			if on := incoming.Options[tdns.OptInlineSigning]; on == c.signed {
+				t.Errorf("signed copy %v: its first load has the option %v", c.signed, on)
+			}
+			if d := mpzd.MP.MPdata; d == nil || !d.WeAreSigner {
+				t.Errorf("its data is %+v, not that of a signer", d)
+			}
+		})
+	}
 }
 
 // A signer added (design 5.1): its four steps, in order, each taken once every
@@ -562,9 +671,9 @@ func TestTheJoinersOperatorEditsAreKeptUntilDone(t *testing.T) {
 	}
 }
 
-// Its operator hears it may switch once its signer signs, at its last step, and
-// not while its keys wait to go active.
-func TestAServerTurnedSignerIsNotToldToSwitchBeforeItsKeysAreActive(t *testing.T) {
+// A provider that V makes a signer and a server hears it may switch once its
+// signer signs, at its last step, and not while its keys wait to go active.
+func TestANewSignerAndServerIsNotToldToSwitchBeforeItsKeysAreActive(t *testing.T) {
 	buf := captureLog(t)
 	r := newSignerAddRig(t, "told.adding.example.", "owner").thawed()
 	serving(t, soa(t, r.zone, 5, nil, nil), nil)
@@ -631,14 +740,14 @@ func TestItsOperatorIsToldOnce(t *testing.T) {
 	}
 }
 
-// A server that becomes a signer: at its DNSKEY step its signer binds the zone's
-// policy, without signing (a zone that was not its signer's has none bound), so
-// the key machine takes it and makes its first keys, while the zone relays its
-// copy, foreign rows kept, with no restart and with the option off.
-func TestAServerThatBecomesASignerIsTakenAndMakesItsFirstKeys(t *testing.T) {
+// A new signer: at its DNSKEY step its signer binds the zone's policy, without
+// signing (a zone that was not its signer's has none bound), so the key machine
+// takes it and makes its first keys, while the zone relays its copy, foreign rows
+// kept, with no restart and with the option off.
+func TestANewSignerIsTakenAndMakesItsFirstKeys(t *testing.T) {
 	const zone = "taken.adding.signer.example."
 	k := testDnskey(t, zone, 257)
-	records := append(sigRecords(`serial="5" servers="us,p2" signers="p2"`), "3600 IN DNSKEY 257 3 15 "+k.PublicKey)
+	records := append(sigRecords(`serial="5" servers="p2" signers="p2"`), "3600 IN DNSKEY 257 3 15 "+k.PublicKey)
 	r := newSignerRig(t, zone, records...)
 	bound := 0
 	prev := bindWithoutSigning

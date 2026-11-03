@@ -1564,7 +1564,9 @@ func (mpzd *MPZoneData) signerSwitch(incoming *tdns.ZoneData, others []string, m
 	if incoming != nil {
 		was = incoming
 	}
-	on := shouldSign && (signs || !loaded)
+	// A first load signs, unless its copy carries signatures: tdns takes those for
+	// the zone's own and leaves them, while StartSigning replaces them.
+	on := shouldSign && (signs || !loaded && !apexSigned(incoming))
 	if on && !was.Options[tdns.OptInlineSigning] {
 		lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", mpzd.ZoneName)
 	} else if !shouldSign && was.Options[tdns.OptInlineSigning] {
@@ -1633,6 +1635,16 @@ func (mpzd *MPZoneData) signerSwitch(incoming *tdns.ZoneData, others []string, m
 		return switched, false
 	}
 	return switched, changed && shouldSign
+}
+
+// apexSigned: zd's SOA carries signatures. A signer's own combiner sends none, so
+// its stanza names a signed source.
+func apexSigned(zd *tdns.ZoneData) bool {
+	if zd == nil {
+		return false
+	}
+	soa, err := zd.RRsetForAnalysis(zd.ZoneName, dns.TypeSOA)
+	return err == nil && soa != nil && len(soa.RRSIGs) > 0
 }
 
 // implicitDelegationChange is the refresh's implicit delegation-change

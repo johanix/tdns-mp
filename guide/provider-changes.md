@@ -146,13 +146,12 @@ has not heard from all of them says so in its log, and its
 keys wait at least the TTL in its own copy, which can be
 longer.
 
-A server that becomes a signer goes on serving its upstream's
-copy until its status and its agent's log say `the provider
-may switch its servers to its own signer`. Its operator then
-points its signer at its own combiner and its servers at its
-own signer, and the zone is done once they serve its
-signatures. **Not before:** a signer re-plumbed to its combiner
-while it does not sign serves an unsigned copy.
+A provider given both roles in one edit has its status and
+its agent's log say `the provider may switch its servers to
+its own signer` once its signer signs. Its operator then
+points its servers at its own signer, and the zone is done
+once they serve its signatures. **Not before:** until then its
+signer relays an unsigned copy.
 
 A signer that has been handed nothing by its agent takes no
 role from its own copy: at its first load the zone is withheld,
@@ -286,23 +285,17 @@ removal.
 The role is the zone owner's decision, made in
 `signers=`.
 
-### 5.1 A server becomes a signer too: allowed
+### 5.1 A server becomes a signer too: not for now
 
-- It starts above the serial it was serving.
-- It needs no restart.
-- It does not serve its own signatures until its DS is at
-  the parent and the earlier DS and DNSKEY RRsets have
-  left caches. Until then it goes on serving the copy of
-  its upstream signer. It is already in the NS RRset, so
-  this wait is its own to keep.
+A provider in `servers=` may not move into `signers=`. Its
+servers serve another signer's copy, at a serial its own
+signer has no part in, and they would take nothing below it.
 
-**Today:** the agents refuse the edit until a signer role
-can be carried out (section 6). It needs a restart of its
-signer
-([issue 146](https://github.com/johanix/tdns-mp/issues/146)),
-and it serves its own signatures before its DS is at the
-parent
-([issue 160](https://github.com/johanix/tdns-mp/issues/160)).
+If the owner makes that edit, every agent refuses it
+(`server-to-signer`, section 6) and shows it. A provider with
+no role yet may enter `signers=` (section 3). So once a build
+carries out removals, the owner's way there is to remove the
+provider completely (section 4) and add it back as a signer.
 
 ### 5.2 A signer becomes a server only: not allowed
 
@@ -353,6 +346,7 @@ Every agent refuses, with the same reason:
 | Gives a role to a label with no HSYNC3 record, or removes its record      | `role-without-record`     |
 | Changes the identity under a label with a role                           | `identity-changed`        |
 | Moves a signer to `servers=` only (5.2)                                  | `signer-to-server`        |
+| Moves a server into `signers=` (5.1)                                     | `server-to-signer`        |
 | Empties `signers=`                                                       | `signers-emptied`         |
 | Leaves an upstream that is not in `signers=`, or has no HSYNC3 record    | `upstream-dangling`       |
 | Takes out of `signers=` the upstream of a server that stays: move the server's upstream first, as its own edit | `upstream-signer-removed` |
