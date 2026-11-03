@@ -1724,7 +1724,7 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 	// nameservers they sit under.
 	if tdns.Globals.App.Type == AppTypeMPCombiner {
 		if err := mpzd.syncDsbootNames(); err != nil {
-			lg.Error("the zone's _dsboot names could not follow the refresh; the next hand-over or update tries again", "zone", mpzd.ZoneName, "err", err)
+			lg.Error("the zone's _dsboot names could not follow the refresh; tried again every minute", "zone", mpzd.ZoneName, "err", err)
 		}
 	}
 

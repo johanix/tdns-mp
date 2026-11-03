@@ -205,7 +205,7 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 				}
 			}
 			if err := w.syncDsbootNames(); err != nil {
-				lgCombiner.Error("the zone's _dsboot names could not follow its first load; the next hand-over or update tries again", "zone", zd.ZoneName, "err", err)
+				lgCombiner.Error("the zone's _dsboot names could not follow its first load; tried again every minute", "zone", zd.ZoneName, "err", err)
 			}
 		})
 
