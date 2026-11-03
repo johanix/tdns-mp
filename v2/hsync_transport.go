@@ -127,7 +127,7 @@ type MPTransportBridge struct {
 	// peer; zero means peerRediscoveryInterval.
 	rediscoveryInterval time.Duration
 	// noRoleTimeout is how long a DNSKEY distribution waits for a member
-	// with no role (multi-provider.transitions.no-role-timeout, plan S12);
+	// with no vote (multi-provider.transitions.no-role-timeout, plan S12);
 	// zero means its default.
 	noRoleTimeout time.Duration
 
@@ -2543,7 +2543,7 @@ func (tm *MPTransportBridge) foldIntoResend(zone ZoneName, resendID string) {
 		for agent, results := range prop.Results {
 			for kt, r := range results {
 				// a result carried goes with the stamp of the answer that
-				// gave it (S8 judges it by that); a member with no role that
+				// gave it (S8 judges it by that); a member with no vote that
 				// timed out is not waited for again (design 4)
 				if r == "applied" || r == "ignored" || r == "timed out" {
 					resend.setResultLocked(agent, kt, r, prop.Stamps[agent][kt])
@@ -2628,7 +2628,7 @@ func (prop *PendingDnskeyPropagation) setResultLocked(agent AgentId, kt uint16, 
 
 // TrackDnskeyPropagation registers a DNSKEY distribution for confirmation tracking.
 // Called by SynchedDataEngine after enqueueing DNSKEY changes for remote agents,
-// with its ctx, which ends the wait for members with no role.
+// with its ctx, which ends the wait for members with no vote.
 func (tm *MPTransportBridge) TrackDnskeyPropagation(ctx context.Context, zone ZoneName, distID string, keyTags, removedTags []uint16, agents []AgentId) {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
@@ -2653,7 +2653,7 @@ func (tm *MPTransportBridge) TrackDnskeyPropagation(ctx context.Context, zone Zo
 	}
 
 	lgTransport.Info("tracking DNSKEY propagation", "zone", zone, "distributionID", distID, "agents", len(agents), "keyTags", len(keyTags))
-	// A member with no role is waited for up to the time-out (design 4). A
+	// A member with no vote is waited for up to the time-out (design 4). A
 	// voting member may come to have none while the distribution waits (a
 	// thaw), so the look is always made, and made again while it waits.
 	tm.noRoleAfter(ctx, distID)
@@ -2674,7 +2674,7 @@ func (tm *MPTransportBridge) noRoleAfter(ctx context.Context, distID string) {
 }
 
 // noRoleWait is how long a DNSKEY distribution waits for a member with no
-// role.
+// vote.
 func (tm *MPTransportBridge) noRoleWait() time.Duration {
 	if tm.noRoleTimeout > 0 {
 		return tm.noRoleTimeout
@@ -2683,7 +2683,7 @@ func (tm *MPTransportBridge) noRoleWait() time.Duration {
 }
 
 // dnskeyNoRoleTimedOut ends the wait of a DNSKEY distribution for the
-// members with no role that have not answered by the time-out (design 4):
+// members with no vote that have not answered by the time-out (design 4):
 // each counts as answered, neither applying the keys nor rejecting them,
 // with one log line, and the distribution goes on without it. A voting
 // member is waited for as before, and looked at again after another
@@ -2705,10 +2705,10 @@ func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(ctx context.Context, distID st
 		return
 	}
 	for _, a := range slices.Sorted(maps.Keys(prop.ExpectedAgents)) {
-		if prop.ExpectedAgents[a] || !noRoleMember(prop.Zone, a) {
+		if prop.ExpectedAgents[a] || !nonVotingMember(prop.Zone, a) {
 			continue
 		}
-		lgTransport.Warn("a member with no role did not confirm in time, going on", "zone", prop.Zone, "member", a, "what", "the DNSKEY distribution "+distID)
+		lgTransport.Warn("a member with no vote did not confirm in time, going on", "zone", prop.Zone, "member", a, "what", "the DNSKEY distribution "+distID)
 		for _, kt := range prop.KeyTags {
 			prop.setResultLocked(a, kt, "timed out", nil) // no answer, no stamp
 		}

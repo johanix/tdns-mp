@@ -11,6 +11,7 @@ import (
 
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 )
 
 // The reconciliation (plan S12), on the thaw rig: agent a leads a zone that
@@ -950,16 +951,16 @@ func TestTheCSYNCNotifyGoesOnWithoutAMemberWithNoRoleAfterTheTimeOut(t *testing.
 	zone := ZoneName(r.zone)
 	made := time.Now()
 	now := made.Add(time.Minute)
-	if only, wait := noRoleOnly(zone, []string{roleN}, made, now, 15*time.Minute); !only || wait != 14*time.Minute {
+	if only, wait := nonVotingOnly(zone, []string{roleN}, made, now, 15*time.Minute); !only || wait != 14*time.Minute {
 		t.Errorf("n alone, before the time-out: %v %s", only, wait)
 	}
-	if only, wait := noRoleOnly(zone, []string{roleN}, made, now.Add(15*time.Minute), 15*time.Minute); !only || wait > 0 {
+	if only, wait := nonVotingOnly(zone, []string{roleN}, made, now.Add(15*time.Minute), 15*time.Minute); !only || wait > 0 {
 		t.Errorf("n alone, after the time-out: %v %s", only, wait)
 	}
-	if only, _ := noRoleOnly(zone, []string{roleB, roleN}, made, now.Add(time.Hour), 15*time.Minute); only {
+	if only, _ := nonVotingOnly(zone, []string{roleB, roleN}, made, now.Add(time.Hour), 15*time.Minute); only {
 		t.Error("b, a voting member, is left and the NOTIFY would go on")
 	}
-	if only, _ := noRoleOnly(zone, []string{freezeCombiner}, made, now.Add(time.Hour), 15*time.Minute); only {
+	if only, _ := nonVotingOnly(zone, []string{freezeCombiner}, made, now.Add(time.Hour), 15*time.Minute); only {
 		t.Error("this agent's combiner is left and the NOTIFY would go on")
 	}
 }
@@ -993,6 +994,127 @@ func TestADNSKEYDistributionGoesOnWithoutAMemberWithNoRoleAfterTheTimeOut(t *tes
 	tm.dnskeyPropMu.Unlock()
 	if !waiting {
 		t.Error("the distribution went on without b")
+	}
+}
+
+// An auditor that has gone silent holds a DNSKEY distribution, and so the mark
+// a next keys step and the thaw wait on (rolloverAt), only up to the time-out,
+// and the leader's CSYNC the same: it is never waited for in the agreement
+// (design 4). One that has not spoken by then is still sent to by the queue.
+func TestASilentAuditorHoldsNothingPastTheTimeOut(t *testing.T) {
+	r := newReconcileRig(t, "silentauditor.reconcile.example.", roleA)
+	active := freezeAt(t, 42, "v", "a,b", "n")
+	if err := r.store.update(r.zone, func(z *zoneSerials) error {
+		z.Active.Reading, z.Active.SerialDigest = active, sd(active)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if st := zoneStanding(instructionsFor(ZoneName(r.zone)), roleN); st != standingAuditor {
+		t.Fatalf("n's standing is %d, want the auditor", st)
+	}
+	tm := r.conf.InternalMp.MPTransport
+	tm.noRoleTimeout = time.Hour // the test ends the wait itself
+	tm.TrackDnskeyPropagation(t.Context(), ZoneName(r.zone), "d1", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.ProcessDnskeyConfirmation("d1", roleB, transport.ConfirmSuccess.String(), nil, nil)
+	if !tm.dnskeyPropagationPending(r.zone) {
+		t.Fatal("the distribution did not wait for the auditor")
+	}
+	tm.dnskeyNoRoleTimedOut(t.Context(), "d1")
+	if tm.dnskeyPropagationPending(r.zone) {
+		t.Error("the distribution, and with it the mark, still waits for the auditor after the time-out")
+	}
+	// b, a voting member, is waited for whatever the time
+	tm.TrackDnskeyPropagation(t.Context(), ZoneName(r.zone), "d2", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.dnskeyNoRoleTimedOut(t.Context(), "d2")
+	if !tm.dnskeyPropagationPending(r.zone) {
+		t.Error("the distribution went on without b")
+	}
+	// the leader's CSYNC
+	now := time.Now()
+	if only, wait := nonVotingOnly(ZoneName(r.zone), []string{roleN}, now.Add(-15*time.Minute), now, 15*time.Minute); !only || wait > 0 {
+		t.Errorf("the CSYNC with the auditor alone left, after the time-out: %v %s", only, wait)
+	}
+	if only, _ := nonVotingOnly(ZoneName(r.zone), []string{roleB, roleN}, now.Add(-time.Hour), now, 15*time.Minute); only {
+		t.Error("b, a voting member, is left and the NOTIFY would go on")
+	}
+}
+
+// A silent auditor holds no tracked record: an addition is accepted and a
+// removal done once this agent's combiner and the voting members have answered,
+// and whether it has answered does not decide the state. An auditor that is up
+// held a removal too, since its answer names the records as applied.
+func TestASilentAuditorHoldsNoTrackedRecord(t *testing.T) {
+	r := newReconcileRig(t, "trackedauditor.reconcile.example.", roleA)
+	active := freezeAt(t, 42, "v", "a,b", "n")
+	if err := r.store.update(r.zone, func(z *zoneSerials) error {
+		z.Active.Reading, z.Active.SerialDigest = active, sd(active)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	zone, us := ZoneName(r.zone), AgentId(roleA)
+	recipients := []string{freezeCombiner, roleB, roleN}
+	rr, err := dns.NewRR(r.zone + " 3600 IN NS ns9.provider.example.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracked := func(state RRState, distID string) (*ZoneDataRepo, *TrackedRR) {
+		zdr, err := NewZoneDataRepo()
+		if err != nil {
+			t.Fatal(err)
+		}
+		set := &TrackedRRset{Tracked: []TrackedRR{{RR: rr, State: state, DistributionID: distID, ExpectedRecipients: recipients}}}
+		zdr.Tracking[zone] = map[AgentId]map[uint16]*TrackedRRset{us: {dns.TypeNS: set}}
+		return zdr, &set.Tracked[0]
+	}
+	applied := func(distID, source string) *ConfirmationDetail {
+		return &ConfirmationDetail{DistributionID: distID, Zone: zone, Source: source, Status: "ok", AppliedRecords: []string{rr.String()}}
+	}
+	removed := func(distID, source string) *ConfirmationDetail {
+		return &ConfirmationDetail{DistributionID: distID, Zone: zone, Source: source, Status: "ok", RemovedRecords: []string{rr.String()}}
+	}
+	ignored := func(distID, source string) *ConfirmationDetail {
+		return &ConfirmationDetail{DistributionID: distID, Zone: zone, Source: source, Status: "IGNORED", IgnoredRecords: []string{rr.String()}}
+	}
+
+	zdr, tr := tracked(RRStatePending, "add")
+	zdr.ProcessConfirmation(applied("add", freezeCombiner), nil)
+	if tr.State != RRStatePending {
+		t.Fatalf("the addition went on without b: %v", tr.State)
+	}
+	zdr.ProcessConfirmation(applied("add", roleB), nil)
+	if tr.State != RRStateAccepted {
+		t.Errorf("the addition with only the auditor silent: %v, want accepted", tr.State)
+	}
+	zdr.ProcessConfirmation(applied("add", roleN), nil)
+	if got := tr.Confirmations[roleN].Status; got != "accepted" {
+		t.Errorf("the auditor's late answer reads %q, want it recorded", got)
+	}
+
+	zdr, tr = tracked(RRStatePendingRemoval, "del")
+	zdr.ProcessConfirmation(removed("del", freezeCombiner), nil)
+	zdr.ProcessConfirmation(applied("del", roleN), nil) // what auditorConfirms sends
+	if tr.State != RRStatePendingRemoval {
+		t.Fatalf("the removal went on without b: %v", tr.State)
+	}
+	zdr.ProcessConfirmation(removed("del", roleB), nil)
+	if tr.State != RRStateRemoved {
+		t.Errorf("the removal with only the auditor not counted: %v, want removed", tr.State)
+	}
+
+	// every provider ignores the record: the auditor's answer changes nothing, before or after
+	for _, order := range [][]*ConfirmationDetail{
+		{applied("ign", roleN), ignored("ign", freezeCombiner), ignored("ign", roleB)},
+		{ignored("ign", freezeCombiner), ignored("ign", roleB), applied("ign", roleN)},
+	} {
+		zdr, tr = tracked(RRStatePending, "ign")
+		for _, d := range order {
+			zdr.ProcessConfirmation(d, nil)
+		}
+		if tr.State != RRStateIgnored {
+			t.Errorf("every provider ignored the record, and it reads %v", tr.State)
+		}
 	}
 }
 

@@ -366,16 +366,16 @@ func removalsOf(rs []InstrRemoval) []Removal {
 	return out
 }
 
-// noRoleMember: id is a member of the zone with no role under its active
-// serial, on its way in or out (design 4): an ON record in none of the
-// lists, or a provider whose removal is under way. A distribution waits for
-// it only up to multi-provider.transitions.no-role-timeout.
-func noRoleMember(zone ZoneName, id AgentId) bool {
+// nonVotingMember: id is a member of the zone with no vote under its active
+// serial (design 4): the auditor, a passive participant; an ON record in none
+// of the lists; or a provider whose removal is under way. A distribution waits
+// for it only up to multi-provider.transitions.no-role-timeout.
+func nonVotingMember(zone ZoneName, id AgentId) bool {
 	in := instructionsFor(zone)
 	switch st := zoneStanding(in, string(id)); {
-	case in == nil, st == standingVoting, st == standingAuditor:
+	case in == nil, st == standingVoting:
 		return false
-	case st == standingNoRole:
+	case st == standingNoRole, st == standingAuditor:
 		return true
 	}
 	_, ok := instrStore.Load().removal(dns.Fqdn(string(zone)), "", string(id))

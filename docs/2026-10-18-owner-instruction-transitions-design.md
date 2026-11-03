@@ -1,6 +1,6 @@
 # Changes to the zone owner's instructions: numbered by the owner, agreed before they act, carried out by the leader
 
-**Status:** PROPOSAL, 2026-10-18, revision 6 (2026-10-26); rule 2 amended 2026-10-28.
+**Status:** PROPOSAL, 2026-10-18, revision 6 (2026-10-26); rule 2 amended 2026-10-28; 4 amended 2026-11-03.
 
 This document describes how tdns-mp handles a change of a zone owner's instructions: every edit of the zone's HSYNC3 or HSYNCPARAM records. It describes the design as it is meant to stand. The difference from today's code and the steps of the work are in the plan beside it, `2026-10-18-owner-instruction-transitions-plan.md`, whose section 6 lists the decisions this design rests on and the parts of the membership design it changes.
 
@@ -176,6 +176,7 @@ What no rule between agents covers is the owner's own action at the parent and i
 ## 4. Members that do not vote
 
 - An auditor confirms at once, whatever serials it holds. It is never waited for in the agreement.
+  *Amended 2026-11-03 (the project owner's ruling on an auditor that is down: "time out. only possible alternative. the auditor is a passive participant, it must not be allowed to affect progress."):* a distribution and the leader's NOTIFY for its CSYNC wait for an auditor that has not answered up to the time-out of a member with no role, then go on without it, and a tracked record's state does not wait for it. The queue goes on sending to it. For a down auditor this overrides the close of tdns-mp #101 ("stays in every sender's expected set": it stays, up to the time-out) and the line in the peer discovery design of 2026-05-19 that changes may not proceed if the auditor is not informed.
 - A member with no role, on its way in or out, is waited for by a distribution with a time-out, as a leaving provider is (5.2). After the time-out the sender goes on; a member with no role cannot hold the zone.
 
 ## 5. The kinds of change

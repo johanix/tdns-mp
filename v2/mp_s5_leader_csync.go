@@ -47,7 +47,7 @@ const csyncFlagImmediate = 0x0001
 // still waits for confirmations of the zone's CSYNC. A voting member is
 // waited for with no time-out: a provider that does not confirm does not
 // serve the record, and a parent that scans then finds the nameservers out
-// of step. A member with no role is waited for up to
+// of step. A member with no vote is waited for up to
 // multi-provider.transitions.no-role-timeout (design 4, plan S12).
 var delegationCsyncAwaitedEvery = 10 * time.Minute
 
@@ -309,14 +309,14 @@ func (conf *Config) delegationCsyncProgress(ctx context.Context, zdr *ZoneDataRe
 	if rejected && rejectedBy == "" {
 		rejectedBy, reason = "a provider", tr.Reason
 	}
-	// Only members with no role left to confirm: the NOTIFY goes on without
+	// Only members with no vote left to confirm: the NOTIFY goes on without
 	// them once the time-out has passed since the CSYNC was made, and the
 	// engine looks again then (design 4).
-	noRoleLeft, wait := noRoleOnly(zonename, awaited, made, time.Now(), noRoleTimeoutFor(conf.MpConfig()))
-	timedOut := noRoleLeft && wait <= 0
+	nonVotersLeft, wait := nonVotingOnly(zonename, awaited, made, time.Now(), noRoleTimeoutFor(conf.MpConfig()))
+	timedOut := nonVotersLeft && wait <= 0
 	if timedOut {
 		for _, r := range awaited {
-			lgEngine.Warn("a member with no role did not confirm in time, going on", "zone", zone, "member", r, "what", "the zone's CSYNC")
+			lgEngine.Warn("a member with no vote did not confirm in time, going on", "zone", zone, "member", r, "what", "the zone's CSYNC")
 		}
 		awaited = nil
 	}
@@ -386,7 +386,7 @@ func (conf *Config) delegationCsyncProgress(ctx context.Context, zdr *ZoneDataRe
 		}
 	default:
 		cur.awaited = awaited
-		look := noRoleLeft && !cur.noRoleAt
+		look := nonVotersLeft && !cur.noRoleAt
 		cur.noRoleAt = cur.noRoleAt || look
 		c.mu.Unlock()
 		if look {
@@ -418,11 +418,11 @@ func (conf *Config) csyncAwaited(zone string) bool {
 	return cur != nil && !cur.confirmed && cur.failed == nil
 }
 
-// noRoleOnly: every recipient still awaited is a member of the zone with no
-// role (design 4), and wait is how long, from now, until the time-out
+// nonVotingOnly: every recipient still awaited is a member of the zone with no
+// vote (design 4), and wait is how long, from now, until the time-out
 // counted from since has passed (zero or less: it has).
-func noRoleOnly(zone ZoneName, awaited []string, since, now time.Time, timeout time.Duration) (only bool, wait time.Duration) {
-	only = len(awaited) > 0 && !slices.ContainsFunc(awaited, func(r string) bool { return !noRoleMember(zone, AgentId(r)) })
+func nonVotingOnly(zone ZoneName, awaited []string, since, now time.Time, timeout time.Duration) (only bool, wait time.Duration) {
+	only = len(awaited) > 0 && !slices.ContainsFunc(awaited, func(r string) bool { return !nonVotingMember(zone, AgentId(r)) })
 	return only, timeout - now.Sub(since)
 }
 

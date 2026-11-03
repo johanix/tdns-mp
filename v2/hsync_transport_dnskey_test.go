@@ -372,8 +372,8 @@ func TestSigningAgentsAreAskedAgainWhileUnknown(t *testing.T) {
 // #101, the sender's side: an auditor is an expected agent like any other,
 // and its SUCCESS, the event logged, is a final answer, so a distribution
 // propagates once the providers and the auditor have answered. Its PENDING
-// alone is not an answer: a sender waits, as it should, for an auditor that
-// has not spoken.
+// alone is not an answer: a sender waits for an auditor that has not spoken,
+// up to the time-out and no longer (TestASilentAuditorHoldsNothingPastTheTimeOut).
 func TestAnAuditorsSuccessCompletesPropagation(t *testing.T) {
 	ours := testDnskeyRR(t, "z.example.", 257)
 	kt := ours.KeyTag()
