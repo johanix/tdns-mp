@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -170,6 +171,31 @@ func TestASyncThatNeedsTheKeyStaysHeldWhileTheParentRefusesIt(t *testing.T) {
 	}
 }
 
+// The send reads the hold again. Its look can find no NOTIFY target where the
+// look at the hold found one, or the hold can have come since: no UPDATE goes
+// with that key. The sync fails, is asked again, and the hold takes it.
+func TestASendHeldByTheKeyWithNoNotifyTargetSendsNoUpdate(t *testing.T) {
+	saved := parentNotifyTarget
+	t.Cleanup(func() { parentNotifyTarget = saved })
+	r := newKeyHoldRig(t, "second.look.example.")
+	failureDelays(t, 50*time.Millisecond)
+	tdns.UpdateParentState(r.mpzd.KeyDB, string(r.zone), r.key.keyid, edns0.KeyStateRefused)
+	var looks atomic.Int32
+	parentNotifyTarget = func(context.Context, *Config, *tdns.ZoneData) *tdns.DsyncTarget {
+		if looks.Add(1) == 1 {
+			return &tdns.DsyncTarget{}
+		}
+		return nil
+	}
+	if got := r.explicit(t); !got.Error || !strings.Contains(got.ErrorMsg, "no NOTIFY target") {
+		t.Errorf("the sync's answer: %+v", got)
+	}
+	waitUntil(t, "the sync asked again is owed for the key", r.keyOwed)
+	if n := r.parent.updatesSeen(); n != 0 {
+		t.Errorf("%d UPDATEs went with the key that holds them", n)
+	}
+}
+
 // A parent that takes both: a NOTIFY needs no key, so the sync is not held. It
 // goes alone: no UPDATE signed with the refused key goes first, though the parent
 // takes UPDATE, and nothing is owed for the key.
@@ -295,6 +321,36 @@ func TestTheOperatorsWordEndsTheWatchAndNotWhatFollowsIt(t *testing.T) {
 	r.parentErr = fmt.Errorf("no answer")
 	if line := r.conf.thawLine(r.zone); !strings.HasSuffix(line, "; safe to remove (what the parent names has not been read yet)") {
 		t.Errorf("n's status with the parent not read: %q", line)
+	}
+}
+
+// The operator may name the zone in any case: the word is kept all the same,
+// and the turn it asks for comes.
+func TestTheWordIsKeptWhateverCaseTheZoneIsNamedIn(t *testing.T) {
+	r := newLeaverRig(t, "case.remove.example.", "agent")
+	r.dsThere = func(seen parentSeen) bool { return !slices.Contains(seen.ds, 2) }
+	r.next() // names
+	r.next() // ns
+	r.next() // its wait
+	named := strings.ToUpper(r.zone)
+	if _, err := r.conf.goOnPastParent(named); err != nil {
+		t.Fatalf("the word: %v", err)
+	}
+	step := removalKey("n", "ns")
+	if !r.store.parentWord(r.zone, step) || !r.store.parentWord(named, step) {
+		t.Fatalf("the word was not kept: under the store's name %v, as named %v",
+			r.store.parentWord(r.zone, step), r.store.parentWord(named, step))
+	}
+	b := &r.conf.InternalMp.thaws
+	b.mu.Lock()
+	asked := b.pending[canonicalName(r.zone)]
+	b.mu.Unlock()
+	if !asked {
+		t.Error("the word asked for no turn")
+	}
+	r.next()
+	if line := r.conf.thawLine(r.zone); !strings.Contains(line, "for the NS TTL until") {
+		t.Errorf("after the word: %q", line)
 	}
 }
 
