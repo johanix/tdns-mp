@@ -503,12 +503,18 @@ var parentNotifyTarget = func(ctx context.Context, conf *Config, zd *tdns.ZoneDa
 // sendDelegationSync is tdns's walk of the schemes. While the zone's key holds
 // an UPDATE, the only sync that passed the hold is a NOTIFY (holdForZoneKey),
 // and it goes alone: the walk would sign an UPDATE with that key first, and a
-// BADKEY starts a bootstrap of it.
+// BADKEY starts a bootstrap of it. With no target now (the hold came after
+// holdForZoneKey, or this look failed) nothing goes: the sync fails, is asked
+// again, and holdForZoneKey decides again.
 func (conf *Config) sendDelegationSync(ctx context.Context, kdb *tdns.KeyDB, notifyq chan tdns.NotifyRequest, ds tdns.DelegationSyncRequest,
 	syncstate tdns.DelegationSyncStatus, imr *tdns.Imr) (string, uint8, tdns.UpdateResult, error) {
 	zd := ds.ZoneData
-	if !syncstate.InSync && mpLeaderSync(conf, ds) && conf.syncKeyHold(ctx, ZoneName(ds.ZoneName)) != "" {
-		if target := parentNotifyTarget(ctx, conf, zd); target != nil {
+	if !syncstate.InSync && mpLeaderSync(conf, ds) {
+		if why := conf.syncKeyHold(ctx, ZoneName(ds.ZoneName)); why != "" {
+			target := parentNotifyTarget(ctx, conf, zd)
+			if target == nil {
+				return "", 0, tdns.UpdateResult{}, fmt.Errorf("the zone's SIG(0) key holds an UPDATE (%s) and the parent gave no NOTIFY target", why)
+			}
 			msg, rcode, err := zd.SyncZoneDelegationViaNotify(ctx, kdb, notifyq, syncstate, target)
 			return msg, rcode, tdns.UpdateResult{}, err
 		}

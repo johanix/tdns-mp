@@ -853,9 +853,16 @@ func (b *reconcileBook) warnDue(zone string, now time.Time) bool {
 	return true
 }
 
-// giveParentWord keeps the leader's operator's word for a step's watch.
+// giveParentWord keeps the leader's operator's word for a step's watch, the
+// zone named in any case.
 func (s *InstructionStore) giveParentWord(zone, step string) error {
-	return s.update(zone, func(z *zoneSerials) error {
+	s.mu.Lock()
+	name, _ := s.zoneLocked(zone)
+	s.mu.Unlock()
+	if name == "" {
+		return fmt.Errorf("zone %s: no serials kept", zone)
+	}
+	return s.update(name, func(z *zoneSerials) error {
 		if !z.reconciling() || slices.Contains(z.ParentWords, step) {
 			return errToldUnchanged
 		}
@@ -864,14 +871,15 @@ func (s *InstructionStore) giveParentWord(zone, step string) error {
 	})
 }
 
-// parentWord: the leader's operator gave the word for the step's watch.
+// parentWord: the leader's operator gave the word for the step's watch, the
+// zone named in any case.
 func (s *InstructionStore) parentWord(zone, step string) bool {
 	if s == nil {
 		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	z := s.zones[zone]
+	_, z := s.zoneLocked(zone)
 	return z != nil && slices.Contains(z.ParentWords, step)
 }
 
