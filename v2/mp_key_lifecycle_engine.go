@@ -267,9 +267,9 @@ func (w *signerWire) Resign(zone string) {
 	sendResignRequest(w.conf.Config.Internal.ResignQ, dns.Fqdn(zone))
 }
 
-// ServedDnskeyTTL: a provider that signs serves the RRset itself, with its own
-// copy's TTL. One that does not sign yet serves nobody a set to wait out: what
-// caches hold is what the zone's servers served. Its copy's TTL is the data's, and
+// ServedDnskeyTTL: a provider that serves serves the RRset itself, with its own
+// copy's TTL. One that does not, signing or not, serves nobody a set to wait out:
+// what caches hold is what the zone's servers served. Its copy's TTL is the data's, and
 // a signer's ceiling can have it served lower; its policy says what it will serve
 // itself, and a signer beside it can serve longer. So it waits the largest TTL the
 // zone's servers were seen serving (servedKeysBook). Its copy's TTL is the floor
@@ -287,7 +287,7 @@ func (w *signerWire) ServedDnskeyTTL(zone string) (time.Duration, bool) {
 			own = ttl
 		}
 	}
-	if self, r, _ := w.sets(zone); self != "" && !has(r.Signing, self) {
+	if self, r, _ := w.sets(zone); self != "" && !has(r.Servers, self) {
 		ttl, whole, looked := w.conf.InternalMp.servedKeys.largest(mpzd)
 		switch {
 		case !looked:
@@ -304,6 +304,8 @@ func (w *signerWire) ServedDnskeyTTL(zone string) (time.Duration, bool) {
 // not only a state change (design §4.1, arrow 2).
 func (w *signerWire) KeysChanged(zone string) {
 	go pushKeystateInventoryToAllAgents(w.conf, dns.Fqdn(zone))
+	// a provider that signs at its naming starts once its first keys are there
+	w.conf.askSignerRole(dns.Fqdn(zone))
 	// and the CDS follows a ds column change the served DNSKEY RRset does
 	// not show (arrow 1): tdns's DS engine is woken
 	if kdb := w.conf.Config.Internal.KeyDB; kdb != nil {
@@ -311,6 +313,12 @@ func (w *signerWire) KeysChanged(zone string) {
 			kdb.KeysChanged(zd)
 		}
 	}
+}
+
+// SignsAtNaming: Signing names this provider, and Servers does not.
+func (w *signerWire) SignsAtNaming(zone string) bool {
+	self, r, _ := w.sets(zone)
+	return self != "" && has(r.Signing, self) && !has(r.Servers, self)
 }
 
 func (w *signerWire) Report(zone string, keyid uint16, what string) {

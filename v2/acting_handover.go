@@ -53,9 +53,6 @@ type ActingHandover struct {
 	// Refresh asks the combiner to refresh the zone from its upstream (the
 	// fetch down the provider's chain, design 3.1; S5a asks for it).
 	Refresh bool `json:"refresh,omitempty"`
-	// MinSerial is the highest SOA serial this provider's nameservers served
-	// before its signer signs (plan S18b): its signed copy lands above it.
-	MinSerial uint32 `json:"min_serial,omitempty"`
 	// NoCopy: to the signer alone, kept by nobody. The agent has no copy of
 	// the zone, which it takes from this signer that withholds it: it can
 	// hand it nothing (plan S18b, signerAgentHasNoCopy).
@@ -165,7 +162,6 @@ func (conf *Config) wantedHandover(zone string) *ActingHandover {
 		}
 	}
 	_, _, h.Step = instrStore.Load().transition(zone)
-	h.MinSerial, _ = conf.InternalMp.signerAdds.served(zone, h.Serial)
 	return h
 }
 

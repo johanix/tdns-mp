@@ -1,39 +1,43 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * A signer added (design 5.1, plan S18b). A server that becomes a signer is
- * refused for now (design 5.3, the owner's decision of 2026-11-03), so a joiner
- * has no role of its own yet. The leader's steps, each confirmed by every voting
- * member:
+ * A signer added (design 5.1, plan S18b, the owner's decision of 2026-11-03). A
+ * provider with no role signs as soon as it is named: no NS record names it, so
+ * no validator sees its signatures, and what must wait is NS records for its
+ * servers. A server that becomes a signer is refused for now (design 5.3). The
+ * leader's steps, each confirmed by every voting member:
  *
- *  1. Its keys. The joiner enters KeySigners and KeyConfirmers, and once every
- *     member's parts hold that, its signer is handed it too: another signer's
- *     combiner would refuse a key from a provider its sets do not name, and a
- *     rejected key waits for its operator. Its key machine makes its first keys
- *     (which a hold lets it: a role with no active key gets one) and distributes
- *     them; the step waits until its key states show a KSK and a ZSK published,
- *     which needs every other signer to have applied them.
- *  2. Its DS. It enters DSSigners. Its KSK's ds=1 puts its DS in the DS set, the
- *     leader syncs under parentsync=agent, and the step waits until the parent
- *     serves it, whoever put it there.
+ *  1. Its keys, and its signing. The joiner enters KeySigners and KeyConfirmers,
+ *     and once every member's parts hold that, its signer is handed it too, with
+ *     Signing: another signer's combiner would refuse a key from a provider its
+ *     sets do not name, and a rejected key waits for its operator. Its key machine
+ *     makes its first keys (which a hold lets it: a role with no active key gets
+ *     one), which sign from the start, and distributes them; its signer starts
+ *     signing. The step waits until its key states show a KSK and a ZSK published,
+ *     which needs every other signer to have applied them, and until its signer
+ *     says it signs.
+ *  2. Its DS. It enters DSSigners. Its KSK's ds=1, set once the DNSKEY RRset has
+ *     propagated (T8), puts its DS in the DS set, the leader syncs under
+ *     parentsync=agent, and the step waits until the parent serves it, whoever put
+ *     it there.
  *  3. The caches' time. Its key machine waits the DS TTL at the parent before its
  *     KSK goes active (T9), asking one server: the step waits until its key states
  *     show them active, and for the DS TTL from when every server served its DS.
- *     Its agent asks its nameservers what they serve, once it serves at all, for
- *     the serial its signed copy must land above.
- *  4. Its own signatures. It enters Signing. Its signer starts signing, its agent
- *     tells its operator it may switch its servers to its own signer, and it holds
- *     the step once its nameservers serve a DNSKEY RRset signed by its own KSK.
+ *
+ * A server role given in the same edit is planned after these (server_role.go),
+ * and its nameservers enter Servers only at the last step; given in a later edit,
+ * it waits for this transition to be done. An operator's NS records are kept until
+ * done (oweIfFrozen). So under nsmgmt=agent nothing names its servers before its
+ * DNSKEYs have propagated and its DS is served. Under nsmgmt=owner that is the
+ * owner's (design 3.7).
  *
  * The DS and DNSKEY steps wait for an emergency rollover (design 3.3). With no
  * provider signing yet there are no signatures to go with a DS: the zone's first
- * signer signs before its DS goes to the parent.
+ * signer has its caches' time before its DS goes to the parent.
  */
 package tdnsmp
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -56,7 +60,6 @@ const (
 	signerAddMint   = "keys"
 	signerAddDS     = "ds"
 	signerAddCaches = "caches"
-	signerAddOwn    = "own"
 )
 
 const (
@@ -103,7 +106,6 @@ func addProvider(set []Provider, p Provider) []Provider {
 // from what is in place, each step once.
 func signerAddSteps(p planView) []plannedStep {
 	var steps []plannedStep
-	first := len(p.held.Signing) == 0
 	for _, s := range rolesFor(p.to, p.to, 0).Signing {
 		if s.Identity == "" {
 			continue
@@ -115,13 +117,14 @@ func signerAddSteps(p planView) []plannedStep {
 		if !begun && slices.ContainsFunc(p.held.Signing, func(o Provider) bool { return core.EqualNames(o.Identity, s.Identity) }) {
 			continue
 		}
+		first := !slices.ContainsFunc(p.held.Signing, func(o Provider) bool { return !core.EqualNames(o.Identity, s.Identity) })
 		steps = append(steps, signerAddStepsOf(s, first)...)
 	}
 	return steps
 }
 
 // signerAddStepsOf are the steps of the provider joiner; first, a provider that
-// joins a zone nobody signs yet.
+// joins a zone nobody else signs.
 func signerAddStepsOf(joiner Provider, first bool) []plannedStep {
 	id := joiner.Identity
 	key := func(part string) string { return signerAddKey + part + " " + canonicalName(id) }
@@ -131,7 +134,11 @@ func signerAddStepsOf(joiner Provider, first bool) []plannedStep {
 			h.KeySigners, h.KeyConfirmers = addProvider(h.KeySigners, joiner), addProvider(h.KeyConfirmers, joiner)
 			return h
 		}}
-	mint := plannedStep{key: key(signerAddMint), provider: id, keys: true, what: what(1, "its first keys, published"),
+	mint := plannedStep{key: key(signerAddMint), provider: id, keys: true, what: what(1, "its first keys, published, and its signing"),
+		sets: func(h Roles) Roles {
+			h.Signing = addProvider(h.Signing, joiner)
+			return h
+		},
 		wait: func(conf *Config, zone string, _ time.Time) string {
 			if conf.joinerKeysIn(zone, id, KeyStatePublished, KeyStateStandby, KeyStateActive) {
 				return ""
@@ -159,15 +166,10 @@ func signerAddStepsOf(joiner Provider, first bool) []plannedStep {
 			}
 			return ""
 		}}
-	own := plannedStep{key: key(signerAddOwn), provider: id, what: what(4, "its own signatures served"),
-		sets: func(h Roles) Roles {
-			h.Signing = addProvider(h.Signing, joiner)
-			return h
-		}}
 	if first {
-		return []plannedStep{accept, mint, caches, own, ds}
+		return []plannedStep{accept, mint, caches, ds}
 	}
-	return []plannedStep{accept, mint, ds, caches, own}
+	return []plannedStep{accept, mint, ds, caches}
 }
 
 // forOwnSigner is what this agent hands its signer of h: at its own provider's
@@ -364,57 +366,24 @@ func dsAtEveryServer(servers []string, ask func(server string) ([]dns.RR, error)
 
 // --- This provider's part ---
 
-// signerAddHolds: at the provider's own agent, its step 3 is held once it knows
-// what its nameservers serve, where it serves, and its step 4 once its signer
-// signs and, where its servers are to serve its copy, they serve its signatures.
-// Every other agent's part is its parts holding the step's sets.
+// signerAddHolds: at the provider's own agent, its keys' step is held once its
+// signer signs. Every other agent's part is its parts holding the step's sets.
 func signerAddHolds(conf *Config, zone string, step InstrStep) bool {
 	id, part, ok := signerAddOf(step)
 	mp := conf.MpConfig()
-	if !ok || mp == nil || !core.EqualNames(id, mp.Identity) {
+	if !ok || mp == nil || !core.EqualNames(id, mp.Identity) || part != signerAddMint {
 		return true
 	}
-	b := &conf.InternalMp.signerAdds
-	switch part {
-	case signerAddCaches:
-		return !servesUnder(step, id) || b.servedKnown(conf, zone)
-	case signerAddOwn:
-		if !conf.ownSignerSigns(zone) {
-			return false
-		}
-		if !servesOwnCopy(instructionsFor(ZoneName(zone)), id) {
-			return true
-		}
-		if conf.InternalMp.reconciles.sayOnce(canonicalName(zone), "may switch") {
-			lg.Info("the provider may switch its servers to its own signer", "zone", zone, "provider", id)
-		}
-		return b.ownServed(conf, zone)
-	}
-	return true
+	return conf.ownSignerSigns(zone)
 }
 
 // signerAddStatus is what a signer's step waits for that the leader's view does
-// not say: at the provider's own agent, its signer and its operator; at any
-// other, its nameservers.
+// not say: at the provider's own agent, its signer.
 func signerAddStatus(conf *Config, zone string, step heldStep, _ time.Time) string {
-	id, part, ok := signerAddOf(step.InstrStep)
-	mp := conf.MpConfig()
-	if !ok || mp == nil || part != signerAddOwn {
+	if signerAddHolds(conf, zone, step.InstrStep) {
 		return ""
 	}
-	if !core.EqualNames(id, mp.Identity) {
-		if conf.toldStepHeld(zone, id, step.InstrStep) {
-			return ""
-		}
-		return fmt.Sprintf("waiting for %s's nameservers to serve its own signatures", id)
-	}
-	switch {
-	case !conf.ownSignerSigns(zone):
-		return "waiting for this provider's signer to start signing"
-	case !servesOwnCopy(instructionsFor(ZoneName(zone)), id) || conf.InternalMp.signerAdds.ownHeld(conf, zone):
-		return ""
-	}
-	return "this provider may switch its servers to its own signer; waiting for its nameservers to serve its own signatures"
+	return "waiting for this provider's signer to start signing"
 }
 
 // ownSignerSigns: this agent's signer says it serves its own signatures.
@@ -427,36 +396,11 @@ func (conf *Config) ownSignerSigns(zone string) bool {
 	return snap != nil && snap.Signs
 }
 
-// servesUnder: the step's sets give id a server role. A joiner's sets do not, even
-// one that V makes a server too, whose role comes at the last step: only a server
-// that moves into signers= has one here, and the judge refuses that (design 5.3).
-// So its nameservers are asked nothing at step 3 today, and it hands no MinSerial.
-func servesUnder(step InstrStep, id string) bool {
-	var sets Roles
-	if err := json.Unmarshal(step.Sets, &sets); err != nil {
-		return false
-	}
-	return slices.ContainsFunc(sets.Servers, func(p Provider) bool { return core.EqualNames(p.Identity, id) })
-}
-
-// servesOwnCopy: under in, id's servers are to serve its own signer's copy: it
-// is a server whose record names no upstream but itself. One that names another
-// goes on serving that one's, by the owner's word, until an edit moves it.
-func servesOwnCopy(in *Instructions, id string) bool {
-	label, ok := in.labelOf(id)
-	if !ok || !slices.Contains(in.Servers, label) {
-		return false
-	}
-	r, _ := in.record(label)
-	return r.Upstream == "" || r.Upstream == label
-}
-
 // --- What the agent looks up ---
 
 // signerAddBook is what this agent has looked up for a signer's addition, by
 // zone, for the active serial it was looked up under. In memory: after a restart
-// it looks again. An agent restarted between its step 3 and its step 4 has no
-// serial to hand, and the signed copy lands above what its signer served.
+// it looks again.
 type signerAddBook struct {
 	mu    sync.Mutex
 	zones map[string]*signerAddLooks
@@ -466,15 +410,6 @@ type signerAddBook struct {
 
 type signerAddLooks struct {
 	serial uint32 // the active serial
-	// its nameservers: the highest serial they serve, and whether they serve
-	// its own signatures
-	served    uint32
-	knows     bool
-	servedAt  time.Time
-	servedRun bool
-	own       bool
-	ownAt     time.Time
-	ownRun    bool
 	// the parent's DS RRset, and the largest TTL it was seen with
 	parent    parentDSSeen
 	parentTTL time.Duration
@@ -508,93 +443,6 @@ func (b *signerAddBook) run(look func()) {
 		return
 	}
 	go look()
-}
-
-// lookCtx is one look's context, with its bound.
-func lookCtx() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), transferCheckTimeout)
-}
-
-// served is the serial this provider's nameservers last served, under the active
-// serial, and whether one is known. Serial 0 is a serial: StartSigning takes 0 as
-// none, and lands above what the zone itself served in any case.
-func (b *signerAddBook) served(zone string, active uint32) (uint32, bool) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if l := b.zones[canonicalName(zone)]; l != nil && l.serial == active && l.knows {
-		return l.served, true
-	}
-	return 0, false
-}
-
-// servedKnown: what its nameservers serve is known. They are asked again every
-// transferRecheck meanwhile, and its answer hands the signer the latest.
-func (b *signerAddBook) servedKnown(conf *Config, zone string) bool {
-	b.mu.Lock()
-	l := b.looksLocked(conf, zone)
-	due := !l.servedRun && time.Since(l.servedAt) >= transferRecheck
-	if due {
-		l.servedRun = true
-	}
-	b.mu.Unlock()
-	if due {
-		b.run(func() {
-			ctx, cancel := lookCtx()
-			defer cancel()
-			served, err := highestServedSerial(ctx, zone, conf.MpConfig().Local.Nameservers)
-			b.mu.Lock()
-			l.servedRun, l.servedAt = false, time.Now()
-			if err == nil {
-				l.served, l.knows = served, true
-			}
-			b.mu.Unlock()
-			if err != nil {
-				lg.Debug("what this provider's nameservers serve is not known yet", "zone", zone, "err", err)
-				return
-			}
-			conf.askThaw(zone)
-		})
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return l.knows
-}
-
-// ownServed: its nameservers serve its own signatures. Checked every
-// transferRecheck until they do, and then so for the step.
-func (b *signerAddBook) ownServed(conf *Config, zone string) bool {
-	b.mu.Lock()
-	l := b.looksLocked(conf, zone)
-	due := !l.own && !l.ownRun && time.Since(l.ownAt) >= transferRecheck
-	if due {
-		l.ownRun = true
-	}
-	b.mu.Unlock()
-	if due {
-		b.run(func() {
-			ctx, cancel := lookCtx()
-			defer cancel()
-			mp := conf.MpConfig()
-			above, known := b.served(zone, l.serial)
-			err := servesOwnSignatures(ctx, zone, mp.Local.Nameservers, conf.signerKeys(zone, []string{mp.Identity}), above, known, time.Now())
-			b.mu.Lock()
-			l.ownRun, l.ownAt, l.own = false, time.Now(), err == nil
-			b.mu.Unlock()
-			if err != nil {
-				lg.Debug("this provider's nameservers do not serve its own signatures yet", "zone", zone, "err", err)
-				return
-			}
-			lg.Info("this provider's nameservers serve its own signatures", "zone", zone, "provider", mp.Identity)
-			conf.askThaw(zone)
-		})
-	}
-	return b.ownHeld(conf, zone)
-}
-
-func (b *signerAddBook) ownHeld(conf *Config, zone string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.looksLocked(conf, zone).own
 }
 
 // parentDS is the parent's DS RRset as last looked at, and whether a look has

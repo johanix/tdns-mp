@@ -109,7 +109,7 @@ As implemented (r9): the row itself still comes from the zone as the signer rece
 
 | P | how the table keeps it |
 |---|---|
-| P1 no `sign=1` before every signing provider applied the key and the RRset propagated | only T9 sets `sign`, only from standby; standby only via T8 from published; published only via T3/T3' |
+| P1 no `sign=1` before every signing provider applied the key and the RRset propagated | only T9 sets `sign`, only from standby; standby only via T8 from published; published only via T3/T3'. *Amended 2026-11-03 (the owner's decision, design 5.1):* except the first key of a role of a provider named a signer that serves nothing: no NS record names it, so no validator sees its signatures. It has `sign=1` from T2, and T3, T8 and T9 run as ever, saying what the others have applied and what the parent serves. tdns's `keystore dnssec check` reports such a row as I9 until T9. |
 | P2 no KSK `ds=1` before standby | only T8 sets `ds` |
 | P3 a foreign KSK has `ds=1` only if its provider signs and holds it standby, active or retired-not-withdrawn | §1's foreign row, from the provider's state on the wire (#58); NULL when the provider does not say |
 | P4 no key lost | every state has a way out; T15 re-sends what was in flight |
