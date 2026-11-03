@@ -57,6 +57,9 @@ type ActingHandover struct {
 	// the zone, which it takes from this signer that withholds it: it can
 	// hand it nothing (plan S18b, signerAgentHasNoCopy).
 	NoCopy bool `json:"no_copy,omitempty"`
+	// Joining: to the signer alone. Its provider's keys-step of its joining is
+	// held: its keys start over (plan S18b, T20).
+	Joining bool `json:"joining,omitempty"`
 }
 
 // String names the hand-over by its serial, digest and step, for the log

@@ -216,6 +216,7 @@ func (e *KeyLifecycleEngine) handedOver(zone string, confirmers []string) {
 	if l == nil {
 		return
 	}
+	e.startOver(zone)
 	if !slices.Equal(confirmers, e.wire.OtherSigners(zone)) {
 		if err := l.SignersChanged(); err != nil {
 			lgSigner.Error("key lifecycle: the distributions in flight could not follow the providers handed", "zone", zone, "err", err)
@@ -223,6 +224,16 @@ func (e *KeyLifecycleEngine) handedOver(zone string, confirmers []string) {
 	}
 	if err := l.ApplyForeign(); err != nil {
 		lgSigner.Error("key lifecycle: the other providers' ds could not follow the providers handed", "zone", zone, "err", err)
+	}
+}
+
+// startOver: the keys of a provider that joins start over (T20), for a zone the
+// machine runs. Also on its next tick, should this fail.
+func (e *KeyLifecycleEngine) startOver(zone string) {
+	if l := e.driver(zone); l != nil {
+		if err := l.StartOver(); err != nil {
+			lgSigner.Error("key lifecycle: a joiner's keys could not start over; next tick", "zone", zone, "err", err)
+		}
 	}
 }
 

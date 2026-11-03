@@ -73,6 +73,9 @@ type Wire interface {
 	Strip(zone string, keyid uint16) error
 	// Resign asks tdns to re-sign the zone.
 	Resign(zone string)
+	// JoiningSince: this provider's keys-step of its joining is held, and since
+	// when (plan S18b, reading 20).
+	JoiningSince(zone string) (time.Time, bool)
 	// SignsAtNaming: this provider signs the zone and serves nothing of it: no
 	// NS record is to name it, so no validator sees its signatures, and its
 	// first keys sign from the start (signsFromTheStart).
@@ -644,6 +647,40 @@ func (l *ZoneKeyLifecycle) write(k tdns.DnssecKeyWithTimestamps, state string, s
 	return nil
 }
 
+// StartOver has the keys of a provider that joins start over (T20), at once, so
+// that its inventory says so before its agent distributes them.
+func (l *ZoneKeyLifecycle) StartOver() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	all, err := l.rows()
+	if err != nil {
+		return err
+	}
+	return l.startOverLocked(all)
+}
+
+// startOverLocked is T20 for each key that was not published since this provider's
+// keys-step began, at the second tdns stamps it to. A key that was has been through
+// T3 in this joining, and stays. What a provider's steps read as its keys having
+// propagated must have been so in this joining.
+func (l *ZoneKeyLifecycle) startOverLocked(all map[uint16]tdns.DnssecKeyWithTimestamps) error {
+	since, joining := l.Wire.JoiningSince(l.Zone)
+	if !joining {
+		return nil
+	}
+	since = since.Truncate(time.Second)
+	for _, keyid := range keytagsOf(all) {
+		k := all[keyid]
+		if k.State != KeyStateActive && k.State != KeyStateStandby || k.PublishedAt != nil && !k.PublishedAt.Before(since) {
+			continue
+		}
+		if _, _, err := l.applyLocked(keyid, EvStartOver); err != nil {
+			return fmt.Errorf("start key %d of %s over: %w", keyid, l.Zone, err)
+		}
+	}
+	return nil
+}
+
 // signsFromTheStart: k, on its way to state, is a first key that signs before T9
 // (the transition table's P1, amended 2026-11-03). It is the first key of its role
 // of a provider named a signer that serves nothing, and it signs from its first
@@ -1096,6 +1133,13 @@ func (l *ZoneKeyLifecycle) Tick() error {
 	fail := func(keyid uint16, what string, err error) {
 		l.logf("key lifecycle: a tick step failed; the key waits for the next tick", "zone", l.Zone, "keyid", keyid, "step", what, "err", err)
 		errs = append(errs, err)
+	}
+	if err := l.startOverLocked(all); err != nil {
+		l.logf("key lifecycle: a joiner's keys could not start over; next tick", "zone", l.Zone, "err", err)
+		errs = append(errs, err)
+	}
+	if all, err = l.rows(); err != nil {
+		return err
 	}
 	// another provider's key whose row appeared since its provider's word
 	// came gets its ds now (#58)

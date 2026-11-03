@@ -95,6 +95,8 @@ func TestTransitionTableMatchesTheDocument(t *testing.T) {
 		{"T15", "*", "*", EvRestart},
 		{"T18", KeyStateStandby, KeyStateStandby, EvDSPresent},
 		{"T19", KeyStateActive, KeyStateRetired, EvAlgSuperseded},
+		{"T20", KeyStateActive, KeyStateMpdist, EvStartOver},
+		{"T20'", KeyStateStandby, KeyStateMpdist, EvStartOver},
 	}
 	if len(doc) != len(KeyLifecycleTable) {
 		t.Errorf("the table has %d rows, the document %d", len(KeyLifecycleTable), len(doc))

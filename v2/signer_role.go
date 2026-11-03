@@ -187,6 +187,7 @@ func (conf *Config) handedOtherwiseMeanwhile(mpzd *MPZoneData, mp *MultiProvider
 func (conf *Config) tookRole(zone string) {
 	if e := conf.InternalMp.KeyLifecycle; e != nil {
 		e.TakeConfiguredZones()
+		e.startOver(zone)
 	}
 }
 

@@ -58,6 +58,9 @@ const (
 	// TTL, so no validator holds a DS RRset with it any more (the withdrawal
 	// wait of an algorithm rollover, T10b).
 	EvDSExpired KeyEvent = "ds-expired"
+	// EvStartOver is E16: this provider's keys-step of its joining began, and
+	// nothing says this key has propagated since (plan S18b, reading 20).
+	EvStartOver KeyEvent = "start-over"
 )
 
 // The states, as the keystore names them. tdns's own names are reused where
@@ -316,6 +319,8 @@ var KeyLifecycleTable = []Transition{
 		}
 		return z.OldAlgKSKLeaving || (!z.PolicyAlgActiveSince.IsZero() && !z.Now.Before(z.PolicyAlgActiveSince.Add(z.SigLifetime)))
 	}, KeyStateRetired, "the old algorithm's ZSK leaves last (O4): once a ZSK of the policy's algorithm signs and no KSK of another algorithm than the policy's does; after a combined roll that is the old KSK's retirement (T10b: its DS gone for the DS TTL), in a ZSK-only roll a signature lifetime after the new ZSK began signing (the drain of tdns's relaxed roll); it retires as on T10"},
+	{"T20", KeyStateActive, EvStartOver, nil, KeyStateMpdist, "a joiner's key not published since its keys' step began (made by tdns as it acted by its own copy, or left from an earlier time) starts over: the distribution again, ds=0, and T3, T8 and T9 say what they say of any key; it goes on signing"},
+	{"T20'", KeyStateStandby, EvStartOver, nil, KeyStateMpdist, "as T20"},
 }
 
 // Next applies the table to one key: the state after the event, and whether

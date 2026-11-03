@@ -13,9 +13,11 @@
  *     sets do not name, and a rejected key waits for its operator. Its key machine
  *     makes its first keys (which a hold lets it: a role with no active key gets
  *     one), which sign from the start, and distributes them; its signer starts
- *     signing. The step waits until its key states show a KSK and a ZSK published,
- *     which needs every other signer to have applied them, and until its signer
- *     says it signs.
+ *     signing. Keys it already holds start over (T20): tdns's, made as it acted by
+ *     its own copy, or left from an earlier time. Nothing says those have
+ *     propagated, and an active key would read as if they had. The step waits until
+ *     its key states show a KSK and a ZSK published, which needs every other signer
+ *     to have applied them, and until its signer says it signs.
  *  2. Its DS. It enters DSSigners. Its KSK's ds=1, set once the DNSKEY RRset has
  *     propagated (T8), puts its DS in the DS set, the leader syncs under
  *     parentsync=agent, and the step waits until the parent serves it, whoever put
@@ -176,7 +178,7 @@ func signerAddStepsOf(joiner Provider, first bool) []plannedStep {
 // first step, h without itself in KeySigners and KeyConfirmers, since its signer
 // would make its first keys at once and some other signer may not hold the step
 // yet. It is handed them at the next step, which the leader takes once every
-// voting member holds this one.
+// voting member holds this one, marked so that keys it already holds start over.
 func (conf *Config) forOwnSigner(zone string, h *ActingHandover) *ActingHandover {
 	mp := conf.MpConfig()
 	in, ok := conf.InternalMp.Instructions.reconcileInputs(zone)
@@ -184,7 +186,15 @@ func (conf *Config) forOwnSigner(zone string, h *ActingHandover) *ActingHandover
 		return h
 	}
 	id, part, add := signerAddOf(in.step.InstrStep)
-	if !add || part != signerAddAccept || !core.EqualNames(id, mp.Identity) {
+	if !add || !core.EqualNames(id, mp.Identity) {
+		return h
+	}
+	if part == signerAddMint {
+		c := *h
+		c.Joining = true
+		return &c
+	}
+	if part != signerAddAccept {
 		return h
 	}
 	out := func(set []Provider) []Provider {
