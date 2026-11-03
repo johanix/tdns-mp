@@ -1237,8 +1237,10 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 						}
 					} else if reason, rejected := rejectedMap[rrStr]; rejected {
 						setConfirmation(tr, "rejected", reason)
-						tr.State = RRStateRejected
-						tr.Reason = reason
+						if !nonVotingMember(detail.Zone, AgentId(source)) { // holds no record's state (allRecipientsConfirmed)
+							tr.State = RRStateRejected
+							tr.Reason = reason
+						}
 						tr.UpdatedAt = now
 						matched++
 					}
@@ -1257,11 +1259,13 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 						}
 					} else if reason, rejected := rejectedMap[rrStr]; rejected {
 						setConfirmation(tr, "rejected", reason)
-						tr.State = RRStateAccepted
-						tr.Reason = fmt.Sprintf("delete rejected: %s", reason)
 						tr.UpdatedAt = now
 						matched++
-						lgEngine.Warn("delete rejected for RR", "source", source, "rr", rrStr, "reason", reason)
+						if !nonVotingMember(detail.Zone, AgentId(source)) { // holds no record's state (allRecipientsConfirmed)
+							tr.State = RRStateAccepted
+							tr.Reason = fmt.Sprintf("delete rejected: %s", reason)
+							lgEngine.Warn("delete rejected for RR", "source", source, "rr", rrStr, "reason", reason)
+						}
 					}
 
 				case RRStateAccepted:

@@ -271,7 +271,9 @@ func (conf *Config) distributeCsync(ctx context.Context, zone string, csync *dns
 // recipient's final word that it failed or refuses, with nothing said of
 // the record (its zone is not there, it could not process the message), is
 // booked for no record by the engine; it is a rejection all the same, and
-// that recipient will not be heard again.
+// that recipient will not be heard again. What a member with no vote rejects
+// decides nothing (design 4): it fails no sync, and one that answered with
+// nothing said of the record is waited for up to the time-out.
 func (conf *Config) delegationCsyncProgress(ctx context.Context, zdr *ZoneDataRepo, zonename ZoneName, detail *ConfirmationDetail) {
 	zone := string(zonename)
 	c := &conf.InternalMp.delegationSyncChains
@@ -295,12 +297,14 @@ func (conf *Config) delegationCsyncProgress(ctx context.Context, zdr *ZoneDataRe
 		case "", "pending":
 			awaited = append(awaited, r)
 		case "rejected":
-			rejectedBy, reason = r, got.Reason
+			if !nonVotingMember(zonename, AgentId(r)) {
+				rejectedBy, reason = r, got.Reason
+			}
 		}
 	}
 	sort.Strings(awaited)
 	if detail != nil && detail.DistributionID == tr.DistributionID && (detail.Status == "FAILED" || detail.Status == "REJECTED") &&
-		rejectedBy == "" && slices.Contains(awaited, detail.Source) {
+		rejectedBy == "" && slices.Contains(awaited, detail.Source) && !nonVotingMember(zonename, AgentId(detail.Source)) {
 		rejectedBy, reason = detail.Source, "its final confirmation was "+detail.Status+" and named no record"
 		if detail.Message != "" {
 			reason = detail.Message
