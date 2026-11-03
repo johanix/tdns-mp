@@ -702,8 +702,7 @@ func TestAMemberThatKnowsNoLeaderKeepsAWithdrawal(t *testing.T) {
 
 // The leader's withdrawal is done once every recipient has confirmed it,
 // but a member with no role that has not, after the time-out.
-func TestWithdrawalDoneReadsEveryRecipient(t *testing.T) {
-	t.Skip("211-demo: #352 (a withdrawal waits for a member with no role up to the time-out) and #371 (a member with no vote holds nothing past it) meet here: withdrawalDone is true before the time-out; for the owners of the two PRs to settle")
+func TestAWithdrawalWaitsForTheVotersAlone(t *testing.T) {
 	r := newReceiveRig(t, "done.withdraw.example.")
 	ar := r.conf.InternalMp.AgentRegistry
 	for _, a := range []AgentId{roleB, roleN} {
@@ -711,8 +710,6 @@ func TestWithdrawalDoneReadsEveryRecipient(t *testing.T) {
 	}
 	r.heldForN(r.n, time.Now(), "ns1.n.example.")
 	r.leads(roleA)
-	tm := r.conf.InternalMp.MPTransport
-	tm.noRoleTimeout = time.Hour // the test ends the wait itself
 	distID, err := r.conf.sendWithdrawal(r.zdr, ZoneName(r.zone), roleN, "NS")
 	if err != nil {
 		t.Fatal(err)
@@ -720,7 +717,7 @@ func TestWithdrawalDoneReadsEveryRecipient(t *testing.T) {
 	zone := ZoneName(r.zone)
 	expected := r.zdr.Tracking[zone][roleN][dns.TypeNS].Tracked[0].ExpectedRecipients
 	if len(expected) != 3 {
-		t.Fatalf("the recipients the withdrawal waits for: %v, want the combiner, b and n", expected)
+		t.Fatalf("the recipients of the withdrawal: %v, want the combiner, b and n", expected)
 	}
 	confirm := func(source string) {
 		r.zdr.ProcessConfirmation(&ConfirmationDetail{DistributionID: distID, Zone: zone, Source: source, Status: "SUCCESS"}, r.conf.InternalMp.MsgQs)
@@ -730,12 +727,8 @@ func TestWithdrawalDoneReadsEveryRecipient(t *testing.T) {
 		t.Fatal("done before b confirmed")
 	}
 	confirm(roleB)
-	if r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
-		t.Fatal("done before the time-out for n, which has no role")
-	}
-	tm.noRoleTimeout = time.Nanosecond // the time-out has passed
 	if !r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
-		t.Error("not done after the time-out for n")
+		t.Fatal("not done with b's word: n has no vote")
 	}
 	confirm(roleN)
 	if got := r.nsOf(roleN); len(got) != 0 {
@@ -746,8 +739,7 @@ func TestWithdrawalDoneReadsEveryRecipient(t *testing.T) {
 // An auditor that has not confirmed is waited for up to the time-out, as a
 // member with no role is (design 4, amended 2026-11-02), and then the leader
 // goes on: one that cannot be reached does not hold a removal's step for good.
-func TestAWithdrawalWaitsForAnAuditorUpToTheTimeOut(t *testing.T) {
-	t.Skip("211-demo: #352 (a withdrawal waits for an auditor up to the time-out) and #371 (a member with no vote holds nothing past it) meet here: withdrawalDone is true before the time-out; for the owners of the two PRs to settle")
+func TestAWithdrawalDoesNotWaitForAnAuditor(t *testing.T) {
 	r := newReceiveRig(t, "auditor.done.withdraw.example.")
 	ar := r.conf.InternalMp.AgentRegistry
 	for _, a := range []AgentId{roleB, roleN} {
@@ -756,22 +748,25 @@ func TestAWithdrawalWaitsForAnAuditorUpToTheTimeOut(t *testing.T) {
 	r.heldForN(r.n, time.Now(), "ns1.n.example.")
 	r.leads(roleA)
 	activeAs(t, r.store, r.zone, freezeAt(t, 42, "v", "a,b", "n")) // n an auditor
-	tm := r.conf.InternalMp.MPTransport
-	tm.noRoleTimeout = time.Hour // the test ends the wait itself
 	distID, err := r.conf.sendWithdrawal(r.zdr, ZoneName(r.zone), roleN, "NS")
 	if err != nil {
 		t.Fatal(err)
 	}
 	zone := ZoneName(r.zone)
-	for _, source := range []string{freezeCombiner, roleB} {
-		r.zdr.ProcessConfirmation(&ConfirmationDetail{DistributionID: distID, Zone: zone, Source: source, Status: "SUCCESS"}, r.conf.InternalMp.MsgQs)
+	if expected := r.zdr.Tracking[zone][roleN][dns.TypeNS].Tracked[0].ExpectedRecipients; !slices.Contains(expected, string(roleN)) {
+		t.Errorf("the auditor is not sent the withdrawal: %v", expected)
 	}
+	answer := func(source, status string) {
+		r.zdr.ProcessConfirmation(&ConfirmationDetail{DistributionID: distID, Zone: zone, Source: source, Status: status}, r.conf.InternalMp.MsgQs)
+	}
+	answer(freezeCombiner, "SUCCESS")
 	if r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
-		t.Fatal("done before the time-out for the auditor")
+		t.Fatal("done before b confirmed")
 	}
-	tm.noRoleTimeout = time.Nanosecond // the time-out has passed
+	answer(string(roleN), "REJECTED") // what it says holds nothing either
+	answer(roleB, "SUCCESS")
 	if !r.conf.withdrawalDone(r.zdr, zone, roleN, "NS") {
-		t.Error("not done after the time-out for the auditor")
+		t.Error("not done with the voters' word: the auditor holds it")
 	}
 }
 
