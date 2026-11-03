@@ -37,6 +37,8 @@ type actingStore struct {
 	hdb   *HsyncDB // nil: in memory only
 	zones map[string]*heldHandover
 	owed  map[string]bool // zones whose combine by the hand-over held failed
+	// zones whose _dsboot names the last sync left behind, by key: their names
+	dsbootOwed map[string]string
 }
 
 type heldHandover struct {
@@ -183,6 +185,33 @@ func (s *actingStore) owe(zone string, owed bool) {
 	} else {
 		delete(s.owed, handoverKey(zone))
 	}
+}
+
+// oweDsboot notes whether the last sync of the zone's _dsboot names failed.
+func (s *actingStore) oweDsboot(zone string, owed bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !owed {
+		delete(s.dsbootOwed, handoverKey(zone))
+		return
+	}
+	if s.dsbootOwed == nil {
+		s.dsbootOwed = map[string]string{}
+	}
+	s.dsbootOwed[handoverKey(zone)] = zone
+}
+
+// zonesOwingDsboot are the zones whose last sync of the _dsboot names failed.
+func (s *actingStore) zonesOwingDsboot() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Sorted(maps.Values(s.dsbootOwed))
 }
 
 // take stores a hand-over from the agent by: refused when its records do not

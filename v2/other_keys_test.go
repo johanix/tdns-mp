@@ -101,6 +101,76 @@ func TestAnUpstreamChangeIsAStepThatWaitsForTheServers(t *testing.T) {
 	}
 }
 
+// The join (external review of #365, N1): the provider's own agent leads, its
+// parts and every other member hold the upstream's step, and the transition
+// still does not move on, nor does its stamp tell the step held, while its
+// nameservers serve the old upstream's copy. Once they serve the new
+// upstream's, the turn takes the last step.
+func TestAnUpstreamsStepHoldsTheTransitionUntilItsServersServe(t *testing.T) {
+	const zone = "turn.upstream.example."
+	r := newReconcileRig(t, zone, roleA)
+	records := func(upstream string) []string {
+		return []string{`3600 IN HSYNC3 ON a ` + roleA + ` ` + upstream, `3600 IN HSYNC3 ON b ` + roleB + ` .`, `3600 IN HSYNC3 ON n ` + roleN + ` .`}
+	}
+	const param = `servers="a,b,n" signers="b,n"`
+	r.n, r.v = jAt(t, 41, param, records("b")...), jAt(t, 42, param, records("n")...)
+	if rs := judgeTransition(r.n, r.v); len(rs) > 0 {
+		t.Fatalf("the transition is refused: %v", rs)
+	}
+	knownAs(t, r.store, zone, r.n)
+	r.agree()
+	r.hear(roleN, r.agreeing(), true)
+	r.thawNow()
+
+	r.conf.MpConfig().Local.Nameservers = srNameservers
+	r.conf.InternalMp.transfers.start = func(check func()) { check() }
+	key, priv := signingKey(t, zone)
+	nod := tdns.NewOwnerData(zone)
+	nod.RRtypes.Set(dns.TypeDNSKEY, core.RRset{RRs: []dns.RR{key}})
+	ar, _ := NewAgentRepo()
+	ar.Set(roleN, nod)
+	zdr, err := NewZoneDataRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	zdr.Repo.Set(ZoneName(zone), ar)
+	r.conf.InternalMp.ZoneDataRepo = zdr
+	old, oldPriv := signingKey(t, zone)
+	serving(t, soa(t, zone, 9, old, oldPriv), nil)
+
+	everyMemberHolds := func() {
+		r.partsTake()
+		r.holdsToo(roleB)
+		r.holdsToo(roleN)
+	}
+	everyMemberHolds()
+	r.turn(time.Now())
+	st, ok := r.step()
+	if !ok || !slices.Equal(st.Taken, []string{upstreamKey + roleA}) {
+		t.Fatalf("the upstream's step was not taken: %+v", st)
+	}
+
+	everyMemberHolds()
+	r.turn(time.Now())
+	if got, _ := r.step(); got.Number != st.Number {
+		t.Fatalf("the transition moved on to %+v while the nameservers serve the old upstream's copy", got)
+	}
+	if r.own().StepHeld {
+		t.Error("the stamp tells the step held while the nameservers serve the old upstream's copy")
+	}
+
+	r.conf.InternalMp.transfers.zones[canonicalName(zone)].at = time.Now().Add(-transferRecheck)
+	serving(t, soa(t, zone, 9, key, priv), nil)
+	if !r.own().StepHeld {
+		t.Error("the stamp does not tell the step held once the nameservers serve the new upstream's copy")
+	}
+	r.turn(time.Now())
+	got, ok := r.step()
+	if !ok || got.Number != st.Number+1 || got.Taken[len(got.Taken)-1] != lastStepKey {
+		t.Errorf("the last step was not taken: number %d of %d, taken %v", got.Number, got.Of, got.Taken)
+	}
+}
+
 // The status: every agent says whose nameservers the step waits for; the
 // provider's own says at once what its operator must point where, since
 // nothing moves until it does; nothing once held.
@@ -544,6 +614,45 @@ func TestADsbootTypeNoLongerAllowedIsWithdrawn(t *testing.T) {
 	}
 	if got := all[consentProviderZone][consentAgent][dsbootOwnerName(zone, consentNS1)][dns.TypeCDNSKEY].RRs; len(got) != 0 {
 		t.Errorf("the CDNSKEY no longer allowed is in the store a restart loads: %v", got)
+	}
+}
+
+// An update its _dsboot names could not follow (external review of #365, S1)
+// stands: it is held and served, so it is confirmed. The names lag, and with
+// no further update or hand-over the combiner's message loop brings them to
+// the apex.
+func TestADsbootSyncThatFailedOnAnUpdateIsTriedAgain(t *testing.T) {
+	const zone = "retry.dsboot.example."
+	const params = `servers="alpha" signers="alpha" nsmgmt="agent" parentsync="agent" pubcds`
+	d := newDsbootCombiner(t, zone, params)
+	d.hand(params, 1, false, true)
+	d.cds(okCDS)
+	if got := d.served(consentNS1, dns.TypeCDS); len(got) != 1 || !strings.Contains(got[0], "12345") {
+		t.Fatalf("the CDS before the update: %v", got)
+	}
+
+	prov, _ := Zones.Get(consentProviderZone)
+	prov.ZoneStore = tdns.XfrZone // its publish fails
+	d.cds(okCDSRolled)            // fails the test unless confirmed ok
+	store := actingHeld.Load()
+	if got := store.zonesOwingDsboot(); !slices.Equal(got, []string{zone}) {
+		t.Fatalf("the zones owing their names: %v", got)
+	}
+
+	prov.ZoneStore = tdns.MapZone
+	if got := d.served(consentNS1, dns.TypeCDS); len(got) != 1 || !strings.Contains(got[0], "12345") {
+		t.Errorf("the CDS the publish that failed left: %v", got)
+	}
+	saved := dsbootRetryInterval
+	dsbootRetryInterval = 20 * time.Millisecond
+	t.Cleanup(func() { dsbootRetryInterval = saved })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); CombinerMsgHandler(ctx, d.conf, &MsgQs{}, nil, nil) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitUntil(t, "the combiner did not try the names again", func() bool { return len(store.zonesOwingDsboot()) == 0 })
+	if got := d.served(consentNS1, dns.TypeCDS); len(got) != 1 || !strings.Contains(got[0], "54321") {
+		t.Errorf("the CDS after the combiner tried again: %v", got)
 	}
 }
 

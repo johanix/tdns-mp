@@ -470,7 +470,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 			mpzd.combinerResyncSignalKeys(req.SenderID, zonename, hdb)
 			if resp.DataChanged {
 				if err := mpzd.syncDsbootNames(); err != nil {
-					lgCombiner.Error("the zone's _dsboot names could not follow the update; the next hand-over or update tries again", "zone", zonename, "err", err)
+					lgCombiner.Error("the zone's _dsboot names could not follow the update; tried again every minute", "zone", zonename, "err", err)
 				}
 				nsChanged, kskChanged := detectDelegationChanges(resp)
 				if nsChanged || kskChanged {

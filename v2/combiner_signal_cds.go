@@ -19,6 +19,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -26,6 +27,9 @@ import (
 
 // dsbootTypes are what a _dsboot name carries.
 var dsbootTypes = []uint16{dns.TypeCDS, dns.TypeCDNSKEY}
+
+// dsbootRetryInterval is how often a failed sync of the names goes again.
+var dsbootRetryInterval = time.Minute
 
 // dsbootOwnerPrefix is what every _dsboot name of the zone starts with.
 func dsbootOwnerPrefix(zone string) string {
@@ -77,9 +81,12 @@ func (mpzd *MPZoneData) dsbootWanted(by string) map[string]map[uint16][]dns.RR {
 // when they are already so. Handed nothing, the combiner leaves them as they
 // are (rule 5), and a zone that has not loaded says nothing either way. A
 // provider zone that has not loaded waits for its own first load
-// (serveDsbootNamesAtFirstLoad). The error is one that the next call tries
-// again.
-func (mpzd *MPZoneData) syncDsbootNames() error {
+// (serveDsbootNamesAtFirstLoad). A failure is kept, and the combiner tries
+// again every minute (syncOwedDsbootNames): an update's data is held and
+// served whatever its names do, so no word of the agent's asks for them
+// again, and the next update or hand-over may be long in coming.
+func (mpzd *MPZoneData) syncDsbootNames() (err error) {
+	defer func() { actingHeld.Load().oweDsboot(mpzd.ZoneName, err != nil) }()
 	if GetProviderZoneRRtypes(mpzd.ZoneName) != nil || !mpzd.HasPublishedData() {
 		return nil
 	}
@@ -115,6 +122,25 @@ func (mpzd *MPZoneData) syncDsbootNames() error {
 		lg.Info("the zone's CDS at the _signal names withdrawn", "zone", mpzd.ZoneName)
 	}
 	return errors.Join(errs...)
+}
+
+// syncOwedDsbootNames tries again the zones whose last sync failed. The
+// combiner's message loop runs it, one at a time with the updates and
+// hand-overs that sync too: each brings the names to the apex it reads.
+func syncOwedDsbootNames() {
+	store := actingHeld.Load()
+	for _, zone := range store.zonesOwingDsboot() {
+		mpzd, ok := Zones.Get(zone)
+		if !ok {
+			store.oweDsboot(zone, false)
+			continue
+		}
+		if err := mpzd.syncDsbootNames(); err != nil {
+			lgCombiner.Error("the zone's _dsboot names still do not follow it; tried again in a minute", "zone", zone, "err", err)
+			continue
+		}
+		lgCombiner.Info("the zone's _dsboot names follow it again", "zone", zone)
+	}
 }
 
 // settleDsboot brings one provider zone to what want says for its owners:
@@ -193,7 +219,7 @@ func (mpzd *MPZoneData) serveDsbootNamesAtFirstLoad() {
 			continue
 		}
 		if err := child.syncDsbootNames(); err != nil {
-			lgCombiner.Error("the zone's _dsboot names could not follow the provider zone's first load; the next hand-over or update tries again", "zone", zone, "providerzone", mpzd.ZoneName, "err", err)
+			lgCombiner.Error("the zone's _dsboot names could not follow the provider zone's first load; tried again every minute", "zone", zone, "providerzone", mpzd.ZoneName, "err", err)
 		}
 	}
 	if !mpzd.holdsDsbootNames() {
