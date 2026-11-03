@@ -78,6 +78,37 @@ func imrServingQuery(ctx context.Context, zone, ns string, qtype uint16) (*core.
 	return rrset, nil
 }
 
+// highestServedSerial is the highest SOA serial the nameservers serve for the zone
+// (RFC 1982): what they served, for an upstream's step (other_keys.go). Each
+// must answer.
+func highestServedSerial(ctx context.Context, zone string, nameservers []string) (uint32, error) {
+	if len(nameservers) == 0 {
+		return 0, errors.New("multi-provider.local.nameservers names none")
+	}
+	var highest uint32
+	for i, ns := range nameservers {
+		rrset, err := servingLookup(ctx, zone, ns)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", ns, err)
+		}
+		var soa *dns.SOA
+		if rrset != nil {
+			for _, rr := range rrset.RRs {
+				if s, ok := rr.(*dns.SOA); ok {
+					soa = s
+				}
+			}
+		}
+		if soa == nil {
+			return 0, fmt.Errorf("%s serves no SOA for the zone", ns)
+		}
+		if i == 0 || CompareSerial(soa.Serial, highest) > 0 {
+			highest = soa.Serial
+		}
+	}
+	return highest, nil
+}
+
 // servingChainOK: each of the nameservers serves the zone at an SOA serial
 // no lower than minSerial (RFC 1982), signed by the expected signers: there
 // is an RRSIG over the SOA, and each is by one of keys, in its validity
