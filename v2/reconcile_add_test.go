@@ -6,6 +6,7 @@ package tdnsmp
 import (
 	"context"
 	"crypto"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -233,24 +234,41 @@ func TestANewSignerHasItsStepsFromItsLeader(t *testing.T) {
 
 // Its key machine makes its first keys one at a time, and tdns takes a KSK alone for
 // a CSK: a turn between the two starts nothing, or the zone is signed by its KSK until
-// its next signing. A rig run saw that, at T9.
+// its next signing. Nor does one that sees the ZSK's row before tdns's signing keys
+// hold it, which is what a start reads.
 func TestANewSignerDoesNotStartWithItsKSKAlone(t *testing.T) {
 	const zone = "kskalone.adding.signer.example."
 	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="p2" signers="p2"`)...)
 	r.hand(joinerHandover(t, zone, 6, true), sigUs)
-	gen := func(role string) {
+	mint := func(role string) uint16 {
 		t.Helper()
-		cols := tdns.KeyRowFlags{Pub: true, Sign: true}
-		if _, _, err := r.kdb.GenerateKeypairWithColumns(zone, "test", KeyStateMpdist, dns.ED25519, role, cols, nil); err != nil {
+		pkc, _, err := r.kdb.GenerateKeypairWithColumns(zone, "test", KeyStateCreated, dns.ED25519, role, tdns.KeyRowFlags{}, nil)
+		if err != nil {
 			t.Fatal(err)
 		}
+		return pkc.KeyId
 	}
-	gen("KSK")
+	signs := tdns.KeyRowFlags{Pub: true, Sign: true, DS: sql.NullBool{Valid: true}}
+	ksk := mint("KSK")
+	if err := tdns.UpdateKeyRowFrom(r.kdb, zone, ksk, KeyStateMpdist, KeyStateCreated, signs); err != nil {
+		t.Fatal(err)
+	}
 	r.roleTurn()
 	if len(r.started) != 0 {
 		t.Fatalf("with its KSK alone it started: %v", r.started)
 	}
-	gen("ZSK")
+	zsk := mint("ZSK")
+	// the row says so, and tdns's signing keys do not yet
+	if _, err := r.kdb.DB.Exec(`UPDATE DnssecKeyStore SET state=?, pub=1, sign=1 WHERE zonename=? AND keyid=?`, KeyStateMpdist, zone, int(zsk)); err != nil {
+		t.Fatal(err)
+	}
+	r.roleTurn()
+	if len(r.started) != 0 {
+		t.Fatalf("with its ZSK's row written and not in tdns's signing keys it started: %v", r.started)
+	}
+	if err := tdns.UpdateKeyRowFrom(r.kdb, zone, zsk, KeyStateMpdist, KeyStateMpdist, signs); err != nil {
+		t.Fatal(err)
+	}
 	r.roleTurn()
 	if len(r.started) != 1 {
 		t.Errorf("with its KSK and ZSK, started %v, want one start", r.started)
@@ -1965,6 +1983,14 @@ func TestAJoinersWaitDropsBelowItsCopyOnlyOnceEveryServerHasAnswered(t *testing.
 	}
 	if got := look(map[string]time.Duration{p2: 5 * time.Minute}); got != 5*time.Minute {
 		t.Errorf("with the other seen in a later look it waits %s, want 5m0s", got)
+	}
+	// a look that can list no server says nothing of them all
+	b.mu.Lock()
+	b.zones[canonicalName(zone)].at = time.Time{}
+	b.mu.Unlock()
+	bare := &MPZoneData{ZoneData: &tdns.ZoneData{ZoneName: zone, ZoneStore: tdns.MapZone, Logger: r.mpzd.Logger, Data: core.NewNameMap[tdns.OwnerData]()}}
+	if _, whole, looked := b.largest(bare); whole || !looked {
+		t.Errorf("no server listed: whole %v, looked %v, want it not whole", whole, looked)
 	}
 }
 

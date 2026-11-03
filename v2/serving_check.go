@@ -260,7 +260,8 @@ func (b *servedKeysBook) largest(mpzd *MPZoneData) (ttl time.Duration, whole, lo
 				l.served[canonicalName(ns)] = true
 			}
 			missing := slices.DeleteFunc(silent, func(ns string) bool { return l.served[canonicalName(ns)] })
-			l.whole = len(l.served) > 0 && len(missing) == 0
+			// a look that could list no server says nothing of them all
+			l.whole = len(served)+len(silent) > 0 && len(l.served) > 0 && len(missing) == 0
 			grew, warn := l.whole && (!wasWhole || l.ttl > before), !l.whole && !l.said
 			l.said = l.said || warn
 			now := l.ttl
