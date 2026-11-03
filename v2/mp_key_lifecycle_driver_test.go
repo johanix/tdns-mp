@@ -30,23 +30,24 @@ func (c *fakeClock) Advance(d time.Duration) {
 }
 
 type fakeWire struct {
-	mu        sync.Mutex
-	signers   []string
-	dist      []uint16        // Distribute calls, in order, and the resends of a key
-	removals  []uint16        // DistributeRemoval calls, and the resends of a removal
-	resends   []uint16        // Resend calls, in order (#256)
-	resentRm  []uint16        // those of resends that were removals
-	parentDS  map[uint16]bool // what the parent serves; absent = not served
-	parentOff bool            // the parent cannot be asked
-	parentTTL time.Duration   // the TTL of the parent's DS RRset (zero: T9's wait ends the tick the DS is seen)
-	stripped  []uint16
-	resigns   int
-	reports   []string
-	ttl       time.Duration
-	changes   int    // KeysChanged calls
-	marks     int    // MarksChanged calls
-	stripErr  error  // what Strip returns
-	onResign  func() // called on Resign: the driver asks for a re-sign right after it writes a key's row to active
+	mu            sync.Mutex
+	signers       []string
+	dist          []uint16        // Distribute calls, in order, and the resends of a key
+	removals      []uint16        // DistributeRemoval calls, and the resends of a removal
+	resends       []uint16        // Resend calls, in order (#256)
+	resentRm      []uint16        // those of resends that were removals
+	parentDS      map[uint16]bool // what the parent serves; absent = not served
+	parentOff     bool            // the parent cannot be asked
+	signsAtNaming bool            // SignsAtNaming: named a signer, it serves nothing
+	parentTTL     time.Duration   // the TTL of the parent's DS RRset (zero: T9's wait ends the tick the DS is seen)
+	stripped      []uint16
+	resigns       int
+	reports       []string
+	ttl           time.Duration
+	changes       int    // KeysChanged calls
+	marks         int    // MarksChanged calls
+	stripErr      error  // what Strip returns
+	onResign      func() // called on Resign: the driver asks for a re-sign right after it writes a key's row to active
 }
 
 func newFakeWire(signers ...string) *fakeWire {
@@ -131,6 +132,7 @@ func (w *fakeWire) Resign(zone string) {
 }
 func (w *fakeWire) KeysChanged(zone string)                           { w.mu.Lock(); defer w.mu.Unlock(); w.changes++ }
 func (w *fakeWire) MarksChanged(zone string)                          { w.mu.Lock(); defer w.mu.Unlock(); w.marks++ }
+func (w *fakeWire) SignsAtNaming(zone string) bool                    { return w.signsAtNaming }
 func (w *fakeWire) ServedDnskeyTTL(zone string) (time.Duration, bool) { return w.ttl, true }
 func (w *fakeWire) Report(zone string, keyid uint16, what string) {
 	w.mu.Lock()
@@ -761,5 +763,118 @@ func TestDriverExpectsTheSignersOnlyOnceTheyAreFollowed(t *testing.T) {
 	}
 	if r.l.Expects([]string{"p2", "p3"}) {
 		t.Error("a SignersChanged that failed says the distributions follow the set")
+	}
+}
+
+// A provider named a signer that serves nothing: its first key of each role signs
+// from its first distribution and goes on through T3, T8 and T9, which say what the
+// others have applied and what the parent serves (the table's P1, amended
+// 2026-11-03). Its DS still waits for T8. A later key of the role does not sign, and
+// a provider that serves signs nothing before T9.
+func TestANewSignersFirstKeysSignFromTheStart(t *testing.T) {
+	signs := func(r *driverRig, state, role string) []uint16 {
+		r.t.Helper()
+		inv, err := tdns.GetKeyInventory(r.kdb, r.l.Zone)
+		if err != nil {
+			r.t.Fatal(err)
+		}
+		var out []uint16
+		for _, it := range inv {
+			if it.State == state && roleOf(it.Flags) == role && it.Sign {
+				out = append(out, it.KeyTag)
+			}
+		}
+		return out
+	}
+	d := newDriverRig(t, "named.adding.example.", driverPolicy)
+	d.wire.signsAtNaming = true
+	d.wire.signers = []string{"p2"}
+	d.wire.parentDS[0] = true // the parent serves a DS of another signer's
+	d.l.SetHold(true)
+	tick := func(what string) {
+		t.Helper()
+		if err := d.l.Tick(); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+	}
+	tick("named")
+	// a key that signs before its state says so: tdns's check reports it (I9)
+	for _, v := range tdns.CheckKeyRowInvariants(d.kdb, d.l.Zone) {
+		if v.Invariant != "I9" {
+			t.Errorf("named: %v", v)
+		}
+	}
+	ksks := d.keysIn(KeyStateMpdist, "KSK")
+	if len(ksks) != 1 || len(signs(d, KeyStateMpdist, "KSK")) != 1 || len(signs(d, KeyStateMpdist, "ZSK")) != 1 {
+		t.Fatalf("named, its KSKs in mpdist are %v, signing KSK %v, ZSK %v; want one of each signing", ksks, signs(d, KeyStateMpdist, "KSK"), signs(d, KeyStateMpdist, "ZSK"))
+	}
+	for _, id := range append(ksks, d.keysIn(KeyStateMpdist, "ZSK")...) {
+		if _, _, err := d.l.Confirm(id, "p2", "applied", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := signs(d, KeyStatePublished, "KSK"); len(got) != 1 || got[0] != ksks[0] {
+		t.Fatalf("every signer applied it, and the KSKs published and signing are %v", got)
+	}
+	cols, err := d.l.columnsOf(ksks[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cols.DS.Bool {
+		t.Error("published, its KSK has ds=1 (P2)")
+	}
+	d.clock.Advance(driverPolicy.PropagationDelay + d.wire.ttl + time.Second)
+	tick("propagated")
+	if got := signs(d, KeyStateStandby, "KSK"); len(got) != 1 {
+		t.Fatalf("propagated, the KSKs standby and signing are %v", got)
+	}
+	if cols, err = d.l.columnsOf(ksks[0]); err != nil || !cols.DS.Bool {
+		t.Errorf("standby, its KSK has ds=%v (%v), want 1", cols.DS.Bool, err)
+	}
+	d.wire.parentDS[ksks[0]] = true
+	d.wire.parentTTL = time.Hour
+	tick("its DS served")
+	d.clock.Advance(time.Hour + time.Second)
+	tick("the DS TTL passed")
+	if s := d.state(ksks[0]); s != KeyStateActive {
+		t.Fatalf("the DS TTL passed, its KSK is %s", s)
+	}
+	if got := signs(d, KeyStateActive, "KSK"); len(got) != 1 {
+		t.Errorf("active, the KSKs signing are %v", got)
+	}
+
+	// a later key of a role does not sign beside the first (P5)
+	l := driverPolicy
+	l.StandbyZSK = 2
+	two := newDriverRig(t, "later.adding.example.", l)
+	two.wire.signsAtNaming = true
+	two.wire.parentDS[0] = true
+	for i := range 3 {
+		if err := two.l.Tick(); err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+	}
+	inv, err := tdns.GetKeyInventory(two.kdb, two.l.Zone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zsks, signing := 0, 0
+	for _, it := range inv {
+		if roleOf(it.Flags) == "ZSK" {
+			zsks++
+			if it.Sign {
+				signing++
+			}
+		}
+	}
+	if zsks < 2 || signing != 1 {
+		t.Errorf("%d ZSKs, %d of them signing: want more than one, and one signing", zsks, signing)
+	}
+
+	// a provider that serves: only T9 sets sign (P1)
+	o := newDriverRig(t, "serves.adding.example.", driverPolicy)
+	o.tick("minted")
+	if got := append(signs(o, KeyStateMpdist, "KSK"), append(signs(o, KeyStatePublished, "KSK"), signs(o, KeyStateStandby, "KSK")...)...); len(got) != 0 {
+		t.Errorf("a provider that serves signs with %v before T9", got)
 	}
 }

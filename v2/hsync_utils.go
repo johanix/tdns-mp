@@ -1555,6 +1555,7 @@ func (mpzd *MPZoneData) signerSwitch(incoming *tdns.ZoneData, others []string, m
 	// SetRuntimeOption, which takes it.
 	mpzd.Lock()
 	shouldSign := mpzd.MP.MPdata.WeAreSigner
+	serves := has(mpzd.MP.MPdata.Sets.Servers, mpzd.MP.MPdata.OurLabel)
 	holdsKeys := mpzd.MP.MPdata.WeHoldKeys
 	otherSigners := mpzd.MP.MPdata.OtherSigners
 	signs := mpzd.DnssecPolicy != nil && mpzd.Options[tdns.OptInlineSigning]
@@ -1565,8 +1566,10 @@ func (mpzd *MPZoneData) signerSwitch(incoming *tdns.ZoneData, others []string, m
 		was = incoming
 	}
 	// A first load signs, unless its copy carries signatures: tdns takes those for
-	// the zone's own and leaves them, while StartSigning replaces them.
-	on := shouldSign && (signs || !loaded && !apexSigned(incoming))
+	// the zone's own and leaves them, while StartSigning replaces them. Nor where it
+	// serves nothing: tdns would make it keys that are active at once, and its first
+	// keys are its key machine's (signerRoleTurn).
+	on := shouldSign && (signs || !loaded && serves && !apexSigned(incoming))
 	if on && !was.Options[tdns.OptInlineSigning] {
 		lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", mpzd.ZoneName)
 	} else if !shouldSign && was.Options[tdns.OptInlineSigning] {
@@ -1623,7 +1626,7 @@ func (mpzd *MPZoneData) signerSwitch(incoming *tdns.ZoneData, others []string, m
 		changed, err = mpzd.syncForeignDNSKEYs(incoming, keepsRows, others)
 	case !keepsRows:
 		changed, err = mpzd.syncForeignDNSKEYs(nil, false, nil)
-	case !shouldSign:
+	case !shouldSign || !signs:
 		// no refresh need come before it signs: from the copy it relays
 		labels, _ := otherSignerLabels(mpzd, mp)
 		changed, err = mpzd.syncForeignDNSKEYs(mpzd.ZoneData, true, labels)

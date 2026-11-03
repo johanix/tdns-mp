@@ -50,8 +50,7 @@ type signerRig struct {
 	store  *actingStore
 	mu     sync.Mutex
 	pushed int // inventories pushed to the agent
-	// the signer's StartSigning: the serials it was started above, and what it
-	// answers
+	// the signer's StartSigning: a mark for each start, and what it answers
 	started  []uint32
 	startErr error
 	onStart  func() // runs inside the start, before it switches the option on
@@ -94,9 +93,9 @@ func newSignerRig(t *testing.T, zone string, records ...string) *signerRig {
 	}
 	t.Cleanup(func() { pushSignerInventory = prev })
 	prevStart := startSigning
-	startSigning = func(_ context.Context, zd *tdns.ZoneData, minSerial uint32) error {
+	startSigning = func(_ context.Context, zd *tdns.ZoneData) error {
 		r.mu.Lock()
-		r.started = append(r.started, minSerial)
+		r.started = append(r.started, 0)
 		err, during := r.startErr, r.onStart
 		r.mu.Unlock()
 		if err != nil {

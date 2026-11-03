@@ -4,7 +4,6 @@
 package tdnsmp
 
 import (
-	"bytes"
 	"context"
 	"crypto"
 	"encoding/json"
@@ -94,7 +93,7 @@ func (r *signerAddRig) at(st InstrStep, part string) {
 }
 
 // keys has this provider's signer say its KSK and ZSK are in state, with ds set
-// on a KSK at standby or later.
+// on a KSK at standby or later, and that it signs, as it does from its keys' step.
 func (r *signerAddRig) keys(ksk, zsk string, marks ...func(*KeyInventorySnapshot)) (kskTag uint16) {
 	r.t.Helper()
 	yes, no := true, false
@@ -105,7 +104,7 @@ func (r *signerAddRig) keys(ksk, zsk string, marks ...func(*KeyInventorySnapshot
 		return &no
 	}
 	k, z := invItem(r.t, r.zone, 257, ksk, dsOf(ksk)), invItem(r.t, r.zone, 256, zsk, &no)
-	snap := &KeyInventorySnapshot{Zone: r.zone, Inventory: []KeyInventoryItem{k, z}, Received: time.Now()}
+	snap := &KeyInventorySnapshot{Zone: r.zone, Inventory: []KeyInventoryItem{k, z}, Received: time.Now(), Signs: true}
 	for _, m := range marks {
 		m(snap)
 	}
@@ -119,7 +118,7 @@ func (r *signerAddRig) parentLooks() {
 	r.conf.InternalMp.signerAdds.mu.Lock()
 	defer r.conf.InternalMp.signerAdds.mu.Unlock()
 	for _, l := range r.conf.InternalMp.signerAdds.zones {
-		l.parentAt, l.ownAt, l.servedAt = time.Time{}, time.Time{}, time.Time{}
+		l.parentAt = time.Time{}
 	}
 }
 
@@ -188,7 +187,7 @@ func TestALeaderPlansTheStepsOfASignerWithNoRoleYet(t *testing.T) {
 
 // A new signer does not vote, so it has its steps from its leader, as any member
 // does, and at its own agent they do what they do at a leader that joins: its
-// combiner holds the key sets at once, its signer at the step after.
+// combiner holds the key sets at once, its signer at the step after, with Signing.
 func TestANewSignerHasItsStepsFromItsLeader(t *testing.T) {
 	r := newSignerAddRig(t, "led.adding.example.", "owner")
 	r.lead(roleB, time.Now().Add(time.Hour))
@@ -220,29 +219,83 @@ func TestANewSignerHasItsStepsFromItsLeader(t *testing.T) {
 	if h := r.wantedBy(r.signer); h == nil || has(h.Sets.KeySigners, "a") {
 		t.Errorf("the signer is handed %+v at its first step, want the step without a", h)
 	}
+	sets.Signing = addProvider(sets.Signing, joiner)
 	r.hear(roleB, r.leaderStep(2, sets, []string{key(signerAddAccept), key(signerAddMint)}), true)
 	r.conf.thawTurn(r.zone)
 	if got, ok = r.step(); !ok {
 		t.Fatal("no step held")
 	}
 	r.at(got, signerAddMint)
-	if h := r.wantedBy(r.signer); h == nil || !has(h.Sets.KeySigners, "a") {
-		t.Errorf("the signer is handed %+v at its second step, want a in the key sets", h)
+	if h := r.wantedBy(r.signer); h == nil || !has(h.Sets.KeySigners, "a") || !has(h.Sets.Signing, "a") {
+		t.Errorf("the signer is handed %+v at its second step, want a in the key sets and in Signing", h)
+	}
+}
+
+// tdns signs with the rows that say sign=1: a new signer's first keys, on their way
+// through the machine, sign its zone, its own signatures replacing those of the copy
+// it relayed. That is its signing at its naming, with tdns's real start.
+func TestANewSignerStartsSigningWithItsFirstKeysOnTheirWay(t *testing.T) {
+	const zone = "ontheirway.adding.signer.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="p2" signers="p2"`)...)
+	prev := startSigning
+	startSigning = func(ctx context.Context, zd *tdns.ZoneData) error { return zd.StartSigning(ctx, 0) }
+	t.Cleanup(func() { startSigning = prev })
+	r.hand(joinerHandover(t, zone, 6, true), sigUs)
+	r.e.tickOwned()
+	inv, err := tdns.GetKeyInventory(r.kdb, zone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var zsk uint16
+	for _, it := range inv {
+		if it.State == KeyStateActive || !it.Sign {
+			t.Errorf("its first key %d is %s, sign %v: want it on its way, signing", it.KeyTag, it.State, it.Sign)
+		}
+		if it.Flags&dns.SEP == 0 {
+			zsk = it.KeyTag
+		}
+	}
+	r.roleTurn()
+	if !r.mpzd.Options[tdns.OptInlineSigning] || r.mpzd.Withheld() {
+		t.Fatalf("the option %v, withheld %v: want it signing", r.mpzd.Options[tdns.OptInlineSigning], r.mpzd.Withheld())
+	}
+	soa, err := r.mpzd.GetRRset(zone, dns.TypeSOA)
+	if err != nil || soa == nil {
+		t.Fatalf("no SOA: %v", err)
+	}
+	signed := slices.ContainsFunc(soa.RRSIGs, func(rr dns.RR) bool {
+		sig, ok := rr.(*dns.RRSIG)
+		return ok && sig.KeyTag == zsk
+	})
+	if !signed {
+		t.Errorf("the SOA is signed by %v, not by its first ZSK %d", soa.RRSIGs, zsk)
+	}
+	keys, err := r.mpzd.GetRRset(zone, dns.TypeDNSKEY)
+	if err != nil || keys == nil || len(keys.RRs) != 2 || len(keys.RRSIGs) == 0 {
+		t.Errorf("the DNSKEY RRset: %+v (%v), want its two keys, signed", keys, err)
 	}
 }
 
 // A first load handed Signing, over a copy that carries another's signatures, as
 // from a stanza naming another provider's signer: tdns would take them for the
 // zone's own and leave them, so the zone relays that copy, and it is StartSigning
-// that replaces them (signerRoleTurn). A copy with none signs at its first load.
+// that replaces them (signerRoleTurn). So does one that serves nothing, whose first
+// keys are its key machine's. A copy with none, at a provider that serves, signs at
+// its first load.
 func TestAFirstLoadOverASignedCopyLeavesTheSwitchToStartSigning(t *testing.T) {
 	for _, c := range []struct {
 		name   string
 		signed bool
-	}{{"unsigned", false}, {"signed", true}} {
+		param  string
+		on     bool
+	}{
+		{"unsigned", false, `servers="us,p2" signers="us,p2"`, true},
+		{"signed", true, `servers="us,p2" signers="us,p2"`, false},
+		{"servesnothing", false, `servers="p2" signers="us,p2"`, false},
+	} {
 		t.Run(c.name, func(t *testing.T) {
 			zone := c.name + ".firstcopy.signer.example."
-			records := sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)
+			records := sigRecords(`serial="5" ` + c.param)
 			r := newSignerRig(t, zone, records...)
 			r.hand(handoverFor(t, zone, records...), sigUs)
 			// not loaded yet: nothing published, as the config parse leaves it
@@ -260,113 +313,13 @@ func TestAFirstLoadOverASignedCopyLeavesTheSwitchToStartSigning(t *testing.T) {
 			}
 			incoming := incomingCopy(t, zone, records...)
 			mpzd.MPPreRefresh(incoming, nil, nil, r.conf.MpConfig())
-			if on := incoming.Options[tdns.OptInlineSigning]; on == c.signed {
-				t.Errorf("signed copy %v: its first load has the option %v", c.signed, on)
+			if on := incoming.Options[tdns.OptInlineSigning]; on != c.on {
+				t.Errorf("its first load has the option %v, want %v", on, c.on)
 			}
 			if d := mpzd.MP.MPdata; d == nil || !d.WeAreSigner {
 				t.Errorf("its data is %+v, not that of a signer", d)
 			}
 		})
-	}
-}
-
-// A signer added (design 5.1): its four steps, in order, each taken once every
-// member holds the one before and what it waits for has come. The transition is
-// done only once its servers serve its own signatures, at an SOA serial above the
-// one they served.
-func TestASignerAddIsDoneWhenItsServersServeItsOwnSignatures(t *testing.T) {
-	r := newSignerAddRig(t, "done.adding.example.", "owner").thawed()
-	key, priv := r.ownKSK(t)
-	r.nameserversServe(t, 100, key, nil)
-
-	st := r.next()
-	r.at(st, signerAddAccept)
-	st = r.next()
-	r.at(st, signerAddMint)
-	if st = r.next(); len(st.Taken) != 2 {
-		t.Fatalf("the step went on with no keys published: %+v", st)
-	}
-	tag := r.keys(KeyStatePublished, KeyStatePublished)
-	r.at(r.next(), signerAddDS)
-	r.keys(KeyStateStandby, KeyStateActive)
-	tag = r.keys(KeyStateStandby, KeyStateActive)
-	if st = r.next(); len(st.Taken) != 3 {
-		t.Fatalf("the DS step went on with the parent serving no DS: %+v", st)
-	}
-	r.parent[tag] = true
-	r.parentLooks()
-	r.next() // the look is taken on this turn's wait
-	st = r.next()
-	r.at(st, signerAddCaches)
-	r.keys(KeyStateActive, KeyStateActive)
-	r.partsTake()
-	st = r.next()
-	r.at(st, signerAddOwn)
-	if h := r.wantedBy(r.signer); h == nil || !has(h.Sets.Signing, "a") || h.MinSerial != 100 {
-		t.Fatalf("at its last step the signer is handed %+v, want it signing above serial 100", h)
-	}
-
-	// its signer has not started
-	r.partsTake()
-	if signerAddHolds(r.conf, r.zone, st) {
-		t.Error("held before its signer signs")
-	}
-	r.keys(KeyStateActive, KeyStateActive, func(s *KeyInventorySnapshot) { s.Signs = true })
-	// its nameservers serve the upstream's copy still
-	r.parentLooks()
-	if signerAddHolds(r.conf, r.zone, st) {
-		t.Error("held while its nameservers serve no signature of its own")
-	}
-	// its own signatures, at the serial they served
-	r.nameserversServe(t, 100, key, priv)
-	r.parentLooks()
-	if signerAddHolds(r.conf, r.zone, st) {
-		t.Error("held with its nameservers at the serial they served")
-	}
-	r.nameserversServe(t, 101, key, priv)
-	r.parentLooks()
-	if !signerAddHolds(r.conf, r.zone, st) {
-		t.Error("not held once its nameservers serve its own signatures above the serial they served")
-	}
-	st = r.next()
-	if st.Taken[len(st.Taken)-1] != lastStepKey {
-		t.Fatalf("after its own signatures the step is %+v, want the last", st)
-	}
-	r.partsTake()
-	r.holdsToo(roleB)
-	r.turn(time.Now())
-	if s := r.conf.InternalMp.Instructions.Status(r.zone); s.Phase == PhaseReconciling {
-		t.Errorf("not done after the last step: %+v", s)
-	}
-}
-
-// A signer in signers= that V does not make a server, or whose record still names
-// an upstream, has no servers that are to serve its copy: its signer's signing is
-// its part of its last step.
-func TestASignerWithNoServersOfItsOwnHoldsItsLastStepWhenItSigns(t *testing.T) {
-	r := newSignerAddRig(t, "noservers.adding.example.", "owner")
-	own := InstrStep{Taken: []string{signerAddKey + signerAddOwn + " " + roleA}}
-	for _, c := range []struct {
-		name    string
-		records []string
-		servers string
-	}{
-		{"not a server", freezeRecords, "b"},
-		{"named another upstream", []string{`3600 IN HSYNC3 ON a a.role.example. b`, freezeRecords[1], freezeRecords[2]}, "a,b"},
-	} {
-		in := jAt(t, 42, `servers="`+c.servers+`" signers="a,b"`, c.records...)
-		if servesOwnCopy(in, roleA) {
-			t.Errorf("%s: its servers are to serve its own copy", c.name)
-		}
-	}
-	r.v = jAt(t, 42, `servers="b" signers="a,b" suffix="v"`, freezeRecords...)
-	knownAs(t, r.store, r.zone, r.v)
-	if signerAddHolds(r.conf, r.zone, own) {
-		t.Error("held before its signer signs")
-	}
-	r.keys(KeyStateActive, KeyStateActive, func(s *KeyInventorySnapshot) { s.Signs = true })
-	if !signerAddHolds(r.conf, r.zone, own) {
-		t.Error("not held once it signs")
 	}
 }
 
@@ -385,8 +338,8 @@ func TestAJoinersSignerIsHandedItsKeysAfterEveryMemberHoldsThem(t *testing.T) {
 		t.Errorf("the signer is handed %+v at its first step, want the step without a", h)
 	}
 	r.at(r.next(), signerAddMint)
-	if h := r.wantedBy(r.signer); h == nil || !has(h.Sets.KeySigners, "a") || !has(h.Sets.KeyConfirmers, "a") {
-		t.Errorf("the signer is handed %+v once every member holds it, want a in the key sets", h)
+	if h := r.wantedBy(r.signer); h == nil || !has(h.Sets.KeySigners, "a") || !has(h.Sets.KeyConfirmers, "a") || !has(h.Sets.Signing, "a") {
+		t.Errorf("the signer is handed %+v once every member holds it, want a in the key sets and in Signing", h)
 	}
 }
 
@@ -461,9 +414,8 @@ func TestTheHoldsExemptionCoversOnlyTheStepsKeyWork(t *testing.T) {
 // no more of its role.
 func joinerHandover(t *testing.T, zone string, serial uint32, hold bool) *ActingHandover {
 	t.Helper()
-	h := handoverFor(t, zone, sigRecords(numberedAt(serial)+` servers="us,p2" signers="us,p2"`)...)
-	p2 := []Provider{{Label: "p2", Identity: "agent.p2.example."}}
-	h.Sets.DSSigners, h.Sets.Signing = p2, p2
+	h := handoverFor(t, zone, sigRecords(numberedAt(serial)+` servers="p2" signers="us,p2"`)...)
+	h.Sets.DSSigners = []Provider{{Label: "p2", Identity: "agent.p2.example."}}
 	h.Sets.Hold = hold
 	return h
 }
@@ -591,12 +543,108 @@ func TestASignerAddUnderParentsyncOwnerWaitsForTheOwnersDS(t *testing.T) {
 	r.at(r.next(), signerAddCaches)
 }
 
-// Its own signatures are not asked of it until its DS has been served for the DS
-// TTL: until then its step 3 waits, and its signer is handed no Signing, whatever
-// its keys say; its key machine promotes a KSK only past that wait (T9). A signer
-// handed no Signing starts nothing.
-func TestTheJoinerServesNoOwnSignaturesBeforeItsDSHasBeenServedForTheDSTTL(t *testing.T) {
-	r := newSignerAddRig(t, "ttl.adding.example.", "owner").thawed()
+// A signer added (design 5.1, amended): it signs at its keys' step, and the steps
+// after it say what has propagated. At its keys' step its signer is handed Signing,
+// and the step waits for its keys published and its signer signing. The transition
+// is done only after the DS TTL, with its KSK active (T9).
+func TestASignerAddSignsAtItsKeysAndIsDoneAfterTheCaches(t *testing.T) {
+	r := newSignerAddRig(t, "done.adding.example.", "owner").thawed()
+	st := r.next()
+	r.at(st, signerAddAccept)
+	if h := r.wantedBy(r.signer); h == nil || has(h.Sets.Signing, "a") {
+		t.Errorf("at its first step its signer is handed %+v, want no Signing", h)
+	}
+	st = r.next()
+	r.at(st, signerAddMint)
+	if h := r.wantedBy(r.signer); h == nil || !has(h.Sets.Signing, "a") {
+		t.Errorf("at its keys' step its signer is handed %+v, want Signing", h)
+	}
+	if st = r.next(); len(st.Taken) != 2 {
+		t.Fatalf("the step went on with no keys published: %+v", st)
+	}
+	r.keys(KeyStatePublished, KeyStatePublished, func(s *KeyInventorySnapshot) { s.Signs = false })
+	r.partsTake()
+	if st = r.next(); len(st.Taken) != 2 || signerAddHolds(r.conf, r.zone, st) {
+		t.Fatalf("the step went on with its signer not signing: %+v", st)
+	}
+	if line := signerAddStatus(r.conf, r.zone, heldStep{InstrStep: st}, time.Now()); !strings.Contains(line, "signer to start signing") {
+		t.Errorf("before its signer signs the status says %q", line)
+	}
+	r.keys(KeyStatePublished, KeyStatePublished)
+	r.at(r.next(), signerAddDS)
+	tag := r.keys(KeyStateStandby, KeyStateActive)
+	if st = r.next(); len(st.Taken) != 3 {
+		t.Fatalf("the DS step went on with the parent serving no DS: %+v", st)
+	}
+	r.parent[tag] = true
+	r.parentLooks()
+	r.next() // the look is taken on this turn's wait
+	r.at(r.next(), signerAddCaches)
+	for range 3 {
+		r.at(r.next(), signerAddCaches) // its KSK is standby
+	}
+	r.keys(KeyStateActive, KeyStateActive)
+	st = r.next()
+	if st.Taken[len(st.Taken)-1] != lastStepKey {
+		t.Fatalf("after the caches' time the step is %+v, want the last", st)
+	}
+	r.partsTake()
+	r.holdsToo(roleB)
+	r.turn(time.Now())
+	if s := r.conf.InternalMp.Instructions.Status(r.zone); s.Phase == PhaseReconciling {
+		t.Errorf("not done after the last step: %+v", s)
+	}
+}
+
+// Another agent holds a joiner's step by its parts alone, and its status adds
+// nothing to the leader's view.
+func TestOnlyAJoinersOwnAgentWaitsForItsSigner(t *testing.T) {
+	r := newSignerAddRig(t, "other.adding.example.", "owner")
+	knownAs(t, r.store, r.zone, r.v)
+	r.keys(KeyStatePublished, KeyStatePublished, func(s *KeyInventorySnapshot) { s.Signs = false })
+	other := InstrStep{Taken: []string{signerAddKey + signerAddMint + " " + roleB}}
+	if !signerAddHolds(r.conf, r.zone, other) {
+		t.Error("another provider's step waits for this provider's signer")
+	}
+	if line := signerAddStatus(r.conf, r.zone, heldStep{InstrStep: other}, time.Now()); line != "" {
+		t.Errorf("another provider's step, its status says %q", line)
+	}
+}
+
+// With both roles in one edit the signer's part runs first, and the server's part
+// starts once it is over: its keys have propagated and its DS has been served. It
+// enters Servers only at the last step (Johan's ruling of 2026-11-03).
+func TestBothRolesInOneEditRunTheSignersPartFirst(t *testing.T) {
+	from := jAt(t, 41, `servers="b" signers="b" suffix="n"`, freezeRecords...)
+	to := jAt(t, 42, `servers="a,b" signers="a,b" suffix="n"`, freezeRecords...)
+	if refused := judgeTransition(from, to); len(refused) != 0 {
+		t.Fatalf("refused: %+v", refused)
+	}
+	key := func(part string) string { return signerAddKey + part + " " + canonicalName(roleA) }
+	want := []string{key(signerAddAccept), key(signerAddMint), key(signerAddDS), key(signerAddCaches), serverRoleKey + canonicalName(roleA), lastStepKey}
+	sets := rolesFor(from, from, 0)
+	var got []string
+	for _, st := range planSteps(planView{from: from, to: to, held: sets}) {
+		if st.sets != nil {
+			sets = st.sets(sets)
+		}
+		got = append(got, st.key)
+		if st.key != lastStepKey && has(sets.Servers, "a") {
+			t.Errorf("a serves from %s on", st.key)
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("the steps are %v, want %v", got, want)
+	}
+	if !has(sets.Servers, "a") {
+		t.Errorf("after the last step the sets are %+v", sets)
+	}
+}
+
+// An edit that gives the signer its server role after it, A2's order, cannot
+// overtake: the transition that names it stays open through its caches' time.
+func TestASecondEditWaitsForTheSignersCaches(t *testing.T) {
+	r := newSignerAddRig(t, "second.adding.example.", "owner").thawed()
 	r.at(r.next(), signerAddAccept)
 	r.at(r.next(), signerAddMint)
 	r.keys(KeyStatePublished, KeyStatePublished)
@@ -605,21 +653,28 @@ func TestTheJoinerServesNoOwnSignaturesBeforeItsDSHasBeenServedForTheDSTTL(t *te
 	r.parent[tag] = true
 	r.parentLooks()
 	r.next()
-	serving(t, soa(t, r.zone, 5, nil, nil), nil)
 	r.at(r.next(), signerAddCaches)
-	for range 3 {
-		st := r.next()
-		r.at(st, signerAddCaches)
-		if h := r.wantedBy(r.signer); h == nil || has(h.Sets.Signing, "a") {
-			t.Fatalf("its KSK is standby, and its signer is handed Signing: %+v", h)
-		}
+	w := jAt(t, 43, `servers="a,b,n" signers="a,b" nsmgmt="owner" parentsync="owner" suffix="n"`, freezeRecords...)
+	r.store.Note(r.zone, w, nil)
+	r.at(r.next(), signerAddCaches)
+	if _, ok := r.conf.thawView(r.zone, time.Now()); ok || r.active() != r.v.Serial {
+		t.Errorf("43 is agreed during the caches' time: active %d", r.active())
 	}
 	r.keys(KeyStateActive, KeyStateActive)
-	r.at(r.next(), signerAddOwn)
-	if h := r.wantedBy(r.signer); h == nil || !has(h.Sets.Signing, "a") {
-		t.Errorf("its keys active, and its signer is not handed Signing: %+v", h)
+	if st := r.next(); st.Taken[len(st.Taken)-1] != lastStepKey {
+		t.Fatalf("the step is %+v, want the last", st)
 	}
+	r.partsTake()
+	r.holdsToo(roleB)
+	r.turn(time.Now())
+	if v, ok := r.conf.thawView(r.zone, time.Now()); !ok || v.to != sd(w) {
+		t.Errorf("43 is not agreed after done: %+v %v", v, ok)
+	}
+}
 
+// Its key machine promotes a KSK only past the DS TTL (T9), and a signer handed its
+// keys and no Signing starts nothing.
+func TestAJoinersKSKGoesActiveOnlyPastTheDSTTL(t *testing.T) {
 	// the machine's side of it: a standby KSK with its DS served waits the TTL
 	d := newDriverRig(t, "ttl.machine.adding.example.", driverPolicy)
 	d.l.SetHold(true)
@@ -646,7 +701,9 @@ func TestTheJoinerServesNoOwnSignaturesBeforeItsDSHasBeenServedForTheDSTTL(t *te
 	// and a signer handed its keys and no Signing starts nothing
 	const zone = "ttl.signer.adding.example."
 	sr := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="p2"`)...)
-	sr.hand(joinerHandover(t, zone, 6, true), sigUs)
+	h := joinerHandover(t, zone, 6, true)
+	h.Sets.Signing = h.Sets.DSSigners
+	sr.hand(h, sigUs)
 	sr.roleTurn()
 	if len(sr.started) != 0 || sr.mpzd.Options[tdns.OptInlineSigning] {
 		t.Errorf("handed no Signing it started signing: %v, the option %v", sr.started, sr.mpzd.Options[tdns.OptInlineSigning])
@@ -671,79 +728,10 @@ func TestTheJoinersOperatorEditsAreKeptUntilDone(t *testing.T) {
 	}
 }
 
-// A provider that V makes a signer and a server hears it may switch once its
-// signer signs, at its last step, and not while its keys wait to go active.
-func TestANewSignerAndServerIsNotToldToSwitchBeforeItsKeysAreActive(t *testing.T) {
-	buf := captureLog(t)
-	r := newSignerAddRig(t, "told.adding.example.", "owner").thawed()
-	serving(t, soa(t, r.zone, 5, nil, nil), nil)
-	r.at(r.next(), signerAddAccept)
-	r.at(r.next(), signerAddMint)
-	r.keys(KeyStatePublished, KeyStatePublished)
-	r.at(r.next(), signerAddDS)
-	tag := r.keys(KeyStateStandby, KeyStateActive, func(s *KeyInventorySnapshot) { s.Signs = true })
-	r.parent[tag] = true
-	r.parentLooks()
-	r.next()
-	r.at(r.next(), signerAddCaches)
-	st := r.next()
-	r.at(st, signerAddCaches)
-	if signerAddStatus(r.conf, r.zone, heldStep{InstrStep: st}, time.Now()) != "" || strings.Contains(buf.String(), "may switch") {
-		t.Errorf("told it may switch before its keys are active: %s", buf.String())
-	}
-	r.keys(KeyStateActive, KeyStateActive)
-	st = r.next()
-	r.at(st, signerAddOwn)
-	if strings.Contains(buf.String(), "may switch") {
-		t.Error("told it may switch before its signer signs")
-	}
-	if line := signerAddStatus(r.conf, r.zone, heldStep{InstrStep: st}, time.Now()); !strings.Contains(line, "start signing") {
-		t.Errorf("before its signer signs the status says %q", line)
-	}
-	r.keys(KeyStateActive, KeyStateActive, func(s *KeyInventorySnapshot) { s.Signs = true })
-	signerAddHolds(r.conf, r.zone, st)
-	if !strings.Contains(buf.String(), "may switch") {
-		t.Error("its signer signs, and its operator is not told it may switch")
-	}
-}
-
-// Told once, at the provider's own agent: the log line and the status say it, and
-// the check that follows says nothing more of it.
-func TestItsOperatorIsToldOnce(t *testing.T) {
-	buf := captureLog(t)
-	r := newSignerAddRig(t, "once.adding.example.", "owner")
-	knownAs(t, r.store, r.zone, r.v)
-	own := InstrStep{Taken: []string{signerAddKey + signerAddOwn + " " + roleA}}
-	r.keys(KeyStateActive, KeyStateActive, func(s *KeyInventorySnapshot) { s.Signs = true })
-	serving(t, nil, nil)
-	for range 5 {
-		signerAddHolds(r.conf, r.zone, own)
-	}
-	if n := bytes.Count(buf.Bytes(), []byte("the provider may switch its servers to its own signer")); n != 1 {
-		t.Errorf("told %d times, want once:\n%s", n, buf.String())
-	}
-	if !strings.Contains(buf.String(), "provider="+roleA) {
-		t.Errorf("the line does not name the provider: %s", buf.String())
-	}
-	if line := signerAddStatus(r.conf, r.zone, heldStep{InstrStep: own}, time.Now()); !strings.Contains(line, "may switch its servers to its own signer") {
-		t.Errorf("the status says %q", line)
-	}
-
-	// another agent's status says what the step waits for, and its log nothing
-	other := InstrStep{Taken: []string{signerAddKey + signerAddOwn + " " + roleB}}
-	buf.Reset()
-	if !signerAddHolds(r.conf, r.zone, other) || strings.Contains(buf.String(), "may switch") {
-		t.Errorf("another provider's step, here: %s", buf.String())
-	}
-	if line := signerAddStatus(r.conf, r.zone, heldStep{InstrStep: other}, time.Now()); !strings.Contains(line, roleB+"'s nameservers") {
-		t.Errorf("another provider's step, its status says %q", line)
-	}
-}
-
-// A new signer: at its DNSKEY step its signer binds the zone's policy, without
-// signing (a zone that was not its signer's has none bound), so the key machine
-// takes it and makes its first keys, while the zone relays its copy, foreign rows
-// kept, with no restart and with the option off.
+// A new signer: at its keys' step its signer binds the zone's policy (a zone that
+// was not its signer's has none bound), so the key machine takes it and makes its
+// first keys, which sign from the start; its start waits for them. Meanwhile the
+// zone relays its copy, foreign rows kept, with no restart and with the option off.
 func TestANewSignerIsTakenAndMakesItsFirstKeys(t *testing.T) {
 	const zone = "taken.adding.signer.example."
 	k := testDnskey(t, zone, 257)
@@ -770,22 +758,39 @@ func TestANewSignerIsTakenAndMakesItsFirstKeys(t *testing.T) {
 	if r.owner.taken(zone) {
 		t.Fatal("taken with no policy bound")
 	}
+	r.startErr = tdns.ErrKeyGenerationDeferred // an owned zone with no keys yet
 	r.hand(joinerHandover(t, zone, 6, true), sigUs)
 	r.roleTurn()
 	if bound != 1 || !r.owner.taken(zone) {
 		t.Fatalf("the policy bound %d times, the zone taken %v: want bound once and taken", bound, r.owner.taken(zone))
 	}
-	if r.mpzd.Options[tdns.OptInlineSigning] || len(r.started) != 0 {
-		t.Errorf("it signs at its DNSKEY step: the option %v, started %v", r.mpzd.Options[tdns.OptInlineSigning], r.started)
+	if r.mpzd.Options[tdns.OptInlineSigning] || len(r.started) != 1 {
+		t.Errorf("with no keys yet: the option %v, started %v, want one start refused", r.mpzd.Options[tdns.OptInlineSigning], r.started)
 	}
 	if !slices.Contains(r.foreignRows(t), k.KeyTag()) {
 		t.Errorf("the other signer's key is not kept: %v", r.foreignRows(t))
+	}
+	if !r.e.wire.SignsAtNaming(zone) {
+		t.Error("named, and serving nothing: it does not sign at its naming")
 	}
 	r.e.tickOwned()
 	if keys := joinersKeys(t, r, zone); keys["KSK"] != 1 || keys["ZSK"] != 1 {
 		t.Errorf("its first keys: %v", keys)
 	}
+	inv, err := tdns.GetKeyInventory(r.kdb, zone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range inv {
+		if it.State != DnskeyStateForeign && (!it.Sign || it.State == KeyStateActive) {
+			t.Errorf("its first key %d is %s, sign %v: want it on its way, signing", it.KeyTag, it.State, it.Sign)
+		}
+	}
+	r.startErr = nil
 	r.roleTurn()
+	if !r.mpzd.Options[tdns.OptInlineSigning] {
+		t.Error("its first keys are there, and it does not sign")
+	}
 	if bound != 1 {
 		t.Errorf("the policy bound again: %d times", bound)
 	}
@@ -815,19 +820,17 @@ func TestAHandOverBringsAWithheldZoneToItsRole(t *testing.T) {
 	})
 	t.Run("signing", func(t *testing.T) {
 		r := withheld(t, "signing.withheld.signer.example.")
-		h := handoverFor(t, r.mpzd.ZoneName, sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)...)
-		h.MinSerial = 77
-		r.hand(h, sigUs)
+		r.hand(handoverFor(t, r.mpzd.ZoneName, sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)...), sigUs)
 		r.roleTurn()
-		if !slices.Equal(r.started, []uint32{77}) || r.mpzd.Withheld() {
-			t.Errorf("started %v, withheld %v: want it signing above 77", r.started, r.mpzd.Withheld())
+		if len(r.started) != 1 || r.mpzd.Withheld() {
+			t.Errorf("started %v, withheld %v: want it signing", r.started, r.mpzd.Withheld())
 		}
 		if d := r.mpzd.MP.MPdata; d == nil || !d.WeAreSigner {
 			t.Errorf("its data is %+v, not that of a signer", d)
 		}
 		before := r.pushes()
 		r.roleTurn()
-		if !slices.Equal(r.started, []uint32{77}) || r.pushes() != before {
+		if len(r.started) != 1 || r.pushes() != before {
 			t.Errorf("signing, and a tick started it again: %v, %d pushes", r.started, r.pushes()-before)
 		}
 	})
@@ -1047,10 +1050,10 @@ func TestTheCombinerOfAProviderOnItsWayInAppliesDNSKEYsAlone(t *testing.T) {
 	}
 }
 
-// With nobody signing there are no signatures to go with a DS: the zone's first
-// signer signs before its DS goes to the parent, or the parent's DS would make the
-// zone bogus. Anyone after it joins as usual.
-func TestAZonesFirstSignerSignsBeforeItsDS(t *testing.T) {
+// With nobody else signing there are no signatures to go with a DS: the zone's
+// first signer has its caches' time before its DS goes to the parent, or the
+// parent's DS would make the zone bogus. Anyone after it joins as usual.
+func TestAZonesFirstSignerHasItsCachesTimeBeforeItsDS(t *testing.T) {
 	from := jAt(t, 41, `servers="a,b" suffix="n"`, freezeRecords...)
 	to := jAt(t, 42, `servers="a,b" signers="a" suffix="n"`, freezeRecords...)
 	var parts []string
@@ -1058,11 +1061,12 @@ func TestAZonesFirstSignerSignsBeforeItsDS(t *testing.T) {
 		_, part, _ := signerAddKeyParts(st.key)
 		parts = append(parts, part)
 	}
-	want := []string{signerAddAccept, signerAddMint, signerAddCaches, signerAddOwn, signerAddDS}
+	want := []string{signerAddAccept, signerAddMint, signerAddCaches, signerAddDS}
 	if !slices.Equal(parts, want) {
 		t.Errorf("the first signer's steps are %v, want %v", parts, want)
 	}
-	// planned from what is in place, its DS step is still the one left
+	// planned from what is in place, with it in Signing from its keys' step, its
+	// caches' time and its DS are still the steps left, in that order
 	sets := rolesFor(from, from, 0)
 	var taken []string
 	for _, st := range signerAddSteps(planView{from: from, to: to, held: sets}) {
@@ -1070,14 +1074,14 @@ func TestAZonesFirstSignerSignsBeforeItsDS(t *testing.T) {
 			sets = st.sets(sets)
 		}
 		taken = append(taken, st.key)
-		if strings.Contains(st.key, signerAddOwn) {
+		if strings.Contains(st.key, signerAddMint) {
 			break
 		}
 	}
 	plan := planSteps(planView{from: from, to: to, held: sets, taken: taken})
 	left := slices.DeleteFunc(slices.Clone(plan), func(st plannedStep) bool { return slices.Contains(taken, st.key) })
-	if len(left) != 2 || !strings.Contains(left[0].key, signerAddDS) || left[1].key != lastStepKey {
-		t.Errorf("after it signs the steps left are %+v, want its DS and the last", left)
+	if len(left) != 3 || !strings.Contains(left[0].key, signerAddCaches) || !strings.Contains(left[1].key, signerAddDS) || left[2].key != lastStepKey {
+		t.Errorf("after it signs the steps left are %+v, want its caches' time, its DS and the last", left)
 	}
 }
 
@@ -1088,7 +1092,7 @@ func TestASignersStepsArePlannedFromWhatIsInPlace(t *testing.T) {
 	to := jAt(t, 42, `servers="a,b" signers="a,b" suffix="n"`, freezeRecords...)
 	sets := rolesFor(from, from, 0)
 	steps := signerAddSteps(planView{from: from, to: to, held: sets})
-	if len(steps) != 5 {
+	if len(steps) != 4 {
 		t.Fatalf("the steps of one joiner: %+v", steps)
 	}
 	var taken []string
@@ -1098,7 +1102,7 @@ func TestASignersStepsArePlannedFromWhatIsInPlace(t *testing.T) {
 		}
 		taken = append(taken, st.key)
 		again := signerAddSteps(planView{from: from, to: to, held: sets, taken: taken})
-		if len(again) != 5 || again[i].key != st.key {
+		if len(again) != 4 || again[i].key != st.key {
 			t.Fatalf("after %s the steps are %+v", st.key, again)
 		}
 	}
@@ -1107,49 +1111,6 @@ func TestASignersStepsArePlannedFromWhatIsInPlace(t *testing.T) {
 	}
 	if got := signerAddSteps(planView{from: to, to: to, held: rolesFor(to, to, 0)}); len(got) != 0 {
 		t.Errorf("at rest it has steps: %+v", got)
-	}
-}
-
-// The own-signature check: an RRSIG over the DNSKEY RRset by its own KSK, valid,
-// verifying, at every nameserver; another signature beside it is no matter.
-func TestTheOwnSignatureCheckReadsTheDNSKEYSAndTheSerial(t *testing.T) {
-	const zone = "own.check.adding.example."
-	ksk, priv := signingKey(t, zone)
-	ksk.Flags = 257
-	stranger, strangerPriv := signingKey(t, zone)
-	stranger.Flags = 257
-	keys := []dns.RR{ksk}
-	for _, c := range []struct {
-		name   string
-		rrset  *core.RRset
-		serial uint32
-		above  uint32
-		known  bool
-		ok     bool
-	}{
-		{"its own signature", signedDNSKEYs(t, zone, ksk, priv), 10, 9, true, true},
-		{"unsigned", signedDNSKEYs(t, zone, ksk, nil), 10, 9, true, false},
-		{"another's signature", signedDNSKEYs(t, zone, stranger, strangerPriv), 10, 9, true, false},
-		{"at the serial they served", signedDNSKEYs(t, zone, ksk, priv), 10, 10, true, false},
-		{"at serial 0, which they served", signedDNSKEYs(t, zone, ksk, priv), 0, 0, true, false},
-		{"above serial 0", signedDNSKEYs(t, zone, ksk, priv), 1, 0, true, true},
-		{"no serial known", signedDNSKEYs(t, zone, ksk, priv), 10, 0, false, true},
-	} {
-		serving(t, soa(t, zone, c.serial, nil, nil), nil)
-		prev := servingKeysLookup
-		rrset := c.rrset
-		servingKeysLookup = func(context.Context, string, string) (*core.RRset, error) { return rrset, nil }
-		err := servesOwnSignatures(context.Background(), zone, srNameservers, keys, c.above, c.known, time.Now())
-		servingKeysLookup = prev
-		if (err == nil) != c.ok {
-			t.Errorf("%s: %v, want ok %v", c.name, err, c.ok)
-		}
-	}
-	if err := servesOwnSignatures(context.Background(), zone, nil, keys, 0, false, time.Now()); err == nil {
-		t.Error("no nameservers named, and the check passes")
-	}
-	if err := servesOwnSignatures(context.Background(), zone, srNameservers, []dns.RR{testDnskey(t, zone, 256)}, 0, false, time.Now()); err == nil {
-		t.Error("no KSK known, and the check passes")
 	}
 }
 
@@ -1231,7 +1192,9 @@ func TestTheCachesTimeCountsFromWhenEveryParentServerServesTheDS(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	r.at(r.next(), signerAddOwn)
+	if st := r.next(); st.Taken[len(st.Taken)-1] != lastStepKey {
+		t.Errorf("the DS TTL passed, the step is %+v, want the last", st)
+	}
 }
 
 // A hand-over that takes Signing back while a start runs, which holds no lock of
@@ -1641,7 +1604,6 @@ func TestTheKeysOffersPassForAJoinersDSStepAloneUnderTheFreeze(t *testing.T) {
 		{"its DS, the owner's", signerAddDS, core.HsyncParentSyncOwner, false},
 		{"its first keys", signerAddMint, core.HsyncParentSyncAgent, false},
 		{"the caches' time", signerAddCaches, core.HsyncParentSyncAgent, false},
-		{"its own signatures", signerAddOwn, core.HsyncParentSyncAgent, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newNotifyRig(t, "offers.adding.signer.example.", "UPDATE")
@@ -1724,6 +1686,9 @@ func TestAProviderThatSignsWaitsTheTTLItServesAndAsksNobody(t *testing.T) {
 	r := newSignerRig(t, zone, records...)
 	r.conf.InternalMp.servedKeys.start = func(look func()) { look() }
 	r.hand(handoverFor(t, zone, sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)...), sigUs)
+	if r.e.wire.SignsAtNaming(zone) {
+		t.Error("it serves, and its first keys would sign before they have propagated")
+	}
 	prev := servingKeysLookup
 	servingKeysLookup = func(context.Context, string, string) (*core.RRset, error) {
 		t.Error("a provider that signs asked the zone's servers")

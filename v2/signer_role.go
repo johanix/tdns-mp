@@ -13,8 +13,10 @@
  *   - in KeySigners and not Signing: the policy is bound with no signing, also
  *     after a restart, since no first load binds it, and the zone relays its
  *     copy while the key machine runs (BindPolicyWithoutSigning).
- *   - in Signing: the zone signs, above the serial its servers served
- *     (StartSigning, which ends both of the others).
+ *   - in Signing: the zone signs (StartSigning, which ends both of the others). One
+ *     that serves nothing has its policy bound first: its first keys are its key
+ *     machine's, which sign from the start (SignsAtNaming), and a start waits for
+ *     them. One that serves has its first keys from tdns, as at a first load.
  *
  * An agent takes the zone from its own signer, so one with no copy has nothing
  * to read instructions from and can hand its signer nothing, for as long as its
@@ -37,9 +39,7 @@ const signerRoleEvery = 30 * time.Second
 
 // The P5 calls the turn makes; a test stands in for them.
 var (
-	startSigning = func(ctx context.Context, zd *tdns.ZoneData, minSerial uint32) error {
-		return zd.StartSigning(ctx, minSerial)
-	}
+	startSigning       = func(ctx context.Context, zd *tdns.ZoneData) error { return zd.StartSigning(ctx, 0) }
 	bindWithoutSigning = func(zd *tdns.ZoneData) error { return zd.BindPolicyWithoutSigning() }
 )
 
@@ -117,9 +117,8 @@ func (conf *Config) signerRoleTurn(ctx context.Context, zone string) {
 		return
 	}
 	var r Roles
-	var minSerial uint32
-	if held, handed := actingHeld.Load().get(zone); handed {
-		r, minSerial = held.handover.Sets, held.handover.MinSerial
+	if handed, ok := actingHeld.Load().roles(zone); ok {
+		r = handed
 	} else if conf.agentHasNoCopy(zone) {
 		_, r = signerSets(mpzd, mp)
 	} else {
@@ -136,12 +135,23 @@ func (conf *Config) signerRoleTurn(ctx context.Context, zone string) {
 	}
 	withheld := mpzd.Withheld()
 
-	switch {
-	case self != "" && has(r.Signing, self) && !signs:
-		switch err := startSigning(ctx, mpzd.ZoneData, minSerial); {
+	named := self != "" && has(r.Signing, self)
+	if self != "" && has(r.KeySigners, self) && !bound && (!named || !has(r.Servers, self)) {
+		if err := bindWithoutSigning(mpzd.ZoneData); err != nil {
+			conf.roleFailure(zone, "the zone's DNSSEC policy could not be bound, so its key machine does not run; tried again", err)
+			if named {
+				return
+			}
+		} else {
+			conf.noRoleFailure(zone)
+			conf.tookRole(zone)
+		}
+	}
+	if named && !signs {
+		switch err := startSigning(ctx, mpzd.ZoneData); {
 		case err == nil:
 			conf.noRoleFailure(zone)
-			lgSigner.Info("the zone serves its own signatures now", "zone", zone, "above", minSerial)
+			lgSigner.Info("the zone serves its own signatures now", "zone", zone)
 			conf.handedOtherwiseMeanwhile(mpzd, mp)
 			conf.tookRole(zone)
 			pushSignerInventory(conf, zone)
@@ -151,13 +161,6 @@ func (conf *Config) signerRoleTurn(ctx context.Context, zone string) {
 			conf.roleFailure(zone, "the zone could not start signing; tried again", err)
 		}
 		return
-	case self != "" && has(r.KeySigners, self) && !bound:
-		if err := bindWithoutSigning(mpzd.ZoneData); err != nil {
-			conf.roleFailure(zone, "the zone's DNSSEC policy could not be bound, so its key machine does not run; tried again", err)
-		} else {
-			conf.noRoleFailure(zone)
-			conf.tookRole(zone)
-		}
 	}
 	mpzd.ReleaseWithheld()
 	if withheld {

@@ -125,33 +125,38 @@ As a signer and server, in this order:
 1. `signers="alpha,charlie"` first, or `signers=` and
    `servers=` in one edit. Never `servers=` first: that
    lists a provider that cannot yet sign what it serves.
-2. Charlie makes its keys. Every signer publishes them,
-   and the leader adds charlie's DS at the parent.
-3. The owner waits for the caches: the TTL of the DNSKEY
+2. Charlie makes its keys and signs at once: no NS record
+   names it yet, so no validator sees its signatures.
+   Every signer publishes its keys, and the leader adds
+   charlie's DS at the parent.
+3. The leader waits for the caches: the TTL of the DNSKEY
    RRset and of the DS RRset.
-4. `servers="alpha,bravo,charlie"`, if it was not in the
-   first edit.
+4. `servers="alpha,bravo,charlie"`. In one edit with
+   `signers=` the agents hold this part back until the
+   caches' time has passed. As an edit of its own it waits
+   until the first is done.
 
 The leader carries this out, each step confirmed by every
 provider; `tdns-mpcli agent parentsync status` says which
 step the zone is at (`adding signer agent.charlie.example.:
 step 2 (its DS at the parent)`). Charlie's signer starts
-signing with no restart, at its last step, above the serial
-its servers served. Until then it relays its copy.
+signing with no restart.
 
-Until it signs, charlie's signer asks the zone's nameservers
+Until it serves, charlie's signer asks the zone's nameservers
 what TTL they serve the DNSKEY RRset with, and its new keys
 wait the largest: that is what caches hold. A signer that
 has not heard from all of them says so in its log, and its
 keys wait at least the TTL in its own copy, which can be
 longer.
 
-A provider given both roles in one edit has its status and
-its agent's log say `the provider may switch its servers to
-its own signer` once its signer signs. Its operator then
-points its servers at its own signer, and the zone is done
-once they serve its signatures. **Not before:** until then its
-signer relays an unsigned copy.
+Once the server part starts, its status tells its operator
+what to point where: its servers at its own signer. The zone
+is done once they serve the zone from it.
+
+**Its NS records come last.** With `nsmgmt="agent"` an
+operator's NS records are kept until the transition is done.
+With `nsmgmt="owner"` the owner adds them to its NS RRset
+only after "done": nothing holds them back but the owner.
 
 A signer that has been handed nothing by its agent takes no
 role from its own copy: at its first load the zone is withheld,

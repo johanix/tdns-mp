@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -72,6 +73,10 @@ type Wire interface {
 	Strip(zone string, keyid uint16) error
 	// Resign asks tdns to re-sign the zone.
 	Resign(zone string)
+	// SignsAtNaming: this provider signs the zone and serves nothing of it: no
+	// NS record is to name it, so no validator sees its signatures, and its
+	// first keys sign from the start (signsFromTheStart).
+	SignsAtNaming(zone string) bool
 	// ServedDnskeyTTL is the TTL the zone's DNSKEY RRset is served with: how
 	// long a cache may hold the set from before a new key was in it (E5), and
 	// whether anything is known of it yet: until it is, the key waits.
@@ -631,11 +636,44 @@ func (l *ZoneKeyLifecycle) write(k tdns.DnssecKeyWithTimestamps, state string, s
 	if !ok {
 		return fmt.Errorf("no columns for state %s", state)
 	}
+	early, err := l.signsFromTheStart(k, state)
+	if err != nil {
+		return err
+	}
+	cols.Sign = cols.Sign || early
 	if err := tdns.UpdateKeyRowFrom(l.KDB, l.Zone, k.KeyTag, state, k.State, cols); err != nil {
 		return fmt.Errorf("key %d of %s %s -> %s: %w", k.KeyTag, l.Zone, k.State, state, err)
 	}
 	l.Wire.KeysChanged(l.Zone)
 	return nil
+}
+
+// signsFromTheStart: k, on its way to state, is a first key that signs before T9
+// (the transition table's P1, amended 2026-11-03). It is the first key of its role
+// of a provider named a signer that serves nothing, and it signs from its first
+// distribution, staying so until T9 makes that the state's. T3, T8 and T9 run as
+// ever: they say what the others have applied and what the parent serves.
+func (l *ZoneKeyLifecycle) signsFromTheStart(k tdns.DnssecKeyWithTimestamps, state string) (bool, error) {
+	if state != KeyStateMpdist && state != KeyStatePublished && state != KeyStateStandby {
+		return false, nil
+	}
+	cols, err := l.columnsOf(k.KeyTag)
+	if err != nil {
+		return false, err
+	}
+	if cols.Sign {
+		return true, nil
+	}
+	if k.State != KeyStateCreated || !l.Wire.SignsAtNaming(l.Zone) {
+		return false, nil
+	}
+	inv, err := tdns.GetKeyInventory(l.KDB, l.Zone)
+	if err != nil {
+		return false, fmt.Errorf("inventory of %s: %w", l.Zone, err)
+	}
+	return !slices.ContainsFunc(inv, func(it tdns.KeyInventoryItem) bool {
+		return it.Sign && it.State != KeyStateForeign && roleOf(it.Flags) == roleOf(k.Flags)
+	}), nil
 }
 
 // SetForeignDS writes another provider's key's ds column (design §1 P3:
