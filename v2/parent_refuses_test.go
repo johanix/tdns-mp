@@ -4,6 +4,7 @@
 package tdnsmp
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -133,6 +134,28 @@ func TestAStepHeldByARefusedKeyGoesOnWhenTheNamesLeaveTheParentByHand(t *testing
 }
 
 // A parent that takes UPDATE alone: the sync needs the key, and stays held.
+// The look at the parent takes time, and the key's hold can end during it. The
+// release then finds nothing owed, so the sync must not be owed after it, or
+// nothing asks for it until the 30 s ticker: it goes out now.
+func TestAHoldThatEndsDuringTheLookAtTheParentLeavesNoSyncOwed(t *testing.T) {
+	saved := parentNotifyTarget
+	t.Cleanup(func() { parentNotifyTarget = saved })
+	r := newKeyHoldRig(t, "during.look.example.")
+	tdns.UpdateParentState(r.mpzd.KeyDB, string(r.zone), r.key.keyid, edns0.KeyStateRefused)
+	parentNotifyTarget = func(ctx context.Context, conf *Config, _ *tdns.ZoneData) *tdns.DsyncTarget {
+		trustKey(r.mpzd.KeyDB, string(r.zone), r.key.keyid)
+		conf.releaseKeyHold(ctx, r.zone)
+		return nil
+	}
+	if got := r.explicit(t); strings.Contains(got.Msg, "waits for the zone's SIG(0) key") {
+		t.Errorf("held by a hold that has ended: %q", got.Msg)
+	}
+	if r.keyOwed() {
+		t.Error("the sync is owed for a key that has come, with nothing to ask for it")
+	}
+	waitUntil(t, "the sync went out", func() bool { return r.parent.updatesSeen() > 0 })
+}
+
 func TestASyncThatNeedsTheKeyStaysHeldWhileTheParentRefusesIt(t *testing.T) {
 	r := newKeyHoldRig(t, "update.refused.example.")
 	tdns.UpdateParentState(r.mpzd.KeyDB, string(r.zone), r.key.keyid, edns0.KeyStateRefused)

@@ -441,6 +441,11 @@ func (conf *Config) holdForZoneKey(ctx context.Context, ds tdns.DelegationSyncRe
 		}
 		return false, ""
 	}
+	// That look asks the parent, and the hold can end during it. A release then
+	// finds nothing owed, so read the hold again before owing the sync.
+	if why = conf.syncKeyHold(ctx, zone); why == "" {
+		return false, ""
+	}
 	if t := conf.InternalMp.CatchUp; t != nil {
 		t.oweForKey(zone)
 	} else {
