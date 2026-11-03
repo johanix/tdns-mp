@@ -304,8 +304,7 @@ func TestTheStampCarriesARefusal(t *testing.T) {
 	seven := stampAt(t, 7, "a")
 	st := stampTableAt(t, stampAlpha, seven)
 	enforced(t, st.store, stampZone)
-	// a server role for zulu, which has no record: a refusal the not-built
-	// fallback does not follow
+	// a server role for zulu, which has no record
 	eight := jAt(t, 8, `servers="alpha,beta,zulu" signers="alpha" auditors="delta" suffix="a"`, stampRecords...)
 	noteKnown(t, st.store, stampZone, eight)
 	got := st.entryFor(stampBeta).Members[stampAlpha].Instr[stampZone]

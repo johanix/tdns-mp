@@ -58,10 +58,7 @@ func holdsContribution(ar *AgentRepo, origin AgentId, rrtype uint16) bool {
 // runs on the data engine, whose repo it changes. It does not run while the
 // zone reconciles, or once another serial is active: the sweep is V's, and it
 // runs at V's "done" also when a newer serial waits to be agreed on, before
-// that agreement starts (7.2). One serial does not stop it: one the not-built
-// fallback followed at that "done" (followNotBuilt). It is unenforced, so what
-// only it takes away stays and what it gives is not swept: the sweep drops what
-// neither serial entitles.
+// that agreement starts (7.2).
 func (conf *Config) sweep(zdr *ZoneDataRepo, zone ZoneName, in *Instructions) {
 	if zdr == nil || in == nil {
 		return
@@ -73,12 +70,8 @@ func (conf *Config) sweep(zdr *ZoneDataRepo, zone ZoneName, in *Instructions) {
 	// This sweep answers for any owed: it marks the zone again if it must. If
 	// it stops below, the serial now active had its own sweep at its "done".
 	delete(zdr.sweepsOwed, zone)
-	by := []*Instructions{in}
 	if cur.active.Serial != in.Serial || cur.active.Digest != in.Digest() {
-		if cur.follows == "" || cur.active.Reading == nil {
-			return
-		}
-		by = append(by, cur.active.Reading)
+		return
 	}
 	ar, ok := zdr.Repo.Get(zone)
 	if !ok || ar == nil {
@@ -98,7 +91,7 @@ func (conf *Config) sweep(zdr *ZoneDataRepo, zone ZoneName, in *Instructions) {
 				continue
 			}
 			leaderHolds := leader != "" && holdsContribution(ar, leader, t)
-			if slices.ContainsFunc(by, func(i *Instructions) bool { return entitled(i, origin, t, leader, leaderHolds) }) {
+			if entitled(in, origin, t, leader, leaderHolds) {
 				continue
 			}
 			// The combiner is asked first: what it could not be asked to drop
@@ -120,7 +113,7 @@ func (conf *Config) sweep(zdr *ZoneDataRepo, zone ZoneName, in *Instructions) {
 }
 
 // sweepOwed is a sweep to run again: a purge of it could not be queued. It runs
-// by the serial it ran by, so a followed serial still does not widen it.
+// by the serial it ran by.
 type sweepOwed struct {
 	in *Instructions
 	at time.Time
