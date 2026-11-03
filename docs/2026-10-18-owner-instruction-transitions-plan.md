@@ -1331,7 +1331,7 @@ Names as below, and also: log, info, logger `engine`, "a provider put back sends
 
 ### S18b. A signer added; a server becomes a signer
 
-**Status (2026-11-03):** Readings 21 and 22 are built on their own pull request above #369, with tdns pinned at #995's `47290130`; #369 stays at `91b4e41c`. Not on a rig.
+**Status (2026-11-03):** Readings 21 and 22 are built on their own pull request above #369, with tdns pinned at #995's `f19f7214`; #369 stays at `91b4e41c`. Not on a rig.
 
 **Status (2026-11-02):** Built, on S18a (#342, head `f91bebbf`), with #351's pins and #362 merged in, and tdns pinned at #995's head `91b4e41c`. Not on a rig. `v2/signer_acted.go` and the table `MPSignerActed` are gone, and tdns-mp #357's first-load case is covered, its issue left open for the project owner. Where the code read otherwise than the text, or the text left a choice, each a reading for the project owner when the stack is complete:
 
