@@ -75,23 +75,32 @@ func (z *zoneSerials) namedAgain(local string) *heldSerial {
 	return nil
 }
 
+// startedOver is what startOver did: the store's name for the zone, the active
+// serial dropped and the serial that named this agent.
+type startedOver struct {
+	name       string
+	was, named SerialDigest
+}
+
 // startOver has an agent the owner names again know no active serial: its
 // serials are held, none judged, as at a first load, and what the active serial
-// left goes. False when the zone is not one for it (namedAgain).
-func (s *InstructionStore) startOver(zone, local string) (was, named SerialDigest, ok bool, err error) {
+// left goes. Nil when the zone, named in any case, is not one for it
+// (namedAgain).
+func (s *InstructionStore) startOver(zone, local string) (*startedOver, error) {
 	s.mu.Lock()
-	z := s.zones[zone]
+	name, z := s.zoneLocked(zone)
 	due := z != nil && z.namedAgain(local) != nil
 	s.mu.Unlock()
 	if !due {
-		return was, named, false, nil
+		return nil, nil
 	}
-	err = s.update(zone, func(z *zoneSerials) error {
+	var started *startedOver
+	err := s.update(name, func(z *zoneSerials) error {
 		h := z.namedAgain(local)
 		if h == nil {
 			return nil
 		}
-		was, named, ok = z.Active.SerialDigest, h.SerialDigest, true
+		started = &startedOver{name: name, was: z.Active.SerialDigest, named: h.SerialDigest}
 		for i := range z.Held {
 			z.Held[i].Refused = nil
 		}
@@ -99,18 +108,21 @@ func (s *InstructionStore) startOver(zone, local string) (was, named SerialDiges
 		z.Step, z.Taken, z.StepOf, z.StepWhat, z.Excused, z.ParentWords = 0, nil, 0, "", nil, nil
 		return nil
 	})
-	return was, named, ok && err == nil, err
+	if err != nil {
+		return nil, err
+	}
+	return started, nil
 }
 
-// namedAt is the serial that named this agent again (zoneSerials.NamedAt), 0
-// with none.
+// namedAt is the serial that named this agent again (zoneSerials.NamedAt), the
+// zone named in any case; 0 with none.
 func (s *InstructionStore) namedAt(zone string) uint32 {
 	if s == nil {
 		return 0
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if z := s.zones[zone]; z != nil {
+	if _, z := s.zoneLocked(zone); z != nil {
 		return z.NamedAt
 	}
 	return 0
@@ -470,20 +482,21 @@ func (conf *Config) startOverIfNamedAgain(zone string) {
 		return
 	}
 	s := conf.InternalMp.Instructions
-	was, named, ok, err := s.startOver(zone, dns.Fqdn(mp.Identity))
+	started, err := s.startOver(zone, dns.Fqdn(mp.Identity))
 	if err != nil {
 		lg.Warn("the zone names this provider again, and its active serial could not be dropped", "zone", zone, "err", err)
 		return
 	}
-	if !ok {
+	if started == nil {
 		return
 	}
-	lg.Info("the zone names this provider again: its active serial has no record of it, so it starts over as a newcomer", "zone", zone, "active_was", was.Serial, "named_by", named.Serial)
-	conf.InternalMp.CatchUp.activeChanged(ZoneName(zone))
-	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil && mpzd.Ready {
-		mpzd.onActiveChanged(conf.InternalMp.MPTransport, nil, s.reading(zone))
+	name := started.name
+	lg.Info("the zone names this provider again: its active serial has no record of it, so it starts over as a newcomer", "zone", name, "active_was", started.was.Serial, "named_by", started.named.Serial)
+	conf.InternalMp.CatchUp.activeChanged(ZoneName(name))
+	if mpzd, ok := Zones.Get(name); ok && mpzd != nil && mpzd.Ready {
+		mpzd.onActiveChanged(conf.InternalMp.MPTransport, nil, s.reading(name))
 		conf.onSetsChanged(mpzd, true)
-		conf.InternalMp.CatchUp.askUnasked(ZoneName(zone))
+		conf.InternalMp.CatchUp.askUnasked(ZoneName(name))
 	}
 }
 

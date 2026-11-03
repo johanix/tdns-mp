@@ -317,3 +317,34 @@ func TestNamedAgainReadsEveryGuard(t *testing.T) {
 		t.Error("an OFF record brought it back")
 	}
 }
+
+// The turn has the zone's name folded (askThaw), and the store the name as it
+// was spelled: the same store entry starts over, and none is made beside it.
+func TestAZoneSpelledAnotherWayStartsOverToo(t *testing.T) {
+	const zone = "Spelled.Back.Remove.Example."
+	turn := canonicalName(zone)
+	if turn == zone {
+		t.Fatalf("precondition: %s folds to itself", zone)
+	}
+	s := newStore(t)
+	noteKnown(t, s, zone, withoutN(t, 43))
+	s.Note(zone, withN(t, 44), nil)
+	started, err := s.startOver(turn, roleN)
+	if err != nil || started == nil {
+		t.Fatalf("by the turn's name: %+v, %v", started, err)
+	}
+	if started.name != zone || started.was.Serial != 43 || started.named.Serial != 44 {
+		t.Errorf("started over: %+v", started)
+	}
+	if !s.activeUnknown(zone) {
+		t.Errorf("the zone still knows an active serial: %+v", status(t, s, zone))
+	}
+	if got := s.namedAt(turn); got != 44 {
+		t.Errorf("the serial that named it, by the turn's name: %d", got)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if z := s.zones[turn]; z != nil {
+		t.Errorf("an entry beside the zone's: %+v", z)
+	}
+}
