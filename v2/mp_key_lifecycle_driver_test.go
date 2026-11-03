@@ -128,8 +128,8 @@ func (w *fakeWire) Resign(zone string) {
 		hook()
 	}
 }
-func (w *fakeWire) KeysChanged(zone string)                   { w.mu.Lock(); defer w.mu.Unlock(); w.changes++ }
-func (w *fakeWire) ServedDnskeyTTL(zone string) time.Duration { return w.ttl }
+func (w *fakeWire) KeysChanged(zone string)                           { w.mu.Lock(); defer w.mu.Unlock(); w.changes++ }
+func (w *fakeWire) ServedDnskeyTTL(zone string) (time.Duration, bool) { return w.ttl, true }
 func (w *fakeWire) Report(zone string, keyid uint16, what string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()

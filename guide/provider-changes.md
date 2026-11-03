@@ -142,8 +142,9 @@ its servers served. Until then it relays its copy.
 Until it signs, charlie's signer asks the zone's nameservers
 what TTL they serve the DNSKEY RRset with, and its new keys
 wait the largest: that is what caches hold. A signer that
-reaches none of them says so in its log, and its keys wait
-the TTL in its own copy, which can be longer.
+has not heard from all of them says so in its log, and its
+keys wait at least the TTL in its own copy, which can be
+longer.
 
 A server that becomes a signer goes on serving its upstream's
 copy until its status and its agent's log say `the provider
