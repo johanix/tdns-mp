@@ -513,6 +513,39 @@ func TestAProviderPutBackSendsItsKeysAgainAsItsZoneIsTaken(t *testing.T) {
 	}
 }
 
+// A provider named a signer is not bound first: its zone would be its key machine's
+// before it has keys, and tdns would make none. Binding is for one with its keys
+// published and no signing, as a provider on its way out, whose machine must run.
+func TestANamedSignerIsNotBoundBeforeItsStart(t *testing.T) {
+	const zone = "nobind.adding.signer.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="p2" signers="p2"`)...)
+	r.notTaken(zone)
+	bound := 0
+	prev := bindWithoutSigning
+	bindWithoutSigning = func(zd *tdns.ZoneData) error {
+		bound++
+		return nil
+	}
+	t.Cleanup(func() { bindWithoutSigning = prev })
+	r.mpzd.Lock()
+	r.mpzd.DnssecPolicy = nil
+	r.mpzd.Unlock()
+	h := joinerHandover(t, zone, 6, true)
+	r.hand(h, sigUs)
+	r.roleTurn()
+	if bound != 0 || len(r.started) != 1 {
+		t.Errorf("named a signer, bound %d times, started %v: want no bind, and a start", bound, r.started)
+	}
+	r.mpzd.SetRuntimeOption(tdns.OptInlineSigning, false)
+	next := *h
+	next.Sets.Signing, next.Step, next.Made = nil, h.Step+1, time.Now()
+	r.hand(&next, sigUs)
+	r.roleTurn()
+	if bound != 1 {
+		t.Errorf("in KeySigners and not in Signing, bound %d times, want once", bound)
+	}
+}
+
 // notTaken has its key machine not have taken the zone, as a provider new to it, with
 // the zone named in its key-lifecycle-zones.
 func (r *signerRig) notTaken(zone string) {

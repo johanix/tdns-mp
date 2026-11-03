@@ -954,6 +954,11 @@ func TestAJoinersKeysGoOutOnceMoreAtItsKeysStep(t *testing.T) {
 	if rec := d.l.dist[ksk]; rec == nil || len(rec.Rejected) != 0 {
 		t.Errorf("another step, the KSK's record is %+v: want one with no rejection", rec)
 	}
+	d.wire.joiningSince = time.Time{}
+	tick("past its keys' step")
+	if got := resent(); len(got) != 0 {
+		t.Errorf("past its keys' step, resent %v, want nothing", got)
+	}
 
 	// with nobody else to send them to, nothing
 	alone := newDriverRig(t, "again.alone.adding.example.", driverPolicy)
