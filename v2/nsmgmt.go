@@ -14,6 +14,7 @@
 package tdnsmp
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -79,12 +80,17 @@ func (s *actingStore) changesNSmgmt(h *ActingHandover) bool {
 // persists that: nothing stored is applied by itself when the handed role
 // next lets the combiner apply NS (design 5.4). The next combine serves the
 // upstream's NS. An origin whose drop could not be persisted keeps its NS,
-// as the store does, and the error has the hand-over tried again.
+// as the store does, and the error has the hand-over tried again. So does a
+// store not read yet: the NS in it are not here to drop, and its read would
+// bring them back.
 func (mpzd *MPZoneData) dropStoredNS() (int, error) {
 	mpzd.Lock()
 	defer mpzd.Unlock()
 	if mpzd.MP == nil {
 		return 0, nil
+	}
+	if mpzd.MP.PersistContributions != nil && !mpzd.MP.ContributionsRead {
+		return 0, errors.New("the zone's stored contributions are not read")
 	}
 	dropped := 0
 	for _, sender := range slices.Sorted(maps.Keys(mpzd.MP.AgentContributions)) {

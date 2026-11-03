@@ -433,9 +433,10 @@ func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, 
 // readContributionsAgain reads the zone's stored contributions again, as the
 // operator's reapply does (CombinerReapplyContributions), when the read at
 // the zone's start failed: nothing else reads them again, and until they
-// are read every agent's own read of the zone stays not done. Only once the
-// zone has loaded: before, the read at its first load is still to come. A
-// read that fails again is tried at the next request.
+// are read every agent's own read of the zone stays not done, and a change
+// of nsmgmt cannot drop their NS. Only once the zone has loaded: before, the
+// read at its first load is still to come. A read that fails again is tried
+// at the next request or hand-over.
 func readContributionsAgain(conf *Config, zd *MPZoneData, zone string) {
 	hdb := conf.InternalMp.HsyncDB
 	if hdb == nil || !zd.Ready {
@@ -448,10 +449,10 @@ func readContributionsAgain(conf *Config, zd *MPZoneData, zone string) {
 		return
 	}
 	if _, err := CombinerReapplyContributions(dns.Fqdn(zone), hdb); err != nil {
-		lgCombiner.Warn("RFI EDITS: the zone's stored contributions could not be read again", "zone", zone, "err", err)
+		lgCombiner.Warn("the zone's stored contributions could not be read again", "zone", zone, "err", err)
 		return
 	}
-	lgCombiner.Info("RFI EDITS: the zone's stored contributions, not read at its start, are read now", "zone", zone)
+	lgCombiner.Info("the zone's stored contributions, not read at its start, are read now", "zone", zone)
 }
 
 func editsAnswerFor(zd *MPZoneData, self, zone, nonce string) *PeerEditsRequest {
