@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -811,7 +812,31 @@ func chunkQueryEndpoints(role string, mp *MultiProviderConf, chunkMode string) (
 	return endpoint, cep == "include", nil
 }
 
-// buildAgentChunkQueryEndpoint builds the CHUNK query endpoint (host:port) from agent DNS config.
+// reachableListenAddress says whether another host can reach a listen
+// address, given with or without its port. Asked at a wildcard or loopback
+// address, a receiver would ask itself. A link-local address stops at its
+// link, a zone means something on this host only, and no one fetches from a
+// multicast or broadcast address. A private address counts: it reaches the
+// hosts on its network. A host name is taken as given, except localhost.
+func reachableListenAddress(listen string) bool {
+	host := listen
+	if h, _, err := net.SplitHostPort(listen); err == nil {
+		host = h
+	}
+	if host = strings.Trim(host, "[]"); host == "" || sameName(host, "localhost") {
+		return false
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return true // a host name
+	}
+	return addr.Zone() == "" && addr.Unmap().IsGlobalUnicast()
+}
+
+// buildAgentChunkQueryEndpoint builds the CHUNK query endpoint (host:port) from agent DNS config:
+// the first published address, else the first listen address another host
+// can reach. With neither there is no endpoint, and a receiver asks at the
+// address it has for this agent.
 func buildAgentChunkQueryEndpoint(mp *MultiProviderConf) string {
 	if mp == nil {
 		return ""
@@ -825,8 +850,13 @@ func buildAgentChunkQueryEndpoint(mp *MultiProviderConf) string {
 	if len(dnsConf.Addresses.Publish) > 0 {
 		host = strings.TrimSpace(dnsConf.Addresses.Publish[0])
 	}
-	if host == "" && len(dnsConf.Addresses.Listen) > 0 {
-		host = strings.TrimSpace(dnsConf.Addresses.Listen[0])
+	if host == "" {
+		for _, listen := range dnsConf.Addresses.Listen {
+			if listen = strings.TrimSpace(listen); reachableListenAddress(listen) {
+				host = listen
+				break
+			}
+		}
 	}
 	if host == "" {
 		return ""
@@ -834,7 +864,7 @@ func buildAgentChunkQueryEndpoint(mp *MultiProviderConf) string {
 	if _, _, err := net.SplitHostPort(host); err == nil {
 		return host
 	}
-	return net.JoinHostPort(host, strconv.Itoa(int(port)))
+	return net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(int(port)))
 }
 
 // warnConfiguredAPIEndpoint says that a configured agent's api_base_url is
