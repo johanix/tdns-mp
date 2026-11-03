@@ -693,6 +693,7 @@ func (conf *Config) removalNSWait(zone, label, id string, agentNS bool) string {
 		}
 		return removalWaitSaid(conf, zone, id, "2 (its NS)", text+conf.parentRefusalNote(zone, id, step))
 	}
+	rb.watches(key, "")
 	delay, largest := conf.delegationNotifyWait(zone)
 	since := rb.sinceFirst(key, wait, time.Now())
 	until := since.Add(time.Duration(max(seen.nsTTL, zoneTTL))*time.Second + delay)
