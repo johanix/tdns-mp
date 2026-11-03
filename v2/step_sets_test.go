@@ -506,3 +506,69 @@ func TestALeavingSignerIsReadUnderTheZonesLock(t *testing.T) {
 	r.mpzd.leavingSigner()
 	<-done
 }
+
+// A refresh can publish a step's sets between the step and its recompute,
+// which then finds no difference from the data before it. The change of the
+// DS signers still asks the leader's sync, once: the check compares with
+// what the last check saw (CodeRabbit on #339).
+func TestADSChangeARefreshPublishedFirstStillAsksTheSync(t *testing.T) {
+	r := newComputedDSRig(t, "refreshfirst.steps.example.", []string{"us", "p2"})
+	z := r.mpzd.ZoneName
+	r.mpzd.Options[tdns.OptMultiProvider] = true
+	r.leader("agent.us.example.")
+	s := withActiveStore(t, r.mpzd)
+	rest := r.mpzd.roles()
+	rest.ParentSync = core.HsyncParentSyncAgent // the agents sync the parent
+	stepAs(t, s, z, 1, withSigners(rest, "us", "p2"))
+	r.conf.onSetsChanged(r.mpzd, true)
+	if n := r.requests(t); n != 0 {
+		t.Fatalf("no change of the DS signers, and %d syncs were asked for", n)
+	}
+	stepAs(t, s, z, 2, withSigners(rest, "us", "p2", "p3"))
+	r.mpzd.populateMPdata(r.conf.MpConfig(), r.mpzd.roles()) // as the refresh publishes it
+	r.conf.onSetsChanged(r.mpzd, true)
+	if n := r.requests(t); n != 1 {
+		t.Errorf("a refresh published the step's DS signers first: %d syncs asked for, want 1", n)
+	}
+	r.conf.onSetsChanged(r.mpzd, false)
+	if n := r.requests(t); n != 0 {
+		t.Errorf("the change was asked for again: %d more syncs", n)
+	}
+}
+
+// A step that gives the parent sync back to the agents runs the leader's
+// setup, which an election skipped while the owner synced the zone: a step
+// has no PostRefresh to wait for, as a refresh has, which runs it itself
+// (CodeRabbit on #339).
+func TestAStepThatGivesTheParentSyncBackRunsTheLeadersSetup(t *testing.T) {
+	asMPDaemon(t, AppTypeMPAgent)
+	r := newComputedDSRig(t, "giveback.steps.example.", []string{"us", "p2"})
+	z := r.mpzd.ZoneName
+	r.mpzd.Options[tdns.OptMultiProvider] = true
+	r.mpzd.Options[tdns.OptParentSync] = false // the owner syncs the parent
+	r.leader("agent.us.example.")
+	ran := make(chan ZoneName, 4)
+	r.lem.onLeaderElected = func(zone ZoneName) error {
+		ran <- zone
+		return nil
+	}
+	s := withActiveStore(t, r.mpzd)
+	rest := r.mpzd.roles()
+	rest.ParentSync = core.HsyncParentSyncOwner
+	stepAs(t, s, z, 1, withSigners(rest, "us", "p2"))
+	r.conf.onSetsChanged(r.mpzd, true)
+	sets := withSigners(rest, "us", "p2")
+	sets.ParentSync = core.HsyncParentSyncAgent
+	stepAs(t, s, z, 2, sets)
+	if givenBack := r.conf.onSetsChanged(r.mpzd, true); !givenBack {
+		t.Fatal("the step gave the parent sync back, and onSetsChanged does not say so")
+	}
+	select {
+	case zone := <-ran:
+		if zone != ZoneName(z) {
+			t.Errorf("the leader's setup ran for %s", zone)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("the step gave the parent sync back, and the leader's setup did not run")
+	}
+}

@@ -1109,6 +1109,24 @@ func (conf *Config) noteInstructions(mpzd *MPZoneData) {
 	s.Note(mpzd.ZoneName, in, err)
 }
 
+// dsSignersChanged: the zone's data names other DS signers than the last
+// check saw. It compares with what that check saw, not with the data before
+// a recompute: a refresh can publish a step's sets between the step and its
+// recompute, and its own check, or that recompute's, then finds the change.
+// The config parse's stub names none and is no data (computed), and the
+// first data is no change: a start is followed by the zone's election.
+func (mpzd *MPZoneData) dsSignersChanged() bool {
+	mpzd.Lock()
+	defer mpzd.Unlock()
+	if mpzd.MP == nil || !mpzd.MP.MPdata.computed() {
+		return false
+	}
+	now := mpzd.MP.MPdata.Sets.DSSigners
+	changed := mpzd.MP.dsSignersKnown && !slices.Equal(mpzd.MP.dsSignersSeen, now)
+	mpzd.MP.dsSignersSeen, mpzd.MP.dsSignersKnown = now, true
+	return changed
+}
+
 // onSetsChanged applies the step's sets where they act beyond the readers
 // (plan S3): the parentsync option, both ways, which tdns's parentsync hook
 // (P3) reads through the sets too; and with recompute, the multi-provider
@@ -1122,7 +1140,6 @@ func (conf *Config) noteInstructions(mpzd *MPZoneData) {
 // differs; an agent that does not lead, and a zone whose parent the owner
 // syncs, ask for nothing.
 func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack bool) {
-	dsChanged := false
 	if recompute && mpzd.Options[tdns.OptMultiProvider] {
 		// Computed on a wrapper of the zone as served, with a map of its own,
 		// and swapped in under the zone's lock, as a refresh and a hand-over
@@ -1137,12 +1154,8 @@ func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack b
 		w.populateMPdata(conf.MpConfig(), mpzd.roles())
 		mpzd.Lock()
 		mpzd.MP.MPdata, mpzd.MPOptions = w.MP.MPdata, w.MPOptions
-		after := mpzd.MP.MPdata
 		mpzd.Unlock()
 		mpMu.Unlock()
-		// data a load or a hand-over computed on both sides: the config
-		// parse's stub names no DS signer, and is no change of them
-		dsChanged = before.computed() && after.computed() && !slices.Equal(before.Sets.DSSigners, after.Sets.DSSigners)
 		// a recipient the zone's CSYNC waits for may have no role since: the
 		// CSYNC's time-out for members with no role is looked at again
 		// (design 4), as no confirmation may come to look
@@ -1151,10 +1164,15 @@ func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack b
 		}
 	}
 	givenBack = conf.followParentSyncParam(mpzd)
+	// A refresh runs the give-back itself, after PostRefresh; a change of
+	// the sets has none to wait for.
+	if givenBack && recompute {
+		conf.delegationSyncGivenBack(mpzd.ZoneName)
+	}
 	// asked once the parentsync option follows the step's sets: a step that
 	// gives the agents the parent sync and changes DSSigners would otherwise
 	// find the option off, and ask nothing
-	if dsChanged {
+	if mpzd.dsSignersChanged() {
 		conf.requestDelegationSync(nil, mpzd.ZoneName, "the step's DS set changed")
 	}
 	conf.handOverToParts(mpzd.ZoneName) // the agent's combiner and signer act by the sets too (S10, S11)

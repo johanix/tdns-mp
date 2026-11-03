@@ -46,12 +46,15 @@ type MemberState struct {
 	// tells of its zones' instructions, by zone (design rule 4), with the
 	// epoch of its start and the sequence of the telling within it, its
 	// provider's own nameserver names, and whether payload encryption is on
-	// at the sender. A group's rows carry none of it.
+	// at the sender. A group's rows carry none of it. Partial: the beat
+	// leaves out zones that something is going on in, which did not fit;
+	// the receiver keeps what it holds of the zones the beat does not tell.
 	Instr       map[string]InstrStamp `json:"instr,omitempty"`
 	Epoch       uint64                `json:"epoch,omitempty"`
 	Seq         uint64                `json:"seq,omitempty"`
 	Nameservers []string              `json:"nameservers,omitempty"`
 	Crypto      bool                  `json:"crypto,omitempty"`
+	Partial     bool                  `json:"partial,omitempty"`
 }
 
 // StampGroupHash is the group hash of the stamp entry, reserved: no group's
