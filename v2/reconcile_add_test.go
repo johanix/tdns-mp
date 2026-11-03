@@ -1338,3 +1338,190 @@ func TestAParentServersAnswerWithNoDSCountsAgainstTheDS(t *testing.T) {
 		t.Error("a server that refuses, and no other: nothing should be known")
 	}
 }
+
+// joinerKeysPublished is a joiner's signer, with its copy holding records, at the
+// moment its first keys are published: every other signer has applied them. It
+// answers on the machine's clock, and its looks run in place.
+func joinerKeysPublished(t *testing.T, zone string, records []string) (*signerRig, *fakeClock) {
+	t.Helper()
+	r := newSignerRig(t, zone, records...)
+	r.conf.InternalMp.servedKeys.start = func(look func()) { look() }
+	r.hand(joinerHandover(t, zone, 6, true), sigUs)
+	r.e.tickOwned()
+	clk := &fakeClock{t: time.Now()}
+	r.e.driver(zone).Clock = clk
+	inv, err := tdns.GetKeyInventory(r.kdb, zone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range inv {
+		if it.State != DnskeyStateForeign && !r.e.Signal(zone, it.KeyTag, "propagated", "", clk.Now()) {
+			t.Fatalf("key %d: the signal is not taken", it.KeyTag)
+		}
+	}
+	r.e.tickOwned()
+	if n := ownKeysIn(t, r, zone, KeyStatePublished); n != 2 {
+		t.Fatalf("%d of its keys are published, want its KSK and ZSK", n)
+	}
+	return r, clk
+}
+
+// ownKeysIn counts the zone's own keys in state.
+func ownKeysIn(t *testing.T, r *signerRig, zone, state string) int {
+	t.Helper()
+	inv, err := tdns.GetKeyInventory(r.kdb, zone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, it := range inv {
+		if it.State == state {
+			n++
+		}
+	}
+	return n
+}
+
+// servedKeyTTLs has each nameserver named answer with the zone's DNSKEY RRset at
+// its TTL; any other does not answer.
+func servedKeyTTLs(t *testing.T, zone string, ttls map[string]time.Duration) {
+	t.Helper()
+	k := testDnskey(t, zone, 256)
+	prev := servingKeysLookup
+	servingKeysLookup = func(_ context.Context, _ string, ns string) (*core.RRset, error) {
+		ttl, ok := ttls[ns]
+		if !ok {
+			return nil, errors.New("no answer")
+		}
+		key := *k
+		key.Hdr.Ttl = uint32(ttl / time.Second)
+		return &core.RRset{RRs: []dns.RR{&key}}, nil
+	}
+	t.Cleanup(func() { servingKeysLookup = prev })
+}
+
+// A joiner's first keys wait what the zone's servers serve its DNSKEY RRset with
+// (E5, T8), the largest of them: that is what caches hold. Its copy's TTL is the
+// data's, and its policy's is what it will serve itself, nothing a cache has seen.
+// Each case runs its real machine past its wait, the policy below and above its
+// copy's TTL. Its copy's TTL counts only until a server has answered.
+func TestAJoinersT8WaitsWhatTheZonesServersServe(t *testing.T) {
+	const fivemin, hour, day = 5 * time.Minute, time.Hour, 24 * time.Hour
+	const p1, p2 = "ns1.%s", "ns.p2.example."
+	for _, tc := range []struct {
+		name   string
+		policy time.Duration
+		copy   []time.Duration
+		served map[string]time.Duration // by nameserver; %s is the zone
+		want   time.Duration
+	}{
+		{"policy below its copy, its servers serve the lower", fivemin, []time.Duration{hour}, map[string]time.Duration{p1: fivemin, p2: fivemin}, fivemin},
+		{"policy above its copy, its servers serve the higher", day, []time.Duration{hour}, map[string]time.Duration{p1: hour, p2: day}, day},
+		{"policy above its copy, which nothing serves", day, []time.Duration{hour}, map[string]time.Duration{p1: hour, p2: hour}, hour},
+		{"policy below what another signer serves", fivemin, []time.Duration{hour}, map[string]time.Duration{p1: fivemin, p2: hour}, hour},
+		{"one server does not answer", fivemin, []time.Duration{hour}, map[string]time.Duration{p2: fivemin}, fivemin},
+		{"policy below its copy, no server answers", fivemin, []time.Duration{hour}, nil, hour},
+		{"policy above its copy, no server answers", day, []time.Duration{hour}, nil, hour},
+		{"no server answers, the longer TTL in its copy not first", fivemin, []time.Duration{hour, day}, nil, day},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const zone = "wait.adding.signer.example."
+			records := append(sigRecords(`serial="5" servers="us,p2" signers="p2"`), `3600 IN NS `+p2)
+			for _, ttl := range tc.copy {
+				k := testDnskey(t, zone, 256)
+				records = append(records, fmt.Sprintf("%d IN DNSKEY %d %d %d %s", int(ttl/time.Second), k.Flags, k.Protocol, k.Algorithm, k.PublicKey))
+			}
+			served := map[string]time.Duration{}
+			for ns, ttl := range tc.served {
+				if ns == p1 {
+					ns = fmt.Sprintf(p1, zone)
+				}
+				served[ns] = ttl
+			}
+			servedKeyTTLs(t, zone, served)
+			r, clk := joinerKeysPublished(t, zone, records)
+			r.mpzd.Lock()
+			r.mpzd.DnssecPolicy.TTLS.DNSKEY, r.mpzd.DnssecPolicy.TTLS.MaxServed = uint32(tc.policy/time.Second), uint32(tc.policy/time.Second)
+			r.mpzd.Unlock()
+			delay := r.e.driver(zone).Policy.PropagationDelay
+			clk.Advance(delay + tc.want - 30*time.Second)
+			r.e.tickOwned()
+			if n := ownKeysIn(t, r, zone, KeyStatePublished); n != 2 {
+				t.Errorf("30 s before the delay and %s: %d of its keys are still published, want 2", tc.want, n)
+			}
+			clk.Advance(time.Minute)
+			r.e.tickOwned()
+			if n := ownKeysIn(t, r, zone, KeyStatePublished); n != 0 {
+				t.Errorf("30 s after the delay and %s: %d of its keys are still published, want none", tc.want, n)
+			}
+		})
+	}
+}
+
+// A provider that signs serves the RRset itself: its keys wait its own copy's TTL,
+// and it asks nobody.
+func TestAProviderThatSignsWaitsTheTTLItServesAndAsksNobody(t *testing.T) {
+	const zone = "signs.adding.signer.example."
+	k := testDnskey(t, zone, 256)
+	records := append(sigRecords(`serial="5" servers="us,p2" signers="us,p2"`),
+		fmt.Sprintf("300 IN DNSKEY %d %d %d %s", k.Flags, k.Protocol, k.Algorithm, k.PublicKey))
+	r := newSignerRig(t, zone, records...)
+	r.conf.InternalMp.servedKeys.start = func(look func()) { look() }
+	r.hand(handoverFor(t, zone, sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)...), sigUs)
+	prev := servingKeysLookup
+	servingKeysLookup = func(context.Context, string, string) (*core.RRset, error) {
+		t.Error("a provider that signs asked the zone's servers")
+		return nil, errors.New("no answer")
+	}
+	t.Cleanup(func() { servingKeysLookup = prev })
+	if got := r.e.wire.ServedDnskeyTTL(zone); got != 5*time.Minute {
+		t.Errorf("it waits %s, want its own copy's 5m0s", got)
+	}
+}
+
+// The machine never waits for a look, and its wait only grows: a cache may hold
+// what was served before, and a server gone quiet has served what it served.
+func TestAServersLowerTTLOrSilenceDoesNotShortenAJoinersWait(t *testing.T) {
+	const zone = "grows.adding.signer.example."
+	k := testDnskey(t, zone, 256)
+	records := append(sigRecords(`serial="5" servers="us,p2" signers="p2"`),
+		fmt.Sprintf("7200 IN DNSKEY %d %d %d %s", k.Flags, k.Protocol, k.Algorithm, k.PublicKey))
+	r := newSignerRig(t, zone, records...)
+	r.hand(joinerHandover(t, zone, 6, false), sigUs)
+	var looks []func()
+	b := &r.conf.InternalMp.servedKeys
+	b.start = func(look func()) { looks = append(looks, look) }
+	ns1 := "ns1." + zone
+	servedKeyTTLs(t, zone, map[string]time.Duration{ns1: time.Hour})
+
+	if got := r.e.wire.ServedDnskeyTTL(zone); got != 2*time.Hour || len(looks) != 1 {
+		t.Fatalf("with a look under way it waits %s after %d looks, want its copy's 2h0m0s and one", got, len(looks))
+	}
+	if got := r.e.wire.ServedDnskeyTTL(zone); got != 2*time.Hour || len(looks) != 1 {
+		t.Errorf("a second tick waits %s after %d looks, want 2h0m0s and still one", got, len(looks))
+	}
+	looks[0]()
+	if got := r.e.wire.ServedDnskeyTTL(zone); got != time.Hour {
+		t.Errorf("once a server answered it waits %s, want 1h0m0s", got)
+	}
+
+	again := func(ttls map[string]time.Duration) time.Duration {
+		t.Helper()
+		servedKeyTTLs(t, zone, ttls)
+		b.mu.Lock()
+		b.zones[canonicalName(zone)].at = time.Time{}
+		b.mu.Unlock()
+		r.e.wire.ServedDnskeyTTL(zone)
+		looks[len(looks)-1]()
+		return r.e.wire.ServedDnskeyTTL(zone)
+	}
+	if got := again(map[string]time.Duration{ns1: 5 * time.Minute}); got != time.Hour {
+		t.Errorf("after its servers went lower it waits %s, want 1h0m0s", got)
+	}
+	if got := again(nil); got != time.Hour {
+		t.Errorf("after its servers went quiet it waits %s, want 1h0m0s", got)
+	}
+	if got := again(map[string]time.Duration{ns1: 3 * time.Hour}); got != 3*time.Hour {
+		t.Errorf("after its servers went higher it waits %s, want 3h0m0s", got)
+	}
+}

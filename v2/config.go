@@ -395,4 +395,7 @@ type InternalMpConf struct {
 	// parentSyncs: the steps of a change of parentsync, as this agent has
 	// carried them out (plan S20).
 	parentSyncs parentSyncBook
+	// servedKeys is what the signer has seen the servers of a zone it does not
+	// sign yet serve its DNSKEY RRset with (E5).
+	servedKeys servedKeysBook
 }

@@ -267,10 +267,26 @@ func (w *signerWire) Resign(zone string) {
 	sendResignRequest(w.conf.Config.Internal.ResignQ, dns.Fqdn(zone))
 }
 
+// ServedDnskeyTTL: a provider that signs serves the RRset itself, with its own
+// copy's TTL. One that does not sign yet serves nobody a set to wait out: what
+// caches hold is what the zone's servers served. Its copy's TTL is the data's, and
+// a signer's ceiling can have it served lower; its policy says what it will serve
+// itself, and a signer beside it can serve longer. So it waits the largest TTL the
+// zone's servers were seen serving (servedKeysBook), and its copy's only until
+// one has answered.
 func (w *signerWire) ServedDnskeyTTL(zone string) time.Duration {
-	if mpzd := w.mpzd(zone); mpzd != nil {
-		if rrset, err := mpzd.GetRRset(mpzd.ZoneName, dns.TypeDNSKEY); err == nil && rrset != nil && len(rrset.RRs) > 0 {
-			return time.Duration(rrset.RRs[0].Header().Ttl) * time.Second
+	mpzd := w.mpzd(zone)
+	if mpzd == nil {
+		return tdns.DefaultDnskeyTTL
+	}
+	if self, r, _ := w.sets(zone); self != "" && !has(r.Signing, self) {
+		if ttl, known := w.conf.InternalMp.servedKeys.largest(mpzd); known {
+			return ttl
+		}
+	}
+	if rrset, err := mpzd.GetRRset(mpzd.ZoneName, dns.TypeDNSKEY); err == nil {
+		if ttl, ok := dnskeyTTLOf(rrset); ok {
+			return ttl
 		}
 	}
 	return tdns.DefaultDnskeyTTL
