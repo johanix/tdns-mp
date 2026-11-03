@@ -375,6 +375,7 @@ type parentSeen struct {
 	at        time.Time
 	ns        []string // the names of its NS RRset, folded
 	nsTTL     uint32
+	nsServer  string   // the parent's server that said so
 	ds        []uint16 // the key tags of its DS RRset
 	dsTTL     uint32   // as last served
 	dnskeyTTL uint32   // the largest seen since the zone's first look; 0 if none
@@ -409,7 +410,7 @@ var parentLook = func(conf *Config, zone string) (parentSeen, error) {
 			last = err
 			continue
 		}
-		var seen parentSeen
+		seen := parentSeen{nsServer: server}
 		for _, rr := range nsrrs {
 			if ns, ok := rr.(*dns.NS); ok {
 				seen.ns = append(seen.ns, canonicalName(ns.Ns))
@@ -686,8 +687,14 @@ func (conf *Config) removalNSWait(zone, label, id string, agentNS bool) string {
 		}
 		return removalWaitSaid(conf, zone, id, "2 (its NS)", text)
 	}
-	delay, _ := conf.delegationNotifyWait(zone)
-	until := rb.sinceFirst(key, wait, time.Now()).Add(time.Duration(max(seen.nsTTL, zoneTTL))*time.Second + delay)
+	delay, largest := conf.delegationNotifyWait(zone)
+	since := rb.sinceFirst(key, wait, time.Now())
+	until := since.Add(time.Duration(max(seen.nsTTL, zoneTTL))*time.Second + delay)
+	// the wait's terms as they are read, and again if one of them changes
+	if rb.sayOnce(key, fmt.Sprintf("%s terms %d %s %d %s %s", wait, seen.nsTTL, seen.nsServer, zoneTTL, delay, since)) {
+		lg.Info("a removal's NS step counts its wait", "zone", zone, "provider", id, "parent_ns_ttl", seen.nsTTL, "parent_server", seen.nsServer,
+			"zone_ns_ttl", zoneTTL, "delay", delay, "delay_from", largest, "since", since.UTC().Format(time.RFC3339), "until", until.UTC().Format(time.RFC3339))
+	}
 	if time.Now().Before(until) {
 		return removalWaitSaid(conf, zone, id, "2 (its NS)", "for the NS TTL until "+removalTime(until))
 	}

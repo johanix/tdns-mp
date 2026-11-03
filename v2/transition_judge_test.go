@@ -299,6 +299,28 @@ func TestARefusedSerialIsJudgedAgainWhenTheActiveSerialChanges(t *testing.T) {
 	wantRefusals(t, "43 against 42", heldAt(t, s, 43).Refused, Refusal{RefusedNotBuilt, "gives agent.charlie.example. a server role: not built yet"})
 }
 
+// A kind not built stays refused until its step lands: the zone stays at its
+// active serial, frozen for nothing, and the owner's way out is a higher serial
+// without it. pubkey's step lands last, with S21, which takes this test away.
+func TestANotBuiltChangeStaysRefused(t *testing.T) {
+	seven := jAt(t, 7, jServers2, jAlpha, jBeta)
+	s := newStore(t)
+	noteKnown(t, s, storeZone, seven)
+	enforced(t, s, storeZone)
+	s.Note(storeZone, jAt(t, 8, jServers2+` pubkey`, jAlpha, jBeta), nil)
+	st := status(t, s, storeZone)
+	if st.Active == nil || st.Active.Serial != 7 || st.Agreeing != nil || len(s.frozen(storeZone)) != 0 {
+		t.Fatalf("a kind not built: %s", st.Line())
+	}
+	if len(st.Refused) == 0 || st.Refused[0].Code != RefusedNotBuilt {
+		t.Errorf("the refusal: %v", st.Refused)
+	}
+	s.Note(storeZone, jAt(t, 9, jServers2+` suffix="mp"`, jAlpha, jBeta), nil)
+	if st := status(t, s, storeZone); st.Active.Serial != 7 || st.Agreeing == nil || st.Agreeing.Serial != 9 {
+		t.Errorf("a higher serial without it is not agreed on: %s", st.Line())
+	}
+}
+
 func TestAnEditWithoutARaisedSerialIsAnOwnerError(t *testing.T) {
 	first, second := jAt(t, 42, jServers3, jAlpha, jBeta, jCharlie), jAt(t, 42, jServers3+` suffix="mp"`, jAlpha, jBeta, jCharlie)
 	s := newStore(t)

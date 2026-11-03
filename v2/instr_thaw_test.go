@@ -403,15 +403,13 @@ func TestANewerSerialDuringAgreeingIsTheOneAgreedOn(t *testing.T) {
 	}
 }
 
-// A refused newer serial does not replace the serial agreed on: a record
-// and then its role, published before the first is thawed. The first is
-// thawed, and the second is judged again against it: refused only as not
-// built, it waits while the transition reconciles, and the steady zone then
-// follows it (the not-built fallback).
+// A refused newer serial does not replace the serial agreed on: published
+// before the first is thawed, it is judged again against the first, and waits
+// on past that transition's "done".
 func TestARefusedNewerSerialDoesNotReplaceTheSerialAgreedOn(t *testing.T) {
-	r := newThawRig(t, "record-then-role.thaw.example.", roleA)
+	r := newThawRig(t, "refused-newer.thaw.example.", roleA)
 	r.agree()
-	w := freezeAt(t, 43, "v", "a,b,n", "") // n's role: refused until S18a
+	w := freezeAt(t, 43, "v", "a,b,z", "") // refused: a role for z, which has no record
 	r.store.Note(r.zone, w, nil)
 	st := status(t, r.store, r.zone)
 	if st.Agreeing == nil || st.Agreeing.Serial != 42 || st.Newest.Serial != 43 || len(st.Refused) == 0 {
@@ -421,16 +419,16 @@ func TestARefusedNewerSerialDoesNotReplaceTheSerialAgreedOn(t *testing.T) {
 	r.hear(roleB, r.agreeing(), true)
 	r.conf.thawTurn(r.zone)
 	st = status(t, r.store, r.zone)
-	if st.Active.Serial != 42 || st.Newest.Serial != 43 || len(st.Refused) == 0 || st.Follows != "" || st.Agreeing != nil {
-		t.Fatalf("after the thaw: active %s, newest %s, refused %v, follows %q, agreeing %s", serialOf(st.Active), serialOf(st.Newest), st.Refused, st.Follows, serialOf(st.Agreeing))
+	if st.Active.Serial != 42 || st.Newest.Serial != 43 || len(st.Refused) == 0 || st.Agreeing != nil {
+		t.Fatalf("after the thaw: active %s, newest %s, refused %v, agreeing %s", serialOf(st.Active), serialOf(st.Newest), st.Refused, serialOf(st.Agreeing))
 	}
 	// TestARefusedNewerSerialIsJudgedAgainAfterDone
 	if err := r.store.Done(r.zone); err != nil {
 		t.Fatal(err)
 	}
 	st = status(t, r.store, r.zone)
-	if st.Active.Serial != 43 || st.Follows == "" || st.Agreeing != nil || st.DoneAt.IsZero() {
-		t.Fatalf("after done: active %s, follows %q, agreeing %s, done at %v", serialOf(st.Active), st.Follows, serialOf(st.Agreeing), st.DoneAt)
+	if st.Active.Serial != 42 || st.Newest.Serial != 43 || len(st.Refused) == 0 || st.Agreeing != nil || st.DoneAt.IsZero() {
+		t.Fatalf("after done: active %s, newest %s, refused %v, agreeing %s, done at %v", serialOf(st.Active), serialOf(st.Newest), st.Refused, serialOf(st.Agreeing), st.DoneAt)
 	}
 }
 
