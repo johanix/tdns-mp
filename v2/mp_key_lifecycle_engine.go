@@ -333,6 +333,15 @@ func (w *signerWire) MarksChanged(zone string) {
 	go push(w.conf, dns.Fqdn(zone), nil)
 }
 
+// JoiningSince: the hand-over held says its keys-step, and when it was taken.
+func (w *signerWire) JoiningSince(zone string) (time.Time, bool) {
+	held, ok := actingHeld.Load().get(dns.Fqdn(zone))
+	if !ok || !held.handover.Joining {
+		return time.Time{}, false
+	}
+	return held.since, true
+}
+
 // SignsAtNaming: Signing names this provider, and Servers does not.
 func (w *signerWire) SignsAtNaming(zone string) bool {
 	self, r, _ := w.sets(zone)

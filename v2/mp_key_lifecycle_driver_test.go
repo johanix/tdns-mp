@@ -38,6 +38,7 @@ type fakeWire struct {
 	resentRm      []uint16        // those of resends that were removals
 	parentDS      map[uint16]bool // what the parent serves; absent = not served
 	parentOff     bool            // the parent cannot be asked
+	joiningSince  time.Time       // JoiningSince: its keys-step began then
 	signsAtNaming bool            // SignsAtNaming: named a signer, it serves nothing
 	parentTTL     time.Duration   // the TTL of the parent's DS RRset (zero: T9's wait ends the tick the DS is seen)
 	stripped      []uint16
@@ -130,9 +131,12 @@ func (w *fakeWire) Resign(zone string) {
 		hook()
 	}
 }
-func (w *fakeWire) KeysChanged(zone string)                           { w.mu.Lock(); defer w.mu.Unlock(); w.changes++ }
-func (w *fakeWire) MarksChanged(zone string)                          { w.mu.Lock(); defer w.mu.Unlock(); w.marks++ }
-func (w *fakeWire) SignsAtNaming(zone string) bool                    { return w.signsAtNaming }
+func (w *fakeWire) KeysChanged(zone string)        { w.mu.Lock(); defer w.mu.Unlock(); w.changes++ }
+func (w *fakeWire) MarksChanged(zone string)       { w.mu.Lock(); defer w.mu.Unlock(); w.marks++ }
+func (w *fakeWire) SignsAtNaming(zone string) bool { return w.signsAtNaming }
+func (w *fakeWire) JoiningSince(zone string) (time.Time, bool) {
+	return w.joiningSince, !w.joiningSince.IsZero()
+}
 func (w *fakeWire) ServedDnskeyTTL(zone string) (time.Duration, bool) { return w.ttl, true }
 func (w *fakeWire) Report(zone string, keyid uint16, what string) {
 	w.mu.Lock()
@@ -876,5 +880,81 @@ func TestANewSignersFirstKeysSignFromTheStart(t *testing.T) {
 	o.tick("minted")
 	if got := append(signs(o, KeyStateMpdist, "KSK"), append(signs(o, KeyStatePublished, "KSK"), signs(o, KeyStateStandby, "KSK")...)...); len(got) != 0 {
 		t.Errorf("a provider that serves signs with %v before T9", got)
+	}
+}
+
+// A joiner's keys that it already holds start over at its keys' step: nothing says
+// they have propagated, and an active key would read as if they had. They go on
+// signing, its KSK's DS leaves the DS set until T8, and T3, T8 and T9 run. A key that
+// has been through T3 in this joining stays where it is, and a provider that does not
+// join leaves its keys alone.
+func TestAJoinersKeysStartOverAtItsKeysStep(t *testing.T) {
+	d := newDriverRig(t, "startover.adding.example.", driverPolicy, "p2")
+	d.wire.parentDS[0] = true
+	gen := func(role string) uint16 {
+		t.Helper()
+		pkc, _, err := d.kdb.GenerateKeypair(d.l.Zone, "tdns", tdns.DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, role, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkc.KeyId
+	}
+	ksk, zsk := gen("KSK"), gen("ZSK")
+	tick := func(what string) {
+		t.Helper()
+		if err := d.l.Tick(); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+	}
+	tick("not joining")
+	if s := d.state(ksk); s != KeyStateActive {
+		t.Fatalf("not joining, its KSK is %s", s)
+	}
+	d.wire.joiningSince = time.Now()
+	if err := d.l.StartOver(); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []uint16{ksk, zsk} {
+		if s := d.state(id); s != KeyStateMpdist {
+			t.Fatalf("at its keys' step key %d is %s, want mpdist", id, s)
+		}
+		cols, err := d.l.columnsOf(id)
+		if err != nil || !cols.Sign || cols.DS.Bool {
+			t.Fatalf("key %d's columns %+v (%v), want it signing with no ds", id, cols, err)
+		}
+		if _, _, err := d.l.Confirm(id, "p2", "applied", ""); err != nil {
+			t.Fatal(err)
+		}
+		if s := d.state(id); s != KeyStatePublished {
+			t.Fatalf("every signer applied it, and key %d is %s", id, s)
+		}
+	}
+	d.clock.Advance(driverPolicy.PropagationDelay + d.wire.ttl + time.Second)
+	tick("propagated")
+	if s := d.state(ksk); s != KeyStateStandby {
+		t.Fatalf("propagated, its KSK is %s, want standby, and no second start", s)
+	}
+	d.wire.parentDS[ksk] = true
+	d.wire.parentTTL = time.Hour
+	tick("its DS served")
+	d.clock.Advance(time.Hour + time.Second)
+	tick("the DS TTL passed")
+	tick("and again")
+	if s := d.state(ksk); s != KeyStateActive {
+		t.Fatalf("the DS TTL passed, its KSK is %s, want active", s)
+	}
+	// keys from an earlier time, published before this joining began, a standby
+	// key among them
+	pkc, _, err := d.kdb.GenerateKeypair(d.l.Zone, "earlier", tdns.DnskeyStateStandby, dns.TypeDNSKEY, dns.ED25519, "ZSK", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.wire.joiningSince = time.Now().Add(time.Hour)
+	tick("an earlier time")
+	if s := d.state(ksk); s != KeyStateMpdist {
+		t.Errorf("published before its keys' step began, its KSK is %s, want mpdist", s)
+	}
+	if s := d.state(pkc.KeyId); s != KeyStateMpdist {
+		t.Errorf("published before its keys' step began, its standby ZSK is %s, want mpdist", s)
 	}
 }

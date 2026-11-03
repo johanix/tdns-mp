@@ -276,6 +276,96 @@ func TestANewSignerStartsSigningWithItsFirstKeysOnTheirWay(t *testing.T) {
 	}
 }
 
+// A new provider brought up after the owner's edit: its agent has no copy, its copy
+// names it a server and a signer, and it acts by that. Its signer signs with tdns's
+// keys, active at once. That must not read as its keys having propagated: handed its
+// keys' step, they start over before it says anything of them, so its steps wait for
+// T8 and T9 as anyone's do, and no NS is added before them.
+func TestAJoinerBroughtUpAfterTheEditHasItsKeysStartOver(t *testing.T) {
+	const zone = "afteredit.adding.signer.example."
+	records := sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)
+	r := newSignerRig(t, zone, records...)
+	prev := startSigning
+	startSigning = func(ctx context.Context, zd *tdns.ZoneData) error { return zd.StartSigning(ctx, 0) }
+	t.Cleanup(func() { startSigning = prev })
+	r.firstLoad(t, records...)
+	r.hand(&ActingHandover{Zone: zone, Phase: PhaseSteady, NoCopy: true, Made: time.Now()}, sigUs)
+	r.roleTurn()
+	states := func() map[string]bool {
+		t.Helper()
+		inv, err := tdns.GetKeyInventory(r.kdb, zone)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]bool{}
+		for _, it := range inv {
+			if it.State != DnskeyStateForeign {
+				out[it.State] = true
+				if !it.Sign {
+					t.Errorf("key %d is %s, and it does not sign", it.KeyTag, it.State)
+				}
+				if it.Flags&dns.SEP != 0 && it.State == KeyStateMpdist && it.DS != nil && *it.DS {
+					t.Errorf("its KSK %d is %s with ds=1 (P2)", it.KeyTag, it.State)
+				}
+			}
+		}
+		return out
+	}
+	if got := states(); len(got) != 1 || !got[KeyStateActive] {
+		t.Fatalf("by its own copy its keys are %v: the test has lost its point", got)
+	}
+	h := joinerHandover(t, zone, 7, true)
+	h.Step, h.Joining = 2, true
+	r.hand(h, sigUs)
+	if got := states(); len(got) != 1 || !got[KeyStateMpdist] {
+		t.Errorf("handed its keys' step, its keys are %v, want them on their way", got)
+	}
+	r.roleTurn()
+	if !r.mpzd.Options[tdns.OptInlineSigning] {
+		t.Error("handed Signing, with its keys on their way, it does not sign")
+	}
+}
+
+// A provider put back, its keys left from an earlier time and its zone not yet taken
+// by its key machine: its turn binds the policy and has them start over at once,
+// before it says anything of them.
+func TestAProviderPutBackHasItsKeysStartOverAsItsZoneIsTaken(t *testing.T) {
+	const zone = "putback.adding.signer.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="p2" signers="p2"`)...)
+	prev := bindWithoutSigning
+	bindWithoutSigning = func(zd *tdns.ZoneData) error {
+		zd.DnssecPolicy = &tdns.DnssecPolicy{Mode: tdns.DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.ED25519}
+		return nil
+	}
+	t.Cleanup(func() { bindWithoutSigning = prev })
+	r.mpzd.Lock()
+	r.mpzd.DnssecPolicy = nil
+	r.mpzd.Unlock()
+	r.owner = NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return r.kdb })
+	r.e = NewKeyLifecycleEngine(r.conf, r.owner)
+	r.e.wire.push = func(*Config, string, []uint16) {}
+	r.conf.InternalMp.KeyLifecycle, r.conf.InternalMp.KeyLifecycleOwner = r.e, r.owner
+	r.conf.MpConfig().KeyLifecycleZones = []string{zone}
+	for _, role := range []string{"KSK", "ZSK"} {
+		if _, _, err := r.kdb.GenerateKeypair(zone, "earlier", tdns.DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, role, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := joinerHandover(t, zone, 6, true)
+	h.Step, h.Joining = 2, true
+	r.hand(h, sigUs)
+	r.roleTurn()
+	inv, err := tdns.GetKeyInventory(r.kdb, zone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range inv {
+		if it.State != KeyStateMpdist {
+			t.Errorf("its key %d is %s, want it starting over", it.KeyTag, it.State)
+		}
+	}
+}
+
 // A first load handed Signing, over a copy that carries another's signatures, as
 // from a stanza naming another provider's signer: tdns would take them for the
 // zone's own and leave them, so the zone relays that copy, and it is StartSigning
@@ -334,10 +424,16 @@ func TestAJoinersSignerIsHandedItsKeysAfterEveryMemberHoldsThem(t *testing.T) {
 	if h := r.wantedBy(r.combiner); h == nil || !has(h.Sets.KeySigners, "a") || !has(h.Sets.KeyConfirmers, "a") {
 		t.Errorf("the combiner is handed %+v at its first step, want a in the key sets", h)
 	}
-	if h := r.wantedBy(r.signer); h == nil || has(h.Sets.KeySigners, "a") || has(h.Sets.KeyConfirmers, "a") || h.Step != st.Number {
+	if h := r.wantedBy(r.signer); h == nil || has(h.Sets.KeySigners, "a") || has(h.Sets.KeyConfirmers, "a") || h.Step != st.Number || h.Joining {
 		t.Errorf("the signer is handed %+v at its first step, want the step without a", h)
 	}
 	r.at(r.next(), signerAddMint)
+	if h := r.wantedBy(r.signer); h == nil || !h.Joining {
+		t.Errorf("the signer is handed %+v at its keys' step, want it marked, so that keys it holds start over", h)
+	}
+	if h := r.wantedBy(r.combiner); h == nil || h.Joining {
+		t.Errorf("the combiner is handed %+v at its keys' step, the mark is the signer's", h)
+	}
 	if h := r.wantedBy(r.signer); h == nil || !has(h.Sets.KeySigners, "a") || !has(h.Sets.KeyConfirmers, "a") || !has(h.Sets.Signing, "a") {
 		t.Errorf("the signer is handed %+v once every member holds it, want a in the key sets and in Signing", h)
 	}
@@ -608,6 +704,10 @@ func TestOnlyAJoinersOwnAgentWaitsForItsSigner(t *testing.T) {
 	}
 	if line := signerAddStatus(r.conf, r.zone, heldStep{InstrStep: other}, time.Now()); line != "" {
 		t.Errorf("another provider's step, its status says %q", line)
+	}
+	holdSignerAddStep(t, r.store, r.zone, roleB, signerAddMint, core.HsyncParentSyncOwner)
+	if h := r.conf.forOwnSigner(r.zone, &ActingHandover{Zone: r.zone}); h == nil || h.Joining {
+		t.Errorf("another provider's keys' step, and this signer is handed %+v", h)
 	}
 }
 
