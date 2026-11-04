@@ -1255,7 +1255,9 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 						setConfirmation(tr, "accepted", "")
 						tr.UpdatedAt = now
 						matched++
-						if allRecipientsConfirmed(detail.Zone, tr) {
+						if nonVotingMember(detail.Zone, AgentId(source)) && len(tr.ExpectedRecipients) > 0 {
+							settleAddition(tr) // it may have lost its vote after the voters answered
+						} else if allRecipientsConfirmed(detail.Zone, tr) {
 							tr.State = RRStateAccepted
 							tr.Reason = ""
 						}
