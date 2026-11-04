@@ -656,6 +656,64 @@ func TestADsbootSyncThatFailedOnAnUpdateIsTriedAgain(t *testing.T) {
 	}
 }
 
+// A withdrawal whose publish failed: by the time it goes again the
+// contributions are gone and the publish is all that is owed, as for a
+// _signal KEY (retractSignalKey). The names are not settled while the provider
+// zone serves them, whichever way it goes again: the combiner's loop or the
+// agent handing the sets again, and that one is not told ok before they go.
+func TestADsbootWithdrawalWhosePublishFailedIsPublishedWhenTriedAgain(t *testing.T) {
+	const zone = "withdrawal.dsboot.example."
+	const params = `servers="alpha" signers="alpha" nsmgmt="agent" parentsync="agent" pubcds`
+	for _, tc := range []struct {
+		name  string
+		again func(d *dsbootCombiner, withdraw func() *CombinerSyncResponse)
+	}{
+		{"the combiner's loop", func(d *dsbootCombiner, _ func() *CombinerSyncResponse) { syncOwedDsbootNames() }},
+		{"the agent", func(d *dsbootCombiner, withdraw func() *CombinerSyncResponse) {
+			if resp := withdraw(); resp.Status != "ok" {
+				d.t.Errorf("the hand-over again: %s: %s", resp.Status, resp.Message)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newDsbootCombiner(t, zone, params)
+			d.hand(params, 1, false, true)
+			d.cds(okCDS)
+			if got := d.served(consentNS1, dns.TypeCDS); len(got) != 1 {
+				t.Fatalf("the CDS before the withdrawal: %v", got)
+			}
+			withdraw := func() *CombinerSyncResponse {
+				h := handoverFor(t, zone, d.records(params)...)
+				h.Step, h.Sets.Pubcds = 2, false
+				return handTo(d.conf, h, consentAgent)
+			}
+			store := actingHeld.Load()
+			prov, _ := Zones.Get(consentProviderZone)
+
+			prov.ZoneStore = tdns.XfrZone // its publish fails
+			if resp := withdraw(); resp.Status != "partial" {
+				t.Fatalf("the withdrawal whose publish fails: %s: %s", resp.Status, resp.Message)
+			}
+			syncOwedDsbootNames() // and fails again
+			if got := store.zonesOwingDsboot(); !slices.Equal(got, []string{zone}) {
+				t.Fatalf("the zones owing their names while the publish fails: %v", got)
+			}
+			prov.ZoneStore = tdns.MapZone
+			if got := d.served(consentNS1, dns.TypeCDS); len(got) != 1 {
+				t.Fatalf("the CDS the publish that failed left: %v", got)
+			}
+
+			tc.again(d, withdraw)
+			if got := d.served(consentNS1, dns.TypeCDS); len(got) != 0 {
+				t.Errorf("the CDS once tried again: %v", got)
+			}
+			if got := store.zonesOwingDsboot(); len(got) != 0 {
+				t.Errorf("the zones owing their names once tried again: %v", got)
+			}
+		})
+	}
+}
+
 // S17a's roll and a step meet in sendZoneKEY. A roll's new KEY goes where the
 // sets at the zone's step say, under the distribution it booked: at-apex
 // alone before the step that gives pubkey, at-ns after it, and at-apex alone

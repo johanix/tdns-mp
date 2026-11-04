@@ -148,7 +148,9 @@ func syncOwedDsbootNames() {
 // allowed-rrtypes no longer allow, goes, from every origin, and what want
 // says is held in the name of by. It publishes when anything is wanted or has
 // gone: a zone whose names are in place publishes nothing, and one that lost
-// them to a failed publish gets them now.
+// them to a failed publish gets them now. So does a withdrawal whose publish
+// failed: its contributions are already gone and the publish is all that is
+// owed, and the combine has kept the cleanup it could not make.
 func (provider *MPZoneData) settleDsboot(zone, prefix, by string, owners []string, want map[string]map[uint16][]dns.RR) (published, withdrawn bool, err error) {
 	type contribution struct {
 		origin, owner string
@@ -198,7 +200,7 @@ func (provider *MPZoneData) settleDsboot(zone, prefix, by string, owners []strin
 			published = published || changed
 		}
 	}
-	if wanted || len(stale) > 0 {
+	if wanted || len(stale) > 0 || provider.MP.cleanupPendingUnder(prefix) {
 		if _, cerr := provider.CombineWithLocalChanges(); cerr != nil {
 			errs = append(errs, fmt.Errorf("provider zone %s: publishing the _dsboot names of %s: %w", provider.ZoneName, zone, cerr))
 		}
