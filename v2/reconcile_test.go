@@ -1660,6 +1660,13 @@ func TestALeavingProvidersRejectionOfAKeyCountsWhileItIsWaitedFor(t *testing.T) 
 	if _, _, rejected, _ := ign.outcome(); len(rejected) != 1 {
 		t.Errorf("the key the leaver ignored while waited for: rejected %v", rejected)
 	}
+	// a rejection's reason goes before a signer's ignoring it, whoever sorts first
+	both := track("both")
+	refused("both")
+	tm.ProcessDnskeyConfirmation("both", roleB, transport.ConfirmIgnored.String(), nil, nil)
+	if _, _, rejected, msg := both.outcome(); len(rejected) != 1 || msg != "n refuses" {
+		t.Errorf("the key the leaver rejected and b ignored: rejected %v, reason %q", rejected, msg)
+	}
 	track("waits")
 	applied("waits")
 	tm.dnskeyNoRoleTimedOut(t.Context(), "waits")
@@ -1671,8 +1678,13 @@ func TestALeavingProvidersRejectionOfAKeyCountsWhileItIsWaitedFor(t *testing.T) 
 
 	// a step takes it out
 	step(2, false)
-	if _, _, rejected, _ := before.outcome(); len(rejected) != 0 {
-		t.Errorf("what the leaver rejected before it left still rejects the key: %v", rejected)
+	if _, _, rejected, msg := before.outcome(); len(rejected) != 0 || msg != "" {
+		t.Errorf("what the leaver rejected before it left still rejects the key: %v, reason %q", rejected, msg)
+	}
+	// and its reason is not the one the signer hears when b rejects the key
+	tm.ProcessDnskeyConfirmation("before", roleB, transport.ConfirmRejected.String(), nil, []RejectedItemInfo{{Record: key.String(), Reason: "b refuses"}})
+	if _, _, rejected, msg := before.outcome(); len(rejected) != 1 || msg != "b refuses" {
+		t.Errorf("the key b rejected after the leaver's rejection stopped counting: rejected %v, reason %q", rejected, msg)
 	}
 	if _, _, rejected, _ := ign.outcome(); len(rejected) != 0 {
 		t.Errorf("what the leaver ignored before it left still rejects the key: %v", rejected)
@@ -1691,5 +1703,14 @@ func TestALeavingProvidersRejectionOfAKeyCountsWhileItIsWaitedFor(t *testing.T) 
 	tm.ProcessDnskeyConfirmation("voter", roleB, transport.ConfirmRejected.String(), nil, []RejectedItemInfo{{Record: key.String(), Reason: "b refuses"}})
 	if _, _, rejected, msg := p.outcome(); len(rejected) != 1 || msg != "b refuses" {
 		t.Errorf("the key b rejected: rejected %v, reason %q", rejected, msg)
+	}
+	// the same when b's rejection comes as its answer to a catch-up
+	p = track("credited")
+	refused("credited")
+	tm.dnskeyPropMu.Lock()
+	tm.creditFromAnswerLocked(&sentAnswer{zone: zone, asker: roleB, at: time.Now(), keys: map[uint16]bool{kt: true}}, roleB, transport.ConfirmRejected.String(), nil, []RejectedItemInfo{{Record: key.String(), Reason: "b refuses"}}, nil)
+	tm.dnskeyPropMu.Unlock()
+	if _, _, rejected, msg := p.outcome(); len(rejected) != 1 || msg != "b refuses" {
+		t.Errorf("the key b rejected in its answer to a catch-up: rejected %v, reason %q", rejected, msg)
 	}
 }
