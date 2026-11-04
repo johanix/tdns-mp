@@ -4,6 +4,7 @@
 package tdnsmp
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"slices"
@@ -383,7 +384,7 @@ func TestALookReadsEveryServerThatAnswers(t *testing.T) {
 	if len(seen.each) != 2 {
 		t.Errorf("the servers that answered: %d, want 2: %+v", len(seen.each), seen.each)
 	}
-	if got := seen.behind(func(one parentSeen) bool { return slices.Contains(one.ns, "ns1.n.example.") }); !slices.Equal(got, []string{stale}) {
+	if got := seen.behind(parentSeen.toldNS, func(one parentSeen) bool { return slices.Contains(one.ns, "ns1.n.example.") }); !slices.Equal(got, []string{stale}) {
 		t.Errorf("the server behind: %v, want %s", got, stale)
 	}
 
@@ -408,13 +409,116 @@ func TestALookReadsEveryServerThatAnswers(t *testing.T) {
 	}
 }
 
+// A server tells what it answers: a failed query of one RRset takes nothing from
+// its answer for the other, and no server's behind for what it did not tell.
+func TestAServerTellsWhatItAnswers(t *testing.T) {
+	const leaving = "ns1.n.example."
+	ns := func(names ...string) []dns.RR {
+		var rrs []dns.RR
+		for _, name := range names {
+			rrs = append(rrs, &dns.NS{Hdr: dns.RR_Header{Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 600}, Ns: name})
+		}
+		return rrs
+	}
+	ds := func(tags ...uint16) []dns.RR {
+		var rrs []dns.RR
+		for _, tag := range tags {
+			rrs = append(rrs, &dns.DS{Hdr: dns.RR_Header{Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: 900}, KeyTag: tag, Algorithm: 15, DigestType: dns.SHA256, Digest: fmt.Sprintf("%04X", tag)})
+		}
+		return rrs
+	}
+	type answer struct {
+		ns, ds       []dns.RR
+		nsErr, dsErr error
+	}
+	failed := errors.New("no answer")
+	look := func(a, b answer) (parentSeen, error) {
+		return parentAtEveryServer([]string{parentA, parentB}, func(server string, rrtype uint16) ([]dns.RR, error) {
+			one := a
+			if server == parentB {
+				one = b
+			}
+			if rrtype == dns.TypeNS {
+				return one.ns, one.nsErr
+			}
+			return one.ds, one.dsErr
+		})
+	}
+	holdsNS := func(one parentSeen) bool { return slices.Contains(one.ns, leaving) }
+	holdsDS := func(one parentSeen) bool { return slices.Contains(one.ds, 2) }
+
+	seen, err := look(answer{ns: ns("ns1.a.example.", leaving), dsErr: failed}, answer{ns: ns("ns1.a.example."), ds: ds(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(seen.ns, leaving) {
+		t.Errorf("a failed DS query took the server's NS RRset: %v", seen.ns)
+	}
+	if got := seen.behind(parentSeen.toldNS, holdsNS); !slices.Equal(got, []string{parentA}) {
+		t.Errorf("behind for its NS: %v", got)
+	}
+	if got := seen.behind(parentSeen.toldDS, holdsDS); len(got) != 0 {
+		t.Errorf("behind for a DS it did not tell: %v", got)
+	}
+
+	seen, err = look(answer{nsErr: failed, ds: ds(1, 2)}, answer{ns: ns("ns1.a.example."), ds: ds(1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(seen.ds, 2) {
+		t.Errorf("a failed NS query took the server's DS RRset: %v", seen.ds)
+	}
+	if got := seen.behind(parentSeen.toldDS, holdsDS); !slices.Equal(got, []string{parentA}) {
+		t.Errorf("behind for its DS: %v", got)
+	}
+	if got := seen.behind(parentSeen.toldNS, holdsNS); len(got) != 0 {
+		t.Errorf("behind for an NS it did not tell: %v", got)
+	}
+	if seen.nsServer != parentB || seen.nsTTL != 600 {
+		t.Errorf("the NS TTL from a server that did not tell it: %d from %s", seen.nsTTL, seen.nsServer)
+	}
+
+	// the only server that told it holds it: none is behind the one that did not
+	seen, err = look(answer{ns: ns("ns1.a.example."), dsErr: failed}, answer{ns: ns("ns1.a.example."), ds: ds(1, 2)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := seen.behind(parentSeen.toldDS, holdsDS); len(got) != 0 {
+		t.Errorf("one that told its DS is behind one that did not: %v", got)
+	}
+	if got := parentFrom(parentSeen{nsServer: parentA, noNS: true}, parentSeen{nsServer: parentB, ns: []string{leaving}}).nsServer; got != parentB {
+		t.Errorf("the NS RRset's server: %s", got)
+	}
+
+	// no DS and a failed NS query: nothing shows it holds the zone
+	seen, err = look(answer{nsErr: failed}, answer{ns: ns("ns1.a.example."), ds: ds(1, 2)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(seen.each) != 1 {
+		t.Errorf("a server that tells nothing was read: %+v", seen.each)
+	}
+	if got := seen.behind(parentSeen.toldDS, holdsDS); len(got) != 0 {
+		t.Errorf("behind one that tells nothing: %v", got)
+	}
+
+	// with an RRset no server tells, it is not known: a look reading it gone
+	// would end the watch on it
+	if _, err := look(answer{ns: ns(leaving), dsErr: failed}, answer{ns: ns(leaving), dsErr: failed}); !errors.Is(err, failed) {
+		t.Errorf("no server told the DS: %v", err)
+	}
+	if _, err := look(answer{nsErr: failed, ds: ds(2)}, answer{nsErr: failed, ds: ds(2)}); !errors.Is(err, failed) {
+		t.Errorf("no server told the NS: %v", err)
+	}
+}
+
 // Two servers behind are both named, in one order whichever answered first: a
 // status that changes logs a line.
 func TestServersBehindAreNamedInOneOrder(t *testing.T) {
 	holds := func(one parentSeen) bool { return slices.Contains(one.ds, 2) }
 	has := func(server string) parentSeen { return parentSeen{nsServer: server, ds: []uint16{2}} }
 	dropped := parentSeen{nsServer: "192.0.2.3:53"}
-	got := parentFrom(has(parentB), dropped, has(parentA)).behind(holds)
+	got := parentFrom(has(parentB), dropped, has(parentA)).behind(parentSeen.toldDS, holds)
 	if !slices.Equal(got, []string{parentA, parentB}) {
 		t.Errorf("behind: %v", got)
 	}

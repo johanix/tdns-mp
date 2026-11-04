@@ -377,8 +377,13 @@ type parentSeen struct {
 	ds       []uint16     // the key tags of its DS RRset
 	dsRRs    []*dns.DS    // the same RRset, whole
 	dsTTL    uint32       // the largest, as last served
+	noNS     bool         // of one server: its NS query failed, so it tells nothing of them
+	noDS     bool         // of one server: it tells nothing of its DS (parentAtEveryServer)
 	each     []parentSeen // what each server that answered serves
 }
+
+func (one parentSeen) toldNS() bool { return !one.noNS }
+func (one parentSeen) toldDS() bool { return !one.noDS }
 
 // parentLook asks the parent what it serves for the zone; a test stands in
 // for it. It asks the servers AnalyseZoneDelegation asks.
@@ -403,29 +408,35 @@ var parentLook = func(conf *Config, zone string) (parentSeen, error) {
 	return seen, nil
 }
 
-// parentAtEveryServer is parentSeen from asking each of servers. One that does
-// not answer hands nothing to anyone, and one with no NS RRset for the zone
-// tells nothing of it; with no answer at all nothing is known.
+// parentAtEveryServer is parentSeen from asking each of servers. A server tells
+// what it answers and hands out nothing else: one whose DS query fails still
+// tells its NS RRset, and one whose NS query fails still tells a DS RRset it
+// serves, though not that it serves none, as only an NS RRset shows it holds the
+// zone. One with no NS RRset for the zone tells nothing of it. With no server
+// telling the NS RRset, or none telling the DS, that is not known, and the look
+// has found nothing out: the last one stands.
 func parentAtEveryServer(servers []string, ask func(server string, rrtype uint16) ([]dns.RR, error)) (parentSeen, error) {
 	var seen parentSeen
 	var last error
 	for _, server := range servers {
-		nsrrs, err := ask(server, dns.TypeNS)
-		if err != nil {
-			last = err
+		nsrrs, nsErr := ask(server, dns.TypeNS)
+		if nsErr != nil {
+			last = nsErr
+		} else if len(nsrrs) == 0 {
 			continue
 		}
-		if len(nsrrs) == 0 {
-			continue
+		dsrrs, dsErr := ask(server, dns.TypeDS)
+		if dsErr != nil {
+			last = dsErr
 		}
-		dsrrs, err := ask(server, dns.TypeDS)
-		if err != nil {
-			last = err
-			continue
+		one := serverSeen(server, nsrrs, dsrrs)
+		one.noNS = nsErr != nil
+		one.noDS = dsErr != nil || (nsErr != nil && len(dsrrs) == 0)
+		if one.toldNS() || one.toldDS() {
+			seen.add(one)
 		}
-		seen.add(serverSeen(server, nsrrs, dsrrs))
 	}
-	if len(seen.each) > 0 {
+	if slices.ContainsFunc(seen.each, parentSeen.toldNS) && slices.ContainsFunc(seen.each, parentSeen.toldDS) {
 		return seen, nil
 	}
 	if last == nil {
@@ -467,23 +478,28 @@ func (seen *parentSeen) add(one parentSeen) {
 			seen.dsRRs = append(seen.dsRRs, ds)
 		}
 	}
-	if seen.nsServer == "" || one.nsTTL > seen.nsTTL {
+	if one.toldNS() && (seen.nsServer == "" || one.nsTTL > seen.nsTTL) {
 		seen.nsTTL, seen.nsServer = one.nsTTL, one.nsServer
 	}
 	seen.dsTTL = max(seen.dsTTL, one.dsTTL)
 }
 
-// behind are the servers holding what holds asks of, while another that answered
-// does not: the parent has dropped it and they have yet to follow. Sorted; none
-// while every server holds it, as no server is behind then.
-func (seen parentSeen) behind(holds func(one parentSeen) bool) []string {
+// behind are the servers holding what holds asks of, while another that told of
+// it does not: the parent has dropped it and they have yet to follow. Sorted;
+// none while every server that told holds it, as no server is behind then.
+func (seen parentSeen) behind(told, holds func(one parentSeen) bool) []string {
 	var servers []string
+	telling := 0
 	for _, one := range seen.each {
+		if !told(one) {
+			continue
+		}
+		telling++
 		if holds(one) {
 			servers = append(servers, one.nsServer)
 		}
 	}
-	if len(servers) == len(seen.each) {
+	if len(servers) == telling {
 		return nil
 	}
 	slices.Sort(servers)
@@ -706,7 +722,7 @@ func (conf *Config) removalNSWait(zone, label, id string, agentNS bool) string {
 		if !agentNS && slices.ContainsFunc(named, func(n string) bool { return slices.Contains(zoneNames, canonicalName(n)) }) {
 			text += " (the owner's NS RRset still names it)"
 		}
-		text += behindSaid(seen.behind(func(one parentSeen) bool {
+		text += behindSaid(seen.behind(parentSeen.toldNS, func(one parentSeen) bool {
 			return slices.ContainsFunc(named, func(n string) bool { return slices.Contains(one.ns, canonicalName(n)) })
 		}))
 		return removalWaitSaid(conf, zone, id, "2 (its NS)", text+conf.parentRefusalNote(zone, id, step))
@@ -750,7 +766,7 @@ func (conf *Config) removalDSWait(zone, label, id string) string {
 		conf.askStepSync(zone, "a removal's DS step")
 		rb.forgetWait(key, wait)
 		rb.watches(key, step)
-		text := behindSaid(seen.behind(func(one parentSeen) bool { return !dsLeft(conf, zone, one) }))
+		text := behindSaid(seen.behind(parentSeen.toldDS, func(one parentSeen) bool { return !dsLeft(conf, zone, one) }))
 		return removalWaitSaid(conf, zone, id, "3 (its DS)", "until the parent no longer serves its DS"+text+conf.parentRefusalNote(zone, id, step))
 	}
 	rb.watches(key, "")
