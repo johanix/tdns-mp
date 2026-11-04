@@ -70,7 +70,7 @@ func TestProcessDnskeyConfirmationReadsWhatTheAnswerSaysAboutOurKeys(t *testing.
 	track("d2")
 	tm.ProcessDnskeyConfirmation("d2", "a1", transport.ConfirmFailed.String(), nil, rej(ours, "policy forbids"))
 	waiting("d2", "a1 rejected, a2 not heard")
-	if p := tm.pendingDnskeyPropagations["d2"]; !p.Rejected || p.Reasons["a1"] != "policy forbids" || !p.ExpectedAgents["a1"] {
+	if p := tm.pendingDnskeyPropagations["d2"]; !p.Rejected || p.Reasons["a1"][ours.KeyTag()] != "policy forbids" || !p.ExpectedAgents["a1"] {
 		t.Errorf("rejection not recorded as a final answer: %+v", p)
 	}
 	tm.ProcessDnskeyConfirmation("d2", "a2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
@@ -79,7 +79,7 @@ func TestProcessDnskeyConfirmationReadsWhatTheAnswerSaysAboutOurKeys(t *testing.
 	// a partial that rejected ours while applying theirs: rejected
 	track("d3")
 	tm.ProcessDnskeyConfirmation("d3", "a1", transport.ConfirmPartial.String(), []string{theirs.String()}, rej(ours, "bad flags"))
-	if p := tm.pendingDnskeyPropagations["d3"]; !p.Rejected || p.Reasons["a1"] != "bad flags" {
+	if p := tm.pendingDnskeyPropagations["d3"]; !p.Rejected || p.Reasons["a1"][ours.KeyTag()] != "bad flags" {
 		t.Errorf("a partial that rejected ours: %+v, want rejected", p)
 	}
 

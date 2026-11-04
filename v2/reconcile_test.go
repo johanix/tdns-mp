@@ -1702,6 +1702,70 @@ func TestDoneWithAWaitingSerialKeepsTheOwedList(t *testing.T) {
 	}
 }
 
+// What a member with no role rejects decides nothing, by the project owner's
+// ruling, also if the member gains a vote before the distribution ends. Its
+// rejection from before that is not counted then, and it is not asked again; a
+// rejection it gives once it has its vote counts.
+func TestARejectionOfAKeyFromBeforeAMemberHadAVoteDecidesNothing(t *testing.T) {
+	for _, tc := range []struct{ name, zone, auditors string }{
+		{"no role", "laterolekey.reconcile.example.", ""},
+		{"auditor", "lateauditorkey.reconcile.example.", "n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newReconcileRig(t, tc.zone, roleA)
+			activate := func(in *Instructions) {
+				t.Helper()
+				if err := r.store.update(r.zone, func(z *zoneSerials) error {
+					z.Active.Reading, z.Active.SerialDigest = in, sd(in)
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			activate(freezeAt(t, 42, "v", "a,b", tc.auditors))
+			zone := ZoneName(r.zone)
+			tm := r.conf.InternalMp.MPTransport
+			tm.noRoleTimeout = time.Hour // the test ends the wait itself
+			key := testDnskeyRR(t, r.zone, 257)
+			kt := key.KeyTag()
+			track := func(distID string) *PendingDnskeyPropagation {
+				tm.TrackDnskeyPropagation(t.Context(), zone, distID, []uint16{kt}, nil, []AgentId{roleB, roleN})
+				tm.dnskeyPropMu.Lock()
+				defer tm.dnskeyPropMu.Unlock()
+				return tm.pendingDnskeyPropagations[distID]
+			}
+			items := []RejectedItemInfo{{Record: key.String(), Reason: "n refuses"}}
+			direct, credited := track("direct"), track("credited")
+			tm.ProcessDnskeyConfirmation("direct", roleN, transport.ConfirmRejected.String(), nil, items)
+			tm.dnskeyPropMu.Lock()
+			tm.creditFromAnswerLocked(&sentAnswer{zone: zone, asker: roleN, at: time.Now(), keys: map[uint16]bool{kt: true}}, roleN, transport.ConfirmRejected.String(), nil, items, nil)
+			tm.dnskeyPropMu.Unlock()
+			if !direct.ExpectedAgents[roleN] || !credited.ExpectedAgents[roleN] {
+				t.Fatalf("n's answer did not end the wait for it: %v %v", direct.ExpectedAgents, credited.ExpectedAgents)
+			}
+
+			activate(freezeAt(t, 43, "w", "a,b,n", ""))
+			if !canHoldAKey(zone, roleN) {
+				t.Fatal("n has no vote after the thaw")
+			}
+			for name, p := range map[string]*PendingDnskeyPropagation{"a direct answer": direct, "an answer to a catch-up": credited} {
+				if propagated, _, rejected, msg := p.outcome(); len(propagated) != 1 || len(rejected) != 0 || msg != "" {
+					t.Errorf("n rejected the key in %s before it had a vote: propagated %v, rejected %v, reason %q", name, propagated, rejected, msg)
+				}
+				if got := p.Results[roleN][kt]; got != "rejected" {
+					t.Errorf("n's answer in %s reads %q, want it recorded", name, got)
+				}
+			}
+
+			afterwards := track("afterwards")
+			tm.ProcessDnskeyConfirmation("afterwards", roleN, transport.ConfirmRejected.String(), nil, items)
+			if _, _, rejected, msg := afterwards.outcome(); len(rejected) != 1 || msg != "n refuses" {
+				t.Errorf("n rejected the key with a vote: rejected %v, reason %q", rejected, msg)
+			}
+		})
+	}
+}
+
 // TestALeavingProvidersRejectionOfAKeyCountsWhileItIsWaitedFor, by the project
 // owner's ruling: a leaving provider may still be delegated to (design 5.2), so
 // while it is among the key confirmers a distribution has no time-out for it,

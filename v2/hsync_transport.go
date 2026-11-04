@@ -2502,10 +2502,11 @@ type PendingDnskeyPropagation struct {
 	// (its HSYNC identity's label is among the HSYNCPARAM signers); nil
 	// when the zone is not here to ask.
 	Signing  map[AgentId]bool
-	Rejected bool // True if an agent that can hold a key rejected one when it answered; only logged
-	// Reasons is each agent's first rejection reason; outcome reads those
-	// that count.
-	Reasons   map[AgentId]string
+	Rejected bool // True if a rejection was noted (noteRejectionLocked); only logged
+	// Reasons is, per agent and key, the reason of a rejection by an agent
+	// that could hold a key when it rejected (noteRejectionLocked). outcome
+	// reads those of agents that still can.
+	Reasons   map[AgentId]map[uint16]string
 	CreatedAt time.Time
 	// Stamps is each of ExpectedAgents' stamp per key: that of the answer
 	// that gave the key its result (Results), carried with the result by a
@@ -2754,8 +2755,11 @@ func signingAgents(zone ZoneName, agents []AgentId) map[AgentId]bool {
 // an ignored answer counts as it comes. What a member that cannot hold a key
 // answers decides nothing (canHoldAKey): it stays in Results, and rejects no
 // key. This is read here, at the end, so what a leaving provider answered
-// stops counting when it leaves the key confirmers. The reason given is that
-// of a rejection that counts, or else of a signing provider's ignoring the key.
+// stops counting when it leaves the key confirmers. A rejection counts only if
+// the agent could hold a key when it rejected too: a member with no role that
+// gains a vote is not asked again, and what it rejected before decides nothing.
+// The reason given is that of a rejection that counts, or else of a signing
+// provider's ignoring the key.
 func (prop *PendingDnskeyPropagation) outcome() (propagated, removed, rejected []uint16, rejectionMsg string) {
 	agents := make([]string, 0, len(prop.Results))
 	for a := range prop.Results {
@@ -2768,9 +2772,11 @@ func (prop *PendingDnskeyPropagation) outcome() (propagated, removed, rejected [
 		for _, a := range agents {
 			switch r := prop.Results[AgentId(a)][kt]; {
 			case r == "rejected" && canHoldAKey(prop.Zone, AgentId(a)):
-				bad = true
-				if rejectionMsg == "" {
-					rejectionMsg = prop.Reasons[AgentId(a)]
+				if reason, noted := prop.Reasons[AgentId(a)][kt]; noted {
+					bad = true
+					if rejectionMsg == "" {
+						rejectionMsg = reason
+					}
 				}
 			case r == "ignored" && prop.Signing[AgentId(a)] && canHoldAKey(prop.Zone, AgentId(a)):
 				bad = true
@@ -2794,15 +2800,21 @@ func (prop *PendingDnskeyPropagation) outcome() (propagated, removed, rejected [
 	return propagated, removed, rejected, rejectionMsg
 }
 
-// noteRejectionLocked keeps an agent's first rejection reason. Under
-// dnskeyPropMu.
-func (prop *PendingDnskeyPropagation) noteRejectionLocked(agent AgentId, reason string) {
+// noteRejectionLocked: an agent has rejected a key. What a member that cannot
+// hold a key rejects decides nothing, then or later (outcome), so only what
+// another agent rejects is noted, with its reason. Under dnskeyPropMu.
+func (prop *PendingDnskeyPropagation) noteRejectionLocked(agent AgentId, kt uint16, reason string) {
+	if !canHoldAKey(prop.Zone, agent) {
+		return
+	}
+	prop.Rejected = true
 	if prop.Reasons == nil {
-		prop.Reasons = map[AgentId]string{}
+		prop.Reasons = map[AgentId]map[uint16]string{}
 	}
-	if prop.Reasons[agent] == "" {
-		prop.Reasons[agent] = reason
+	if prop.Reasons[agent] == nil {
+		prop.Reasons[agent] = map[uint16]string{}
 	}
+	prop.Reasons[agent][kt] = reason
 }
 
 // ProcessDnskeyConfirmation checks if a confirmation is for a pending DNSKEY propagation.
@@ -2935,10 +2947,7 @@ func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source str
 			// a late rejection: the resend's answer decides
 		case rejectedTags[kt] || (wholeRejection && !doneTags[kt]):
 			results[kt] = "rejected"
-			prop.noteRejectionLocked(agentID, reason)
-			if canHoldAKey(prop.Zone, agentID) { // otherwise it decides nothing (outcome)
-				prop.Rejected = true
-			}
+			prop.noteRejectionLocked(agentID, kt, reason)
 			lgTransport.Warn("DNSKEY confirmation rejected a key", "zone", prop.Zone, "distributionID", distID, "agent", source, "keytag", kt, "status", status, "reason", reason)
 		case doneTags[kt] || success:
 			results[kt] = "applied"
@@ -3086,10 +3095,7 @@ func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent Agent
 			switch {
 			case rejectedTags[kt]:
 				results[kt] = "rejected"
-				prop.noteRejectionLocked(agent, rejectedItems[0].Reason) // the key is named among them
-				if canHoldAKey(prop.Zone, agent) {                       // otherwise it decides nothing (outcome)
-					prop.Rejected = true
-				}
+				prop.noteRejectionLocked(agent, kt, rejectedItems[0].Reason) // the key is named among them
 			case success && covered:
 				results[kt] = "applied"
 			case (ignored || ignoredTags[kt]) && covered:
