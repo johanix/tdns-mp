@@ -125,12 +125,13 @@ As a signer and server, in this order:
 1. `signers="alpha,charlie"` first, or `signers=` and
    `servers=` in one edit. Never `servers=` first: that
    lists a provider that cannot yet sign what it serves.
-2. Charlie makes its keys and signs at once: no NS record
-   names it yet, so no validator sees its signatures.
-   Every signer publishes its keys, and the leader adds
-   charlie's DS at the parent.
-3. The leader waits for the caches: the TTL of the DNSKEY
-   RRset and of the DS RRset.
+2. Charlie makes its keys, active at once, and signs: no NS
+   record names it yet, so no validator sees its signatures.
+   Every signer publishes its keys. The leader waits until
+   every nameserver of the zone serves them, and then for
+   the propagation delay and the TTL of the DNSKEY RRset.
+3. The leader adds charlie's DS at the parent, and waits for
+   the caches: the TTL of the DS RRset.
 4. `servers="alpha,bravo,charlie"`. In one edit with
    `signers=` the agents hold this part back until the
    caches' time has passed. As an edit of its own it waits
@@ -142,12 +143,14 @@ step the zone is at (`adding signer agent.charlie.example.:
 step 2 (its DS at the parent)`). Charlie's signer starts
 signing with no restart.
 
+A nameserver that answers without charlie's keys holds that
+step until it serves them, and the status names it. One that
+does not answer holds nothing: the leader says so in its log,
+and waits at least the TTL in its own copy.
+
 Until it serves, charlie's signer asks the zone's nameservers
-what TTL they serve the DNSKEY RRset with, and its new keys
-wait the largest: that is what caches hold. A signer that
-has not heard from all of them says so in its log, and its
-keys wait at least the TTL in its own copy, which can be
-longer.
+what TTL they serve the DNSKEY RRset with, and its later keys
+wait the largest: that is what caches hold.
 
 Once the server part starts, its status tells its operator
 what to point where: its servers at its own signer. The zone

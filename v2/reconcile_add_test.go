@@ -13,6 +13,7 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -51,6 +52,8 @@ func newSignerAddRig(t *testing.T, zone, parentsync string) *signerAddRig {
 	}
 	askJoinersDS = func(*Config, string, string) { r.syncs++ }
 	t.Cleanup(func() { parentDSLook, askJoinersDS = prevLook, prevAsk })
+	r.nameserversServeInventory(t)
+	setZoneNS(t, zone, "ns1."+zone, "ns2."+zone)
 	mp := r.conf.MpConfig()
 	mp.Local.Nameservers = srNameservers
 	return r
@@ -69,6 +72,17 @@ func (r *signerAddRig) thawed() *signerAddRig {
 	r.partsTake()
 	r.holdsToo(roleB)
 	return r
+}
+
+// stepBegan has the step held have been taken at.
+func (r *signerAddRig) stepBegan(at time.Time) {
+	r.t.Helper()
+	if err := r.store.update(r.zone, func(z *zoneSerials) error {
+		z.StepAt = at
+		return nil
+	}); err != nil {
+		r.t.Fatal(err)
+	}
 }
 
 // next has every member hold the step, and takes a turn: the step after it, or
@@ -112,6 +126,49 @@ func (r *signerAddRig) keys(ksk, zsk string, marks ...func(*KeyInventorySnapshot
 	mpzd, _ := Zones.Get(r.zone)
 	mpzd.SetLastKeyInventory(snap)
 	return k.KeyTag
+}
+
+// setZoneNS has the zone's copy name the nameservers names.
+func setZoneNS(t *testing.T, zone string, names ...string) {
+	t.Helper()
+	zd, ok := tdns.Zones.Get(zone)
+	if !ok {
+		t.Fatalf("zone %s is not here", zone)
+	}
+	apex, err := zd.GetOwner(zone)
+	if err != nil || apex == nil {
+		t.Fatalf("apex of %s: %v", zone, err)
+	}
+	rrset := core.RRset{Name: zone, Class: dns.ClassINET, RRtype: dns.TypeNS}
+	for _, name := range names {
+		rrset.RRs = append(rrset.RRs, &dns.NS{Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 3600}, Ns: name})
+	}
+	apex.RRtypes.Set(dns.TypeNS, rrset)
+	zd.Data.Set(zone, *apex)
+}
+
+// nameserversServeInventory has the zone's nameservers answer with the keys of its
+// signer's last inventory, at TTL 0.
+func (r *signerAddRig) nameserversServeInventory(t *testing.T) {
+	t.Helper()
+	prev := servingKeysLookup
+	servingKeysLookup = func(_ context.Context, zone, _ string) (*core.RRset, error) {
+		rrset := &core.RRset{}
+		mpzd, _ := Zones.Get(zone)
+		if snap := mpzd.GetLastKeyInventory(); snap != nil {
+			for _, it := range snap.Inventory {
+				rr, err := dns.NewRR(it.KeyRR)
+				if err != nil {
+					t.Error(err)
+					continue
+				}
+				rr.Header().Ttl = 0
+				rrset.RRs = append(rrset.RRs, rr)
+			}
+		}
+		return rrset, nil
+	}
+	t.Cleanup(func() { servingKeysLookup = prev })
 }
 
 // parentLooks has the next wait of the DS step look at the parent again.
@@ -232,13 +289,14 @@ func TestANewSignerHasItsStepsFromItsLeader(t *testing.T) {
 	}
 }
 
-// Its key machine makes its first keys one at a time, and tdns takes a KSK alone for
-// a CSK: a turn between the two starts nothing, or the zone is signed by its KSK until
-// its next signing. Nor does one that sees the ZSK's row before tdns's signing keys
-// hold it, which is what a start reads.
+// Its key machine makes keys one at a time, and tdns takes a KSK alone for a CSK: at
+// a zone the machine runs a turn between the two starts nothing, or the zone is signed
+// by its KSK until its next signing. Nor does one that sees the ZSK's row before tdns's
+// signing keys hold it, which is what a start reads.
 func TestANewSignerDoesNotStartWithItsKSKAlone(t *testing.T) {
 	const zone = "kskalone.adding.signer.example."
 	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="p2" signers="p2"`)...)
+	r.conf.InternalMp.KeyLifecycleOwner = r.owner
 	r.hand(joinerHandover(t, zone, 6, true), sigUs)
 	mint := func(role string) uint16 {
 		t.Helper()
@@ -250,7 +308,7 @@ func TestANewSignerDoesNotStartWithItsKSKAlone(t *testing.T) {
 	}
 	signs := tdns.KeyRowFlags{Pub: true, Sign: true, DS: sql.NullBool{Valid: true}}
 	ksk := mint("KSK")
-	if err := tdns.UpdateKeyRowFrom(r.kdb, zone, ksk, KeyStateMpdist, KeyStateCreated, signs); err != nil {
+	if err := tdns.UpdateKeyRowFrom(r.kdb, zone, ksk, KeyStateActive, KeyStateCreated, signs); err != nil {
 		t.Fatal(err)
 	}
 	r.roleTurn()
@@ -259,14 +317,14 @@ func TestANewSignerDoesNotStartWithItsKSKAlone(t *testing.T) {
 	}
 	zsk := mint("ZSK")
 	// the row says so, and tdns's signing keys do not yet
-	if _, err := r.kdb.DB.Exec(`UPDATE DnssecKeyStore SET state=?, pub=1, sign=1 WHERE zonename=? AND keyid=?`, KeyStateMpdist, zone, int(zsk)); err != nil {
+	if _, err := r.kdb.DB.Exec(`UPDATE DnssecKeyStore SET state=?, pub=1, sign=1 WHERE zonename=? AND keyid=?`, KeyStateActive, zone, int(zsk)); err != nil {
 		t.Fatal(err)
 	}
 	r.roleTurn()
 	if len(r.started) != 0 {
 		t.Fatalf("with its ZSK's row written and not in tdns's signing keys it started: %v", r.started)
 	}
-	if err := tdns.UpdateKeyRowFrom(r.kdb, zone, zsk, KeyStateMpdist, KeyStateMpdist, signs); err != nil {
+	if err := tdns.UpdateKeyRowFrom(r.kdb, zone, zsk, KeyStateActive, KeyStateActive, signs); err != nil {
 		t.Fatal(err)
 	}
 	r.roleTurn()
@@ -275,33 +333,57 @@ func TestANewSignerDoesNotStartWithItsKSKAlone(t *testing.T) {
 	}
 }
 
-// tdns signs with the rows that say sign=1: a new signer's first keys, on their way
-// through the machine, sign its zone, its own signatures replacing those of the copy
-// it relayed. That is its signing at its naming, with tdns's real start.
-func TestANewSignerStartsSigningWithItsFirstKeysOnTheirWay(t *testing.T) {
-	const zone = "ontheirway.adding.signer.example."
-	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="p2" signers="p2"`)...)
+// A new signer starts with tdns's real start, as at a first load: its first KSK and
+// ZSK are active at once, and sign its zone, its own signatures replacing those of the
+// copy it relayed. tdns's check finds nothing, and its machine takes the zone with
+// them, deciding its KSK's ds, which the DS step reads.
+func TestANewSignerStartsSigningWithItsFirstKeysActive(t *testing.T) {
+	const zone = "active.adding.signer.example."
+	other := testDnskey(t, zone, 257)
+	r := newSignerRig(t, zone, append(sigRecords(`serial="5" servers="p2" signers="p2"`), "3600 IN DNSKEY 257 3 15 "+other.PublicKey)...)
 	prev := startSigning
 	startSigning = func(ctx context.Context, zd *tdns.ZoneData) error { return zd.StartSigning(ctx, 0) }
 	t.Cleanup(func() { startSigning = prev })
+	r.notTaken(zone)
 	r.hand(joinerHandover(t, zone, 6, true), sigUs)
-	r.e.tickOwned()
+	if r.owner.taken(zone) {
+		t.Fatal("handed its keys' step, with no keys, its machine has taken the zone")
+	}
+	r.roleTurn()
+	if !slices.Contains(r.foreignRows(t), other.KeyTag()) {
+		t.Errorf("the other signer's key is not kept: %v", r.foreignRows(t))
+	}
+	if !r.mpzd.Options[tdns.OptInlineSigning] || r.mpzd.Withheld() {
+		t.Fatalf("the option %v, withheld %v: want it signing", r.mpzd.Options[tdns.OptInlineSigning], r.mpzd.Withheld())
+	}
 	inv, err := tdns.GetKeyInventory(r.kdb, zone)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var zsk uint16
+	roles := map[string]int{}
 	for _, it := range inv {
-		if it.State == KeyStateActive || !it.Sign {
-			t.Errorf("its first key %d is %s, sign %v: want it on its way, signing", it.KeyTag, it.State, it.Sign)
+		if it.State == DnskeyStateForeign {
+			continue
+		}
+		roles[roleOf(it.Flags)]++
+		if it.State != KeyStateActive || !it.Sign {
+			t.Errorf("its first key %d is %s, sign %v: want it active, signing", it.KeyTag, it.State, it.Sign)
 		}
 		if it.Flags&dns.SEP == 0 {
 			zsk = it.KeyTag
+		} else if it.DS == nil || !*it.DS {
+			t.Errorf("its KSK's ds is %v, want it decided, and set", it.DS)
 		}
 	}
-	r.roleTurn()
-	if !r.mpzd.Options[tdns.OptInlineSigning] || r.mpzd.Withheld() {
-		t.Fatalf("the option %v, withheld %v: want it signing", r.mpzd.Options[tdns.OptInlineSigning], r.mpzd.Withheld())
+	if roles["KSK"] != 1 || roles["ZSK"] != 1 {
+		t.Fatalf("its keys are %v, want a KSK and a ZSK", roles)
+	}
+	if !r.owner.taken(zone) {
+		t.Error("its key machine has not taken the zone")
+	}
+	if v := tdns.CheckKeyRowInvariants(r.kdb, zone); len(v) != 0 {
+		t.Errorf("tdns's check finds %v", v)
 	}
 	soa, err := r.mpzd.GetRRset(zone, dns.TypeSOA)
 	if err != nil || soa == nil {
@@ -315,144 +397,181 @@ func TestANewSignerStartsSigningWithItsFirstKeysOnTheirWay(t *testing.T) {
 		t.Errorf("the SOA is signed by %v, not by its first ZSK %d", soa.RRSIGs, zsk)
 	}
 	keys, err := r.mpzd.GetRRset(zone, dns.TypeDNSKEY)
-	if err != nil || keys == nil || len(keys.RRs) != 2 || len(keys.RRSIGs) == 0 {
-		t.Errorf("the DNSKEY RRset: %+v (%v), want its two keys, signed", keys, err)
+	if err != nil || keys == nil || len(keys.RRs) != 3 || len(keys.RRSIGs) == 0 {
+		t.Errorf("the DNSKEY RRset: %+v (%v), want its two keys and the other signer's, signed", keys, err)
 	}
 }
 
 // A new provider brought up after the owner's edit: its agent has no copy, its copy
 // names it a server and a signer, and it acts by that. Its signer signs with tdns's
-// keys, active at once. That must not read as its keys having propagated: handed its
-// keys' step, they start over before it says anything of them, so its steps wait for
-// T8 and T9 as anyone's do, and no NS is added before them.
-func TestAJoinerBroughtUpAfterTheEditHasItsKeysStartOver(t *testing.T) {
+// keys, active at once, which no other signer takes yet. Handed its keys' step they go
+// out once more, staying active, and its first inventory says so with the keys marked.
+func TestAJoinerBroughtUpAfterTheEditSendsItsKeysAgain(t *testing.T) {
 	const zone = "afteredit.adding.signer.example."
 	records := sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)
 	r := newSignerRig(t, zone, records...)
 	prev := startSigning
 	startSigning = func(ctx context.Context, zd *tdns.ZoneData) error { return zd.StartSigning(ctx, 0) }
 	t.Cleanup(func() { startSigning = prev })
+	var mu sync.Mutex
+	var resent []uint16
+	r.e.wire.push = func(_ *Config, _ string, tags []uint16) {
+		mu.Lock()
+		defer mu.Unlock()
+		resent = append(resent, tags...)
+	}
 	r.firstLoad(t, records...)
 	r.hand(&ActingHandover{Zone: zone, Phase: PhaseSteady, NoCopy: true, Made: time.Now()}, sigUs)
 	r.roleTurn()
-	states := func() map[string]bool {
+	states := func() (out []uint16) {
 		t.Helper()
 		inv, err := tdns.GetKeyInventory(r.kdb, zone)
 		if err != nil {
 			t.Fatal(err)
 		}
-		out := map[string]bool{}
 		for _, it := range inv {
-			if it.State != DnskeyStateForeign {
-				out[it.State] = true
-				if !it.Sign {
-					t.Errorf("key %d is %s, and it does not sign", it.KeyTag, it.State)
-				}
-				if it.Flags&dns.SEP != 0 && it.State == KeyStateMpdist && it.DS != nil && *it.DS {
-					t.Errorf("its KSK %d is %s with ds=1 (P2)", it.KeyTag, it.State)
-				}
+			if it.State == DnskeyStateForeign {
+				continue
 			}
+			if it.State != KeyStateActive || !it.Sign {
+				t.Errorf("key %d is %s, sign %v: want it left active, signing", it.KeyTag, it.State, it.Sign)
+			}
+			out = append(out, it.KeyTag)
 		}
 		return out
 	}
-	if got := states(); len(got) != 1 || !got[KeyStateActive] {
-		t.Fatalf("by its own copy its keys are %v: the test has lost its point", got)
+	keys := states()
+	if len(keys) != 2 {
+		t.Fatalf("by its own copy its keys are %v, want a KSK and a ZSK", keys)
 	}
 	h := joinerHandover(t, zone, 7, true)
 	h.Step, h.Joining = 2, true
 	r.hand(h, sigUs)
-	if got := states(); len(got) != 1 || !got[KeyStateMpdist] {
-		t.Errorf("handed its keys' step, its keys are %v, want them on their way", got)
+	waitForPush(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(resent) >= 2
+	})
+	mu.Lock()
+	for _, id := range keys {
+		if !slices.Contains(resent, id) {
+			t.Errorf("handed its keys' step, resent %v: want key %d", resent, id)
+		}
 	}
+	mu.Unlock()
+	states()
 	r.roleTurn()
 	if !r.mpzd.Options[tdns.OptInlineSigning] {
-		t.Error("handed Signing, with its keys on their way, it does not sign")
+		t.Error("handed Signing, it does not sign")
 	}
 }
 
 // A provider put back, its keys left from an earlier time and its zone not yet taken
-// by its key machine: its turn binds the policy and has them start over at once,
-// before it says anything of them.
-func TestAProviderPutBackHasItsKeysStartOverAsItsZoneIsTaken(t *testing.T) {
+// by its key machine: its turn starts it with those keys, and they go out once more,
+// which its agent's set, holding them, would not bring about.
+func TestAProviderPutBackSendsItsKeysAgainAsItsZoneIsTaken(t *testing.T) {
 	const zone = "putback.adding.signer.example."
 	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="p2" signers="p2"`)...)
+	r.notTaken(zone)
+	var mu sync.Mutex
+	var resent []uint16
+	r.e.wire.push = func(_ *Config, _ string, tags []uint16) {
+		mu.Lock()
+		defer mu.Unlock()
+		resent = append(resent, tags...)
+	}
+	var left []uint16
+	for _, role := range []string{"KSK", "ZSK"} {
+		pkc, _, err := r.kdb.GenerateKeypair(zone, "earlier", tdns.DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, role, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		left = append(left, pkc.KeyId)
+	}
+	h := joinerHandover(t, zone, 6, true)
+	h.Step, h.Joining = 2, true
+	r.hand(h, sigUs)
+	r.roleTurn()
+	if !r.owner.taken(zone) || !r.mpzd.Options[tdns.OptInlineSigning] {
+		t.Fatalf("taken %v, signing %v: want both", r.owner.taken(zone), r.mpzd.Options[tdns.OptInlineSigning])
+	}
+	waitForPush(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(resent) >= 2
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	for _, id := range left {
+		if !slices.Contains(resent, id) {
+			t.Errorf("resent %v: want key %d", resent, id)
+		}
+		l := r.e.driver(zone)
+		if l == nil || l.dist[id] == nil {
+			t.Errorf("key %d has no record to resend it by", id)
+		}
+	}
+}
+
+// A provider named a signer is not bound first: its zone would be its key machine's
+// before it has keys, and tdns would make none. Binding is for one with its keys
+// published and no signing, as a provider on its way out, whose machine must run.
+func TestANamedSignerIsNotBoundBeforeItsStart(t *testing.T) {
+	const zone = "nobind.adding.signer.example."
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="p2" signers="p2"`)...)
+	r.notTaken(zone)
+	bound := 0
 	prev := bindWithoutSigning
 	bindWithoutSigning = func(zd *tdns.ZoneData) error {
-		zd.DnssecPolicy = &tdns.DnssecPolicy{Mode: tdns.DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.ED25519}
+		bound++
 		return nil
 	}
 	t.Cleanup(func() { bindWithoutSigning = prev })
 	r.mpzd.Lock()
 	r.mpzd.DnssecPolicy = nil
 	r.mpzd.Unlock()
+	h := joinerHandover(t, zone, 6, true)
+	r.hand(h, sigUs)
+	r.roleTurn()
+	if bound != 0 || len(r.started) != 1 {
+		t.Errorf("named a signer, bound %d times, started %v: want no bind, and a start", bound, r.started)
+	}
+	r.mpzd.SetRuntimeOption(tdns.OptInlineSigning, false)
+	next := *h
+	next.Sets.Signing, next.Step, next.Made = nil, h.Step+1, time.Now()
+	r.hand(&next, sigUs)
+	r.roleTurn()
+	if bound != 1 {
+		t.Errorf("in KeySigners and not in Signing, bound %d times, want once", bound)
+	}
+}
+
+// notTaken has its key machine not have taken the zone, as a provider new to it, with
+// the zone named in its key-lifecycle-zones.
+func (r *signerRig) notTaken(zone string) {
 	r.owner = NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return r.kdb })
 	r.e = NewKeyLifecycleEngine(r.conf, r.owner)
 	r.e.wire.push = func(*Config, string, []uint16) {}
 	r.conf.InternalMp.KeyLifecycle, r.conf.InternalMp.KeyLifecycleOwner = r.e, r.owner
 	r.conf.MpConfig().KeyLifecycleZones = []string{zone}
-	for _, role := range []string{"KSK", "ZSK"} {
-		if _, _, err := r.kdb.GenerateKeypair(zone, "earlier", tdns.DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, role, nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// what its first inventory says of them, pushed as it takes the hand-over
-	prevPush := pushSignerInventory
-	pushed := 0
-	pushSignerInventory = func(_ *Config, z string) {
-		if z != zone || pushed > 0 {
-			return
-		}
-		pushed++
-		inv, err := tdns.GetKeyInventory(r.kdb, zone)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-		for _, it := range inv {
-			if it.State != KeyStateMpdist {
-				t.Errorf("its first inventory has key %d %s, want it starting over", it.KeyTag, it.State)
-			}
-		}
-	}
-	t.Cleanup(func() { pushSignerInventory = prevPush })
-	h := joinerHandover(t, zone, 6, true)
-	h.Step, h.Joining = 2, true
-	r.hand(h, sigUs)
-	if pushed != 1 {
-		t.Fatalf("%d inventories as it took the hand-over, want one", pushed)
-	}
+	r.owner.SetConfiguredZones(func() []string { return r.conf.MpConfig().KeyLifecycleZones })
 }
 
-// A start-over that has not happened, as its write failed say: its signer does not
-// say it signs, so its agent does not hold the keys' step, the leader takes no next
-// step, and the hand-over that has the next tick try again stays.
-func TestASignerWhoseKeysAreDueToStartOverDoesNotSayItSigns(t *testing.T) {
-	const zone = "due.adding.signer.example."
-	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="p2" signers="p2"`)...)
-	h := joinerHandover(t, zone, 6, true)
-	h.Step, h.Joining = 2, true
-	r.hand(h, sigUs)
-	r.mpzd.SetRuntimeOption(tdns.OptInlineSigning, true)
-	if m := r.conf.inventoryMarksOf(zone, nil); !m.signs {
-		t.Fatalf("nothing due, and it does not say it signs: %+v", m)
+// waitForPush waits for the pushes the key machine sends off its own goroutines.
+func waitForPush(t *testing.T, done func() bool) {
+	t.Helper()
+	for range 200 {
+		if done() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	if _, _, err := r.kdb.GenerateKeypair(zone, "earlier", tdns.DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, "ZSK", nil); err != nil {
-		t.Fatal(err)
-	}
-	if m := r.conf.inventoryMarksOf(zone, nil); m.signs {
-		t.Errorf("a key is due to start over, and it says it signs: %+v", m)
-	}
-	if err := r.e.driver(zone).StartOver(); err != nil {
-		t.Fatal(err)
-	}
-	if m := r.conf.inventoryMarksOf(zone, nil); !m.signs {
-		t.Errorf("started over, and it does not say it signs: %+v", m)
-	}
+	t.Errorf("no push came")
 }
 
-// The same keys' step handed again, as a newer serial is held say, does not start
-// its keys' wait again: keys it has published since the step began would start over,
-// and again at each newer serial. Another step does.
+// The same keys' step handed again, as it is every half minute, says the same step:
+// its keys would go out again each time, and rejected or applied they would have
+// their records back. Another step does not.
 func TestAJoinersKeysStepHandedAgainKeepsWhenItBegan(t *testing.T) {
 	const zone = "again.adding.signer.example."
 	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="p2" signers="p2"`)...)
@@ -494,8 +613,8 @@ func TestAJoinersKeysStepHandedAgainKeepsWhenItBegan(t *testing.T) {
 // A first load handed Signing, over a copy that carries another's signatures, as
 // from a stanza naming another provider's signer: tdns would take them for the
 // zone's own and leave them, so the zone relays that copy, and it is StartSigning
-// that replaces them (signerRoleTurn). So does one that serves nothing, whose first
-// keys are its key machine's. A copy with none, at a provider that serves, signs at
+// that replaces them (signerRoleTurn). So does one that serves nothing, whose start
+// comes at its turn. A copy with none, at a provider that serves, signs at
 // its first load.
 func TestAFirstLoadOverASignedCopyLeavesTheSwitchToStartSigning(t *testing.T) {
 	for _, c := range []struct {
@@ -554,7 +673,7 @@ func TestAJoinersSignerIsHandedItsKeysAfterEveryMemberHoldsThem(t *testing.T) {
 	}
 	r.at(r.next(), signerAddMint)
 	if h := r.wantedBy(r.signer); h == nil || !h.Joining {
-		t.Errorf("the signer is handed %+v at its keys' step, want it marked, so that keys it holds start over", h)
+		t.Errorf("the signer is handed %+v at its keys' step, want it marked, so that keys it holds go out again", h)
 	}
 	if h := r.wantedBy(r.combiner); h == nil || h.Joining {
 		t.Errorf("the combiner is handed %+v at its keys' step, the mark is the signer's", h)
@@ -564,20 +683,32 @@ func TestAJoinersSignerIsHandedItsKeysAfterEveryMemberHoldsThem(t *testing.T) {
 	}
 }
 
-// A joining signer's first keys are the machine's own, under the hold: a role with
-// no active key gets one, and nothing else starts. It runs by KeySigners, with no
-// signatures served.
+// At a zone its key machine runs already, as for a provider put back whose keys are
+// gone, its first keys are the machine's, under the hold: a role with no active key
+// gets one, active at once (T2a), and nothing else starts. Its start waits for both.
 func TestAJoiningSignerMintsUnderTheHold(t *testing.T) {
 	const zone = "mints.adding.signer.example."
-	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="p2"`)...)
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="p2" signers="p2"`)...)
+	r.conf.InternalMp.KeyLifecycleOwner = r.owner
 	r.hand(joinerHandover(t, zone, 6, true), sigUs)
 	if !r.conf.InternalMp.SignerHolds.held(zone) {
 		t.Fatal("the hand-over's hold is not kept")
+	}
+	r.roleTurn()
+	if len(r.started) != 0 {
+		t.Fatalf("with no keys it started: %v", r.started)
 	}
 	r.e.tickOwned()
 	keys := joinersKeys(t, r, zone)
 	if keys["KSK"] != 1 || keys["ZSK"] != 1 {
 		t.Errorf("under the hold the joiner has %v, want its first KSK and ZSK", keys)
+	}
+	if n := ownKeysIn(t, r, zone, KeyStateActive); n != 2 {
+		t.Errorf("%d of its keys are active, want both", n)
+	}
+	r.roleTurn()
+	if len(r.started) != 1 {
+		t.Errorf("with its KSK and ZSK, started %v, want one start", r.started)
 	}
 }
 
@@ -686,19 +817,19 @@ func TestTheJoinersDNSKEYAndDSStepsWaitForAnEmergencyRollover(t *testing.T) {
 		t.Fatalf("its keys' step was taken during an emergency rollover: step %d", n)
 	}
 	r.at(r.next(), signerAddMint)
-	r.keys(KeyStatePublished, KeyStatePublished)
+	r.keys(KeyStateActive, KeyStateActive)
 	cur, _ = r.step()
 	if n := turnRolling(); n != cur.Number {
 		t.Fatalf("its DS step was taken during an emergency rollover: step %d", n)
 	}
 	r.at(r.next(), signerAddDS)
-	tag := r.keys(KeyStateStandby, KeyStateActive)
-	r.parent[tag] = true
+	tag := r.keys(KeyStateActive, KeyStateActive)
+	r.parent[tag], r.parentTTL = true, time.Hour
 	r.parentLooks()
 	r.next()
 	st := r.next()
 	r.at(st, signerAddCaches)
-	r.keys(KeyStateActive, KeyStateActive)
+	r.stepBegan(time.Now().Add(-time.Hour - time.Second))
 	r.partsTake()
 	r.holdsToo(roleB)
 	if n := turnRolling(); n == st.Number {
@@ -707,9 +838,9 @@ func TestTheJoinersDNSKEYAndDSStepsWaitForAnEmergencyRollover(t *testing.T) {
 }
 
 // Its DS goes to the parent's set only at its DS step, which comes after its keys
-// are published, which needs every other signer to have applied them: DSSigners
-// names it no sooner, and no sooner does the leader's DS set hold it.
-func TestTheJoinersDSIsSentOnlyAfterEverySignerAppliedItsKeys(t *testing.T) {
+// are active and the zone's nameservers serve them: DSSigners names it no sooner, and
+// no sooner does the leader's DS set hold it.
+func TestTheJoinersDSIsSentOnlyAfterItsKeysPropagated(t *testing.T) {
 	r := newSignerAddRig(t, "ds.adding.example.", "agent").thawed()
 	for _, want := range []string{signerAddAccept, signerAddMint} {
 		st := r.next()
@@ -718,18 +849,18 @@ func TestTheJoinersDSIsSentOnlyAfterEverySignerAppliedItsKeys(t *testing.T) {
 			t.Fatalf("at %s the DS set holds it: %+v", want, h)
 		}
 	}
-	for _, state := range []string{KeyStateCreated, KeyStateMpdist} {
+	for _, state := range []string{KeyStateCreated, KeyStateMpdist, KeyStatePublished, KeyStateStandby} {
 		r.keys(state, state)
 		if st := r.next(); len(st.Taken) != 2 {
 			t.Fatalf("its keys in %s, and the step went on: %+v", state, st)
 		}
 	}
-	// one of the two published: the step is for both
-	r.keys(KeyStatePublished, KeyStateMpdist)
+	// one of the two active: the step is for both
+	r.keys(KeyStateActive, KeyStateStandby)
 	if st := r.next(); len(st.Taken) != 2 {
-		t.Fatalf("its ZSK in mpdist, and the step went on: %+v", st)
+		t.Fatalf("its ZSK standby, and the step went on: %+v", st)
 	}
-	r.keys(KeyStatePublished, KeyStatePublished)
+	r.keys(KeyStateActive, KeyStateActive)
 	r.at(r.next(), signerAddDS)
 	if h := r.wantedBy(r.combiner); h == nil || !has(h.Sets.DSSigners, "a") {
 		t.Fatalf("at its DS step the DS set does not name it: %+v", h)
@@ -745,9 +876,9 @@ func TestASignerAddUnderParentsyncOwnerWaitsForTheOwnersDS(t *testing.T) {
 	r := newSignerAddRig(t, "owner.adding.example.", "owner").thawed()
 	r.at(r.next(), signerAddAccept)
 	r.at(r.next(), signerAddMint)
-	r.keys(KeyStatePublished, KeyStatePublished)
+	r.keys(KeyStateActive, KeyStateActive)
 	r.at(r.next(), signerAddDS)
-	tag := r.keys(KeyStateStandby, KeyStateActive)
+	tag := r.keys(KeyStateActive, KeyStateActive)
 	r.parentLooks()
 	if st := r.next(); len(st.Taken) != 3 {
 		t.Fatalf("the step went on before the owner added the DS: %+v", st)
@@ -758,7 +889,7 @@ func TestASignerAddUnderParentsyncOwnerWaitsForTheOwnersDS(t *testing.T) {
 	if r.syncs != 0 {
 		t.Errorf("under parentsync=owner the leader asked %d syncs", r.syncs)
 	}
-	r.parent[tag] = true
+	r.parent[tag], r.parentTTL = true, time.Hour
 	r.parentLooks()
 	r.next()
 	r.at(r.next(), signerAddCaches)
@@ -766,8 +897,8 @@ func TestASignerAddUnderParentsyncOwnerWaitsForTheOwnersDS(t *testing.T) {
 
 // A signer added (design 5.1, amended): it signs at its keys' step, and the steps
 // after it say what has propagated. At its keys' step its signer is handed Signing,
-// and the step waits for its keys published and its signer signing. The transition
-// is done only after the DS TTL, with its KSK active (T9).
+// and the step waits for its keys active and its signer signing. The transition is
+// done only after the DS TTL.
 func TestASignerAddSignsAtItsKeysAndIsDoneAfterTheCaches(t *testing.T) {
 	r := newSignerAddRig(t, "done.adding.example.", "owner").thawed()
 	st := r.next()
@@ -781,9 +912,9 @@ func TestASignerAddSignsAtItsKeysAndIsDoneAfterTheCaches(t *testing.T) {
 		t.Errorf("at its keys' step its signer is handed %+v, want Signing", h)
 	}
 	if st = r.next(); len(st.Taken) != 2 {
-		t.Fatalf("the step went on with no keys published: %+v", st)
+		t.Fatalf("the step went on with no keys active: %+v", st)
 	}
-	r.keys(KeyStatePublished, KeyStatePublished, func(s *KeyInventorySnapshot) { s.Signs = false })
+	r.keys(KeyStateActive, KeyStateActive, func(s *KeyInventorySnapshot) { s.Signs = false })
 	r.partsTake()
 	if st = r.next(); len(st.Taken) != 2 || signerAddHolds(r.conf, r.zone, st) {
 		t.Fatalf("the step went on with its signer not signing: %+v", st)
@@ -791,20 +922,20 @@ func TestASignerAddSignsAtItsKeysAndIsDoneAfterTheCaches(t *testing.T) {
 	if line := signerAddStatus(r.conf, r.zone, heldStep{InstrStep: st}, time.Now()); !strings.Contains(line, "signer to start signing") {
 		t.Errorf("before its signer signs the status says %q", line)
 	}
-	r.keys(KeyStatePublished, KeyStatePublished)
+	r.keys(KeyStateActive, KeyStateActive)
 	r.at(r.next(), signerAddDS)
-	tag := r.keys(KeyStateStandby, KeyStateActive)
+	tag := r.keys(KeyStateActive, KeyStateActive)
 	if st = r.next(); len(st.Taken) != 3 {
 		t.Fatalf("the DS step went on with the parent serving no DS: %+v", st)
 	}
-	r.parent[tag] = true
+	r.parent[tag], r.parentTTL = true, time.Hour
 	r.parentLooks()
 	r.next() // the look is taken on this turn's wait
 	r.at(r.next(), signerAddCaches)
 	for range 3 {
-		r.at(r.next(), signerAddCaches) // its KSK is standby
+		r.at(r.next(), signerAddCaches) // the DS TTL has not passed
 	}
-	r.keys(KeyStateActive, KeyStateActive)
+	r.stepBegan(time.Now().Add(-time.Hour - time.Second))
 	st = r.next()
 	if st.Taken[len(st.Taken)-1] != lastStepKey {
 		t.Fatalf("after the caches' time the step is %+v, want the last", st)
@@ -822,7 +953,7 @@ func TestASignerAddSignsAtItsKeysAndIsDoneAfterTheCaches(t *testing.T) {
 func TestOnlyAJoinersOwnAgentWaitsForItsSigner(t *testing.T) {
 	r := newSignerAddRig(t, "other.adding.example.", "owner")
 	knownAs(t, r.store, r.zone, r.v)
-	r.keys(KeyStatePublished, KeyStatePublished, func(s *KeyInventorySnapshot) { s.Signs = false })
+	r.keys(KeyStateActive, KeyStateActive, func(s *KeyInventorySnapshot) { s.Signs = false })
 	other := InstrStep{Taken: []string{signerAddKey + signerAddMint + " " + roleB}}
 	if !signerAddHolds(r.conf, r.zone, other) {
 		t.Error("another provider's step waits for this provider's signer")
@@ -872,10 +1003,10 @@ func TestASecondEditWaitsForTheSignersCaches(t *testing.T) {
 	r := newSignerAddRig(t, "second.adding.example.", "owner").thawed()
 	r.at(r.next(), signerAddAccept)
 	r.at(r.next(), signerAddMint)
-	r.keys(KeyStatePublished, KeyStatePublished)
+	r.keys(KeyStateActive, KeyStateActive)
 	r.at(r.next(), signerAddDS)
-	tag := r.keys(KeyStateStandby, KeyStateActive)
-	r.parent[tag] = true
+	tag := r.keys(KeyStateActive, KeyStateActive)
+	r.parent[tag], r.parentTTL = true, time.Hour
 	r.parentLooks()
 	r.next()
 	r.at(r.next(), signerAddCaches)
@@ -885,7 +1016,7 @@ func TestASecondEditWaitsForTheSignersCaches(t *testing.T) {
 	if _, ok := r.conf.thawView(r.zone, time.Now()); ok || r.active() != r.v.Serial {
 		t.Errorf("43 is agreed during the caches' time: active %d", r.active())
 	}
-	r.keys(KeyStateActive, KeyStateActive)
+	r.stepBegan(time.Now().Add(-time.Hour - time.Second))
 	if st := r.next(); st.Taken[len(st.Taken)-1] != lastStepKey {
 		t.Fatalf("the step is %+v, want the last", st)
 	}
@@ -950,72 +1081,6 @@ func TestTheJoinersOperatorEditsAreKeptUntilDone(t *testing.T) {
 	r.conf.instrDone(context.Background(), r.zdr, ZoneName(r.zone))
 	if n := len(r.conf.InternalMp.Kept.entries(r.zone, listOwed)); n != 0 {
 		t.Errorf("%d of its edits kept after done, want none", n)
-	}
-}
-
-// A new signer: at its keys' step its signer binds the zone's policy (a zone that
-// was not its signer's has none bound), so the key machine takes it and makes its
-// first keys, which sign from the start; its start waits for them. Meanwhile the
-// zone relays its copy, foreign rows kept, with no restart and with the option off.
-func TestANewSignerIsTakenAndMakesItsFirstKeys(t *testing.T) {
-	const zone = "taken.adding.signer.example."
-	k := testDnskey(t, zone, 257)
-	records := append(sigRecords(`serial="5" servers="p2" signers="p2"`), "3600 IN DNSKEY 257 3 15 "+k.PublicKey)
-	r := newSignerRig(t, zone, records...)
-	bound := 0
-	prev := bindWithoutSigning
-	bindWithoutSigning = func(zd *tdns.ZoneData) error {
-		bound++
-		zd.DnssecPolicy = &tdns.DnssecPolicy{Mode: tdns.DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.ED25519}
-		return nil
-	}
-	t.Cleanup(func() { bindWithoutSigning = prev })
-	r.mpzd.Lock()
-	r.mpzd.DnssecPolicy = nil
-	r.mpzd.Unlock()
-	r.owner = NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return r.kdb })
-	r.e = NewKeyLifecycleEngine(r.conf, r.owner)
-	r.e.wire.push = func(*Config, string, []uint16) {}
-	r.conf.InternalMp.KeyLifecycle, r.conf.InternalMp.KeyLifecycleOwner = r.e, r.owner
-	r.conf.MpConfig().KeyLifecycleZones = []string{zone}
-
-	r.e.TakeConfiguredZones()
-	if r.owner.taken(zone) {
-		t.Fatal("taken with no policy bound")
-	}
-	r.hand(joinerHandover(t, zone, 6, true), sigUs)
-	r.roleTurn()
-	if bound != 1 || !r.owner.taken(zone) {
-		t.Fatalf("the policy bound %d times, the zone taken %v: want bound once and taken", bound, r.owner.taken(zone))
-	}
-	if r.mpzd.Options[tdns.OptInlineSigning] || len(r.started) != 0 {
-		t.Errorf("with no keys yet: the option %v, started %v, want no start", r.mpzd.Options[tdns.OptInlineSigning], r.started)
-	}
-	if !slices.Contains(r.foreignRows(t), k.KeyTag()) {
-		t.Errorf("the other signer's key is not kept: %v", r.foreignRows(t))
-	}
-	if !r.e.wire.SignsAtNaming(zone) {
-		t.Error("named, and serving nothing: it does not sign at its naming")
-	}
-	r.e.tickOwned()
-	if keys := joinersKeys(t, r, zone); keys["KSK"] != 1 || keys["ZSK"] != 1 {
-		t.Errorf("its first keys: %v", keys)
-	}
-	inv, err := tdns.GetKeyInventory(r.kdb, zone)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, it := range inv {
-		if it.State != DnskeyStateForeign && (!it.Sign || it.State == KeyStateActive) {
-			t.Errorf("its first key %d is %s, sign %v: want it on its way, signing", it.KeyTag, it.State, it.Sign)
-		}
-	}
-	r.roleTurn()
-	if !r.mpzd.Options[tdns.OptInlineSigning] {
-		t.Error("its first keys are there, and it does not sign")
-	}
-	if bound != 1 {
-		t.Errorf("the policy bound again: %d times", bound)
 	}
 }
 
@@ -1273,38 +1338,49 @@ func TestTheCombinerOfAProviderOnItsWayInAppliesDNSKEYsAlone(t *testing.T) {
 	}
 }
 
-// With nobody else signing there are no signatures to go with a DS: the zone's
-// first signer has its caches' time before its DS goes to the parent, or the
-// parent's DS would make the zone bogus. Anyone after it joins as usual.
-func TestAZonesFirstSignerHasItsCachesTimeBeforeItsDS(t *testing.T) {
-	from := jAt(t, 41, `servers="a,b" suffix="n"`, freezeRecords...)
-	to := jAt(t, 42, `servers="a,b" signers="a" suffix="n"`, freezeRecords...)
-	var parts []string
-	for _, st := range signerAddSteps(planView{from: from, to: to, held: rolesFor(from, from, 0)}) {
-		_, part, _ := signerAddKeyParts(st.key)
-		parts = append(parts, part)
-	}
-	want := []string{signerAddAccept, signerAddMint, signerAddCaches, signerAddDS}
-	if !slices.Equal(parts, want) {
-		t.Errorf("the first signer's steps are %v, want %v", parts, want)
-	}
-	// planned from what is in place, with it in Signing from its keys' step, its
-	// caches' time and its DS are still the steps left, in that order
-	sets := rolesFor(from, from, 0)
-	var taken []string
-	for _, st := range signerAddSteps(planView{from: from, to: to, held: sets}) {
-		if st.sets != nil {
-			sets = st.sets(sets)
+// A zone nobody signs has nothing to validate new keys against: its first signer has
+// no wait at its keys but that they are active, asks no nameserver, and has no caches'
+// time. Anyone after it joins as usual.
+func TestAZonesFirstSignerHasNoWait(t *testing.T) {
+	from := jAt(t, 41, `servers="b" suffix="n"`, freezeRecords...)
+	to := jAt(t, 42, `servers="b" signers="a" suffix="n"`, freezeRecords...)
+	parts := func(p planView) (out []string) {
+		for _, st := range signerAddSteps(p) {
+			_, part, _ := signerAddKeyParts(st.key)
+			out = append(out, part)
 		}
-		taken = append(taken, st.key)
-		if strings.Contains(st.key, signerAddMint) {
-			break
-		}
+		return out
 	}
-	plan := planSteps(planView{from: from, to: to, held: sets, taken: taken})
-	left := slices.DeleteFunc(slices.Clone(plan), func(st plannedStep) bool { return slices.Contains(taken, st.key) })
-	if len(left) != 3 || !strings.Contains(left[0].key, signerAddCaches) || !strings.Contains(left[1].key, signerAddDS) || left[2].key != lastStepKey {
-		t.Errorf("after it signs the steps left are %+v, want its caches' time, its DS and the last", left)
+	want := []string{signerAddAccept, signerAddMint, signerAddDS}
+	if got := parts(planView{from: from, to: to, held: rolesFor(from, from, 0)}); !slices.Equal(got, want) {
+		t.Errorf("the first signer's steps are %v, want %v", got, want)
+	}
+	after := jAt(t, 43, `servers="b" signers="a,n" suffix="n"`, freezeRecords...)
+	held := rolesFor(to, to, 0)
+	if got := parts(planView{from: to, to: after, held: held}); !slices.Equal(got, []string{signerAddAccept, signerAddMint, signerAddDS, signerAddCaches}) {
+		t.Errorf("the next signer's steps are %v", got)
+	}
+
+	r := newSignerAddRig(t, "first.wait.adding.example.", "owner")
+	knownAs(t, r.store, r.zone, r.v)
+	asked := 0
+	prev := servingKeysLookup
+	servingKeysLookup = func(context.Context, string, string) (*core.RRset, error) {
+		asked++
+		return nil, errServesNoRRset
+	}
+	t.Cleanup(func() { servingKeysLookup = prev })
+	mint := signerAddStepsOf(Provider{Label: "a", Identity: signerAddSelf}, true)[1]
+	r.keys(KeyStateStandby, KeyStateActive)
+	if w := mint.wait(r.conf, r.zone, time.Now()); !strings.Contains(w, "active") {
+		t.Errorf("its KSK standby, the first signer's keys' step waits for %q", w)
+	}
+	r.keys(KeyStateActive, KeyStateActive)
+	if w := mint.wait(r.conf, r.zone, time.Now()); w != "" {
+		t.Errorf("its keys active, the first signer's keys' step waits for %q", w)
+	}
+	if asked != 0 {
+		t.Errorf("the first signer's keys' step asked %d nameservers", asked)
 	}
 }
 
@@ -1397,24 +1473,18 @@ func TestTheCachesTimeCountsFromWhenEveryParentServerServesTheDS(t *testing.T) {
 	serving(t, soa(t, r.zone, 5, nil, nil), nil)
 	r.at(r.next(), signerAddAccept)
 	r.at(r.next(), signerAddMint)
-	r.keys(KeyStatePublished, KeyStatePublished)
+	r.keys(KeyStateActive, KeyStateActive)
 	r.at(r.next(), signerAddDS)
-	tag := r.keys(KeyStateStandby, KeyStateActive)
+	tag := r.keys(KeyStateActive, KeyStateActive)
 	r.parent[tag], r.parentTTL = true, time.Hour
 	r.parentLooks()
 	r.next()
-	r.keys(KeyStateActive, KeyStateActive)
 	st := r.next()
 	r.at(st, signerAddCaches)
 	if line := r.conf.reconcileLine(r.zone, time.Now()); !strings.Contains(line, "the DS TTL at the parent") {
-		t.Errorf("its keys active, the DS TTL not passed: the status says %q", line)
+		t.Errorf("the DS TTL not passed: the status says %q", line)
 	}
-	if err := r.store.update(r.zone, func(z *zoneSerials) error {
-		z.StepAt = time.Now().Add(-time.Hour - time.Second)
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	r.stepBegan(time.Now().Add(-time.Hour - time.Second))
 	if st := r.next(); st.Taken[len(st.Taken)-1] != lastStepKey {
 		t.Errorf("the DS TTL passed, the step is %+v, want the last", st)
 	}
@@ -1492,12 +1562,11 @@ func TestAWithheldZoneReportsAtEveryRound(t *testing.T) {
 	const none = "noreading.rounds.withheld.signer.example."
 	o := newSignerRig(t, none, sigRecords(`servers="us,p2" signers="us,p2"`)...)
 	o.conf.InternalMp.MPZoneNames = []string{none}
-	o.mpzd.Lock()
-	o.mpzd.Ready = false
-	o.mpzd.Unlock()
+	o.restart(t)
 	if err := o.mpzd.Withhold(); err != nil {
 		t.Fatal(err)
 	}
+	o.mpzd.InstallInitialSnapshot()
 	reported = map[string]bool{}
 	for round := 1; round <= 3; round++ {
 		o.conf.signerStartReport(reported)
@@ -1636,29 +1705,33 @@ func TestAParentServersAnswerWithNoDSCountsAgainstTheDS(t *testing.T) {
 	}
 }
 
-// joinerKeysPublished is a joiner's signer, with its copy holding records, at the
-// moment its first keys are published: every other signer has applied them. It
+// joinerKeyPublished is a new signer's signer, with its copy holding records, at the
+// moment a later key of its is published: every other signer has applied it. It
 // answers on the machine's clock, and its looks run in place.
-func joinerKeysPublished(t *testing.T, zone string, records []string) (*signerRig, *fakeClock) {
+func joinerKeyPublished(t *testing.T, zone string, records []string) (*signerRig, *fakeClock) {
 	t.Helper()
 	r := newSignerRig(t, zone, records...)
 	r.conf.InternalMp.servedKeys.start = func(look func()) { look() }
 	r.hand(joinerHandover(t, zone, 6, true), sigUs)
 	r.e.tickOwned()
+	if n := ownKeysIn(t, r, zone, KeyStateActive); n != 2 {
+		t.Fatalf("%d of its keys are active, want its KSK and ZSK", n)
+	}
 	clk := &fakeClock{t: time.Now()}
-	r.e.driver(zone).Clock = clk
-	inv, err := tdns.GetKeyInventory(r.kdb, zone)
+	l := r.e.driver(zone)
+	l.Clock = clk
+	keyid, err := l.Mint("ZSK")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, it := range inv {
-		if it.State != DnskeyStateForeign && !r.e.Signal(zone, it.KeyTag, "propagated", "", clk.Now()) {
-			t.Fatalf("key %d: the signal is not taken", it.KeyTag)
-		}
+	if _, _, err := l.Apply(keyid, EvDistributed); err != nil {
+		t.Fatal(err)
 	}
-	r.e.tickOwned()
-	if n := ownKeysIn(t, r, zone, KeyStatePublished); n != 2 {
-		t.Fatalf("%d of its keys are published, want its KSK and ZSK", n)
+	if !r.e.Signal(zone, keyid, "propagated", "", clk.Now()) {
+		t.Fatalf("key %d: the signal is not taken", keyid)
+	}
+	if n := ownKeysIn(t, r, zone, KeyStatePublished); n != 1 {
+		t.Fatalf("%d of its keys are published, want the later one", n)
 	}
 	return r, clk
 }
@@ -1794,7 +1867,7 @@ func TestAJoinersDSAskOpensTheKeyRounds(t *testing.T) {
 	r.conf.InternalMp.CatchUp = tr
 	r.at(r.next(), signerAddAccept)
 	r.at(r.next(), signerAddMint)
-	r.keys(KeyStatePublished, KeyStatePublished)
+	r.keys(KeyStateActive, KeyStateActive)
 	r.at(r.next(), signerAddDS)
 	tr.mu.Lock()
 	tr.keyChecks = nil
@@ -1839,9 +1912,9 @@ func TestTheKeysOffersPassForAJoinersDSStepAloneUnderTheFreeze(t *testing.T) {
 	}
 }
 
-// A joiner's first keys wait what the zone's servers serve its DNSKEY RRset with
-// (E5, T8), the largest of them: that is what caches hold. Its copy's TTL is the
-// data's, and its policy's is what it will serve itself, nothing a cache has seen.
+// A later key of a provider no NS names waits what the zone's servers serve its
+// DNSKEY RRset with (E5, T8), the largest of them: that is what caches hold. Its copy's
+// TTL is the data's, and its policy's is what it will serve itself, nothing a cache has seen.
 // Each case runs its real machine past its wait, the policy below and above its
 // copy's TTL. Its copy's TTL is the floor until every server has answered: one that
 // has not may serve above the others.
@@ -1880,15 +1953,15 @@ func TestAJoinersT8WaitsWhatTheZonesServersServe(t *testing.T) {
 				served[ns] = ttl
 			}
 			servedKeyTTLs(t, zone, served)
-			r, clk := joinerKeysPublished(t, zone, records)
+			r, clk := joinerKeyPublished(t, zone, records)
 			r.mpzd.Lock()
 			r.mpzd.DnssecPolicy.TTLS.DNSKEY, r.mpzd.DnssecPolicy.TTLS.MaxServed = uint32(tc.policy/time.Second), uint32(tc.policy/time.Second)
 			r.mpzd.Unlock()
 			delay := r.e.driver(zone).Policy.PropagationDelay
 			clk.Advance(delay + tc.want - 30*time.Second)
 			r.e.tickOwned()
-			if n := ownKeysIn(t, r, zone, KeyStatePublished); n != 2 {
-				t.Errorf("30 s before the delay and %s: %d of its keys are still published, want 2", tc.want, n)
+			if n := ownKeysIn(t, r, zone, KeyStatePublished); n != 1 {
+				t.Errorf("30 s before the delay and %s: %d of its keys are still published, want 1", tc.want, n)
 			}
 			clk.Advance(time.Minute)
 			r.e.tickOwned()
@@ -1931,20 +2004,20 @@ func TestAJoinersT8WaitsItsFirstLookAfterARestart(t *testing.T) {
 	records := append(sigRecords(`serial="5" servers="us,p2" signers="p2"`),
 		fmt.Sprintf("3600 IN DNSKEY %d %d %d %s", k.Flags, k.Protocol, k.Algorithm, k.PublicKey))
 	servedKeyTTLs(t, zone, map[string]time.Duration{"ns1." + zone: 2 * time.Hour})
-	r, clk := joinerKeysPublished(t, zone, records)
+	r, clk := joinerKeyPublished(t, zone, records)
 	delay := r.e.driver(zone).Policy.PropagationDelay
 	clk.Advance(delay + 90*time.Minute)
 
 	var looks []func()
 	r.conf.InternalMp.servedKeys = servedKeysBook{start: func(look func()) { looks = append(looks, look) }}
 	r.e.tickOwned()
-	if n := ownKeysIn(t, r, zone, KeyStatePublished); n != 2 || len(looks) == 0 {
-		t.Fatalf("with its first look under way: %d of its keys still published after %d looks, want 2 and a look", n, len(looks))
+	if n := ownKeysIn(t, r, zone, KeyStatePublished); n != 1 || len(looks) == 0 {
+		t.Fatalf("with its first look under way: %d of its keys still published after %d looks, want 1 and a look", n, len(looks))
 	}
 	looks[0]()
 	r.e.tickOwned()
-	if n := ownKeysIn(t, r, zone, KeyStatePublished); n != 2 {
-		t.Errorf("past its copy's TTL and short of what its server serves: %d of its keys still published, want 2", n)
+	if n := ownKeysIn(t, r, zone, KeyStatePublished); n != 1 {
+		t.Errorf("past its copy's TTL and short of what its server serves: %d of its keys still published, want 1", n)
 	}
 	clk.Advance(time.Hour)
 	r.e.tickOwned()
@@ -2039,5 +2112,378 @@ func TestAServersLowerTTLOrSilenceDoesNotShortenAJoinersWait(t *testing.T) {
 	}
 	if got := again(map[string]time.Duration{ns1: 3 * time.Hour}); got != 3*time.Hour {
 		t.Errorf("after its servers went higher it waits %s, want 3h0m0s", got)
+	}
+}
+
+// keysWait is a joiner's keys' step as its leader waits for it: its KSK and ZSK
+// active, its wait asked on a clock the test moves, and its looks run in place. What
+// each nameserver answers is the test's.
+type keysWait struct {
+	t        *testing.T
+	r        *signerAddRig
+	wait     func() string
+	now      time.Time
+	ksk, zsk *dns.DNSKEY
+	answers  map[string]func() (*core.RRset, error)
+	asked    int
+}
+
+const (
+	keysNS1 = "ns1.keys.example."
+	keysNS2 = "ns2.keys.example."
+)
+
+func newKeysWait(t *testing.T, zone string) *keysWait {
+	t.Helper()
+	r := newSignerAddRig(t, zone, "owner")
+	knownAs(t, r.store, zone, r.v)
+	setZoneNS(t, zone, keysNS1, keysNS2)
+	w := &keysWait{t: t, r: r, now: time.Now(), answers: map[string]func() (*core.RRset, error){}}
+	r.conf.InternalMp.signerAdds.now = func() time.Time { return w.now }
+	r.keys(KeyStateActive, KeyStateActive)
+	mpzd, _ := Zones.Get(zone)
+	for _, it := range mpzd.GetLastKeyInventory().Inventory {
+		rr, err := dns.NewRR(it.KeyRR)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if it.Flags&dns.SEP != 0 {
+			w.ksk = rr.(*dns.DNSKEY)
+		} else {
+			w.zsk = rr.(*dns.DNSKEY)
+		}
+	}
+	prev := servingKeysLookup
+	servingKeysLookup = func(_ context.Context, _ string, ns string) (*core.RRset, error) {
+		w.asked++
+		if answer := w.answers[ns]; answer != nil {
+			return answer()
+		}
+		return nil, errors.New("no answer")
+	}
+	t.Cleanup(func() { servingKeysLookup = prev })
+	mint := signerAddStepsOf(Provider{Label: "a", Identity: signerAddSelf}, false)[1]
+	w.wait = func() string { return mint.wait(r.conf, zone, w.now) }
+	return w
+}
+
+// serves has ns answer with keys, at ttl.
+func (w *keysWait) serves(ns string, ttl time.Duration, keys ...*dns.DNSKEY) {
+	w.answers[ns] = func() (*core.RRset, error) {
+		rrset := &core.RRset{}
+		for _, k := range keys {
+			c := *k
+			c.Hdr.Ttl = uint32(ttl / time.Second)
+			rrset.RRs = append(rrset.RRs, &c)
+		}
+		return rrset, nil
+	}
+}
+
+func (w *keysWait) noData(ns string) {
+	w.answers[ns] = func() (*core.RRset, error) {
+		return nil, fmt.Errorf("no DNSKEY in the answer (NOERROR): %w", errServesNoRRset)
+	}
+}
+
+func (w *keysWait) silent(ns string) { delete(w.answers, ns) }
+
+// look moves the clock past the time between looks, and asks the wait, which looks.
+func (w *keysWait) look() string {
+	w.t.Helper()
+	w.now = w.now.Add(signerAddLookEvery)
+	return w.wait()
+}
+
+// after moves the clock by d, short of a new look unless it is long enough for one.
+func (w *keysWait) after(d time.Duration) string {
+	w.t.Helper()
+	w.now = w.now.Add(d)
+	return w.wait()
+}
+
+// delay has the provider's propagation delay be d, and b's announced be announced.
+func (w *keysWait) delay(d time.Duration) {
+	w.t.Helper()
+	gst := &GossipStateTable{LocalID: roleA}
+	gst.SetPropagationDelay(d)
+	w.r.conf.InternalMp.AgentRegistry.GossipStateTable = gst
+}
+
+// copyHasDNSKEY has the zone's copy hold a DNSKEY RRset at ttl.
+func (w *keysWait) copyHasDNSKEY(ttl time.Duration) {
+	w.t.Helper()
+	zd, _ := tdns.Zones.Get(w.r.zone)
+	apex, err := zd.GetOwner(w.r.zone)
+	if err != nil || apex == nil {
+		w.t.Fatal(err)
+	}
+	k := testDnskey(w.t, w.r.zone, 256)
+	k.Hdr.Ttl = uint32(ttl / time.Second)
+	apex.RRtypes.Set(dns.TypeDNSKEY, core.RRset{Name: w.r.zone, Class: dns.ClassINET, RRtype: dns.TypeDNSKEY, RRs: []dns.RR{k}})
+	zd.Data.Set(w.r.zone, *apex)
+}
+
+// The keys' step waits until every nameserver of the zone serves both the joiner's
+// keys, and then the propagation delay and the largest TTL, to the second.
+func TestAJoinersKeysStepWaitsForEveryNameserverAndThenDelayAndTTL(t *testing.T) {
+	w := newKeysWait(t, "every.keys.adding.example.")
+	w.delay(10 * time.Minute)
+	w.serves(keysNS1, time.Hour, w.ksk, w.zsk)
+	w.serves(keysNS2, time.Hour, w.ksk)
+	got := w.look()
+	if !strings.Contains(got, keysNS2) || strings.Contains(got, keysNS1) {
+		t.Fatalf("ns2 without the ZSK, it waits for %q, want ns2 alone", got)
+	}
+	w.serves(keysNS2, 30*time.Minute, w.zsk)
+	if got = w.look(); !strings.Contains(got, keysNS2) {
+		t.Fatalf("ns2 without the KSK, it waits for %q, want ns2", got)
+	}
+	w.serves(keysNS2, 30*time.Minute, w.ksk, w.zsk)
+	if got = w.look(); got == "" || strings.Contains(got, keysNS2) {
+		t.Fatalf("every nameserver serves them, and it waits for %q, want the delay and the TTL", got)
+	}
+	whole := 10*time.Minute + time.Hour
+	if got = w.after(whole - time.Second); got == "" {
+		t.Error("a second short of the delay and the largest TTL, it waits for nothing")
+	}
+	if got = w.after(time.Second); got != "" {
+		t.Errorf("past the delay and the largest TTL, it waits for %q", got)
+	}
+}
+
+// The keys it waits for are those that sign: a later key of the joiner's, on its way,
+// is the table's business (T3, T8).
+func TestAJoinersKeysStepWaitsForTheKeysThatSign(t *testing.T) {
+	w := newKeysWait(t, "sign.keys.adding.example.")
+	no := false
+	mpzd, _ := Zones.Get(w.r.zone)
+	snap := *mpzd.GetLastKeyInventory()
+	snap.Inventory = append(slices.Clone(snap.Inventory), invItem(t, w.r.zone, 256, KeyStateStandby, &no))
+	mpzd.SetLastKeyInventory(&snap)
+	w.serves(keysNS1, 0, w.ksk, w.zsk)
+	w.serves(keysNS2, 0, w.ksk, w.zsk)
+	if got := w.look(); got != "" {
+		t.Errorf("both serve its active keys, and it waits for %q", got)
+	}
+}
+
+// One that answers without the keys holds the step, by NODATA, or with an RRset that
+// does not hold them, for as long as it does, and the wait starts when it serves them.
+// One that loses them holds it again, and the wait starts over.
+func TestANameserverAnsweringWithoutTheKeysHoldsAJoinersKeysStep(t *testing.T) {
+	w := newKeysWait(t, "without.keys.adding.example.")
+	w.serves(keysNS1, 0, w.ksk, w.zsk)
+	w.noData(keysNS2)
+	for range 3 {
+		if got := w.look(); !strings.Contains(got, keysNS2) {
+			t.Fatalf("NODATA at ns2, it waits for %q, want ns2", got)
+		}
+	}
+	w.serves(keysNS2, 0, testDnskey(t, w.r.zone, 257))
+	if got := w.after(24 * time.Hour); !strings.Contains(got, keysNS2) {
+		t.Fatalf("another key at ns2, a day on, it waits for %q, want ns2", got)
+	}
+	w.serves(keysNS2, 5*time.Minute, w.ksk, w.zsk)
+	if got := w.look(); got == "" {
+		t.Fatal("ns2 has just come to serve them, and nothing is waited for: the wait began before it did")
+	}
+	w.noData(keysNS2)
+	if got := w.after(time.Minute); !strings.Contains(got, keysNS2) {
+		t.Fatalf("ns2 lost them, and it waits for %q, want ns2", got)
+	}
+	w.serves(keysNS2, 5*time.Minute, w.ksk, w.zsk)
+	if got := w.look(); got == "" {
+		t.Fatal("ns2 has them back, and nothing is waited for: the wait did not start over")
+	}
+	if got := w.after(5*time.Minute - time.Second); got == "" {
+		t.Error("the TTL since it has them back has not passed, and nothing is waited for")
+	}
+	if got := w.after(time.Second); got != "" {
+		t.Errorf("the TTL since it has them back has passed, and it waits for %q", got)
+	}
+}
+
+// One that stays silent holds nothing, and has the wait count its copy's TTL at least:
+// it may serve more than the others. Answering, it is counted by what it serves.
+func TestASilentNameserverDoesNotHoldAJoinersKeysStep(t *testing.T) {
+	t.Run("the copy's TTL is the floor", func(t *testing.T) {
+		w := newKeysWait(t, "floor.keys.adding.example.")
+		w.copyHasDNSKEY(2 * time.Hour)
+		w.serves(keysNS1, 5*time.Minute, w.ksk, w.zsk)
+		if got := w.look(); got == "" || strings.Contains(got, keysNS2) {
+			t.Fatalf("ns2 silent, it waits for %q, want the TTL and not ns2", got)
+		}
+		if got := w.after(2*time.Hour - time.Second); got == "" {
+			t.Error("short of its copy's TTL, nothing is waited for")
+		}
+		if got := w.after(time.Second); got != "" {
+			t.Errorf("past its copy's TTL, it waits for %q", got)
+		}
+	})
+	t.Run("above the copy's TTL the largest seen counts", func(t *testing.T) {
+		w := newKeysWait(t, "above.keys.adding.example.")
+		w.copyHasDNSKEY(5 * time.Minute)
+		w.serves(keysNS1, time.Hour, w.ksk, w.zsk)
+		w.look()
+		if got := w.after(time.Hour - time.Second); got == "" {
+			t.Error("short of the TTL served, nothing is waited for")
+		}
+		if got := w.after(time.Second); got != "" {
+			t.Errorf("past the TTL served, it waits for %q", got)
+		}
+	})
+	t.Run("every nameserver silent", func(t *testing.T) {
+		w := newKeysWait(t, "allsilent.keys.adding.example.")
+		w.copyHasDNSKEY(time.Hour)
+		if got := w.look(); got == "" {
+			t.Fatal("every nameserver silent, nothing is waited for: its copy's TTL is the floor")
+		}
+		if got := w.after(time.Hour); got != "" {
+			t.Errorf("every nameserver silent, past its copy's TTL, it waits for %q", got)
+		}
+	})
+	t.Run("answering at last, it lowers the floor", func(t *testing.T) {
+		w := newKeysWait(t, "atlast.keys.adding.example.")
+		w.copyHasDNSKEY(2 * time.Hour)
+		w.serves(keysNS1, 5*time.Minute, w.ksk, w.zsk)
+		w.look()
+		w.serves(keysNS2, 5*time.Minute, w.ksk, w.zsk)
+		w.look()
+		if got := w.after(5 * time.Minute); got != "" {
+			t.Errorf("both answer at 5m, and past that it waits for %q", got)
+		}
+	})
+	t.Run("answering at last, without the keys, it holds", func(t *testing.T) {
+		w := newKeysWait(t, "atlastno.keys.adding.example.")
+		w.serves(keysNS1, 0, w.ksk, w.zsk)
+		w.look()
+		w.noData(keysNS2)
+		if got := w.look(); !strings.Contains(got, keysNS2) {
+			t.Errorf("NODATA from ns2 at last, it waits for %q, want ns2", got)
+		}
+	})
+	t.Run("gone quiet with the keys, it has served what it served", func(t *testing.T) {
+		w := newKeysWait(t, "quiet.keys.adding.example.")
+		w.copyHasDNSKEY(2 * time.Hour)
+		w.serves(keysNS1, 5*time.Minute, w.ksk, w.zsk)
+		w.serves(keysNS2, 5*time.Minute, w.ksk, w.zsk)
+		w.look()
+		w.silent(keysNS2)
+		w.look()
+		if got := w.after(5 * time.Minute); got != "" {
+			t.Errorf("ns2 seen with them, then silent, it waits for %q, want no floor", got)
+		}
+	})
+	t.Run("gone quiet without the keys, it is silent", func(t *testing.T) {
+		w := newKeysWait(t, "quietno.keys.adding.example.")
+		w.copyHasDNSKEY(time.Hour)
+		w.serves(keysNS1, 0, w.ksk, w.zsk)
+		w.noData(keysNS2)
+		w.look()
+		w.silent(keysNS2)
+		if got := w.look(); got == "" || strings.Contains(got, keysNS2) {
+			t.Fatalf("ns2 gone quiet, it waits for %q, want the floor and not ns2", got)
+		}
+		if got := w.after(time.Hour); got != "" {
+			t.Errorf("past its copy's TTL, it waits for %q", got)
+		}
+	})
+}
+
+// A look that says nothing of the nameservers is no silence: with no way to ask, or
+// a copy that names none, the step waits.
+func TestALookThatSaysNothingHoldsAJoinersKeysStep(t *testing.T) {
+	w := newKeysWait(t, "nothing.keys.adding.example.")
+	w.answers[keysNS1] = func() (*core.RRset, error) { return nil, fmt.Errorf("%s: %w", keysNS1, errIMRNotRunning) }
+	if got := w.look(); !strings.Contains(got, "not known") {
+		t.Fatalf("no IMR, it waits for %q, want what is not known", got)
+	}
+	if got := w.after(30 * 24 * time.Hour); !strings.Contains(got, "not known") {
+		t.Fatalf("no IMR, a month on, it waits for %q, want what is not known", got)
+	}
+	setZoneNS(t, w.r.zone)
+	w.serves(keysNS1, 0, w.ksk, w.zsk)
+	if got := w.look(); !strings.Contains(got, "not known") {
+		t.Fatalf("a copy that names none, it waits for %q, want what is not known", got)
+	}
+	setZoneNS(t, w.r.zone, keysNS1)
+	if got := w.look(); got != "" {
+		t.Errorf("its one nameserver serves them at TTL 0, and it waits for %q", got)
+	}
+}
+
+// What was served before the keys came counts: a cache may hold that RRset, without
+// them, for as long as it was served with.
+func TestAnAnswerBeforeTheKeysCountsInAJoinersWait(t *testing.T) {
+	w := newKeysWait(t, "before.keys.adding.example.")
+	w.serves(keysNS1, 24*time.Hour, testDnskey(t, w.r.zone, 257))
+	w.serves(keysNS2, 5*time.Minute, w.ksk, w.zsk)
+	w.look()
+	w.serves(keysNS1, 5*time.Minute, w.ksk, w.zsk)
+	w.look()
+	if got := w.after(24*time.Hour - time.Second); got == "" {
+		t.Error("ns1 served the RRset for a day just before, and nothing is waited for")
+	}
+	if got := w.after(time.Second); got != "" {
+		t.Errorf("past the day, it waits for %q", got)
+	}
+}
+
+// The wait asks at most once for each time between looks, and its book is the joiner's:
+// another joiner's, or another serial's, starts with nothing.
+func TestAJoinersWaitIsItsOwnAndAsksInTurn(t *testing.T) {
+	w := newKeysWait(t, "own.keys.adding.example.")
+	w.serves(keysNS1, time.Hour, w.ksk, w.zsk)
+	w.serves(keysNS2, time.Hour, w.ksk, w.zsk)
+	w.look()
+	asked := w.asked
+	w.after(signerAddLookEvery - time.Second)
+	if w.asked != asked {
+		t.Errorf("before the time between looks it asked %d nameservers more", w.asked-asked)
+	}
+	w.after(time.Second)
+	if w.asked == asked {
+		t.Error("past the time between looks it did not look again")
+	}
+	if got := w.after(time.Hour); got != "" {
+		t.Fatalf("past the TTL it waits for %q", got)
+	}
+	b := &w.r.conf.InternalMp.signerAdds
+	if got := b.keysPropagated(w.r.conf, w.r.zone, roleB); got == "" {
+		t.Error("another joiner has the first's wait behind it")
+	}
+	b.mu.Lock()
+	for _, l := range b.zones {
+		l.serial++
+	}
+	b.mu.Unlock()
+	if got := w.wait(); got == "" {
+		t.Error("under another serial the first's wait stands: it looked, and its time has only begun")
+	}
+}
+
+// The caches' time is the DS TTL alone, from its own look at the parent: no key's state
+// stands behind it any more, so a new leader that knows nothing of the parent waits.
+func TestTheCachesTimeWaitsForItsOwnLookAtTheParent(t *testing.T) {
+	r := newSignerAddRig(t, "caches.look.adding.example.", "owner")
+	knownAs(t, r.store, r.zone, r.v)
+	caches := signerAddStepsOf(Provider{Label: "a", Identity: signerAddSelf}, false)[3]
+	long := time.Now().Add(-48 * time.Hour)
+	prev := parentDSLook
+	parentDSLook = func(*Config, string) (parentDSSeen, error) { return parentDSSeen{}, errors.New("no answer") }
+	t.Cleanup(func() { parentDSLook = prev })
+	if got := caches.wait(r.conf, r.zone, long); !strings.Contains(got, "the parent") {
+		t.Fatalf("the parent not known, it waits for %q, want the parent", got)
+	}
+	r.parentLooks()
+	parentDSLook = func(*Config, string) (parentDSSeen, error) {
+		return parentDSSeen{tags: map[uint16]bool{1: true}, ttl: time.Hour}, nil
+	}
+	if got := caches.wait(r.conf, r.zone, time.Now()); !strings.Contains(got, "the DS TTL") {
+		t.Errorf("the DS TTL just begun, it waits for %q", got)
+	}
+	if got := caches.wait(r.conf, r.zone, time.Now().Add(-time.Hour-time.Second)); got != "" {
+		t.Errorf("the DS TTL passed, it waits for %q", got)
 	}
 }

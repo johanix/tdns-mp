@@ -42,14 +42,15 @@ func sigRecords(param string) []string {
 }
 
 type signerRig struct {
-	conf   *Config
-	mpzd   *MPZoneData
-	kdb    *tdns.KeyDB
-	e      *KeyLifecycleEngine
-	owner  *MPKeyLifecycleOwner
-	store  *actingStore
-	mu     sync.Mutex
-	pushed int // inventories pushed to the agent
+	conf    *Config
+	mpzd    *MPZoneData
+	records []string // what its copy holds at the apex, as the rig was made
+	kdb     *tdns.KeyDB
+	e       *KeyLifecycleEngine
+	owner   *MPKeyLifecycleOwner
+	store   *actingStore
+	mu      sync.Mutex
+	pushed  int // inventories pushed to the agent
 	// the signer's StartSigning: a mark for each start, and what it answers
 	started  []uint32
 	startErr error
@@ -67,7 +68,7 @@ func newSignerRig(t *testing.T, zone string, records ...string) *signerRig {
 	conf := &Config{Config: &tdns.Config{}}
 	conf.SetMpConfig(mp)
 	conf.Config.Internal.KeyDB = kdb
-	r := &signerRig{conf: conf, kdb: kdb, mpzd: signerZoneWith(t, zone, kdb, records...)}
+	r := &signerRig{conf: conf, kdb: kdb, records: records, mpzd: signerZoneWith(t, zone, kdb, records...)}
 	r.mpzd.EnsureMP()
 	r.mpzd.populateMPdata(mp, r.mpzd.roles())
 	r.owner = NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })
@@ -124,6 +125,17 @@ func (r *signerRig) roleTurn() {
 // signerZoneWith is signerTestZone with records at the apex, as served.
 func signerZoneWith(t *testing.T, name string, kdb *tdns.KeyDB, records ...string) *MPZoneData {
 	t.Helper()
+	mpzd := signerZoneUnpublished(t, name, kdb, records...)
+	mpzd.Lock()
+	mpzd.Ready, mpzd.Status = true, tdns.ZoneStatusReady
+	mpzd.Unlock()
+	mpzd.InstallInitialSnapshot()
+	return mpzd
+}
+
+// signerZoneUnpublished is that zone as a daemon has it before its first publish.
+func signerZoneUnpublished(t *testing.T, name string, kdb *tdns.KeyDB, records ...string) *MPZoneData {
+	t.Helper()
 	text := fmt.Sprintf("%s 3600 IN SOA ns1.%s hostmaster.%s 1 7200 1800 604800 7200\n"+
 		"%s 3600 IN NS ns1.%s\nns1.%s 3600 IN A 192.0.2.1\n", name, name, name, name, name, name)
 	for _, r := range records {
@@ -146,6 +158,7 @@ func signerZoneWith(t *testing.T, name string, kdb *tdns.KeyDB, records ...strin
 	if _, _, err := zd.ReadZoneData(text, true); err != nil {
 		t.Fatalf("ReadZoneData: %v", err)
 	}
+	Zones.Invalidate(name)
 	tdns.Zones.Set(name, zd)
 	t.Cleanup(func() {
 		tdns.Zones.Remove(name)
@@ -155,10 +168,6 @@ func signerZoneWith(t *testing.T, name string, kdb *tdns.KeyDB, records ...strin
 	if !ok {
 		t.Fatal("wrapper not found")
 	}
-	mpzd.Lock()
-	mpzd.Ready, mpzd.Status = true, tdns.ZoneStatusReady
-	mpzd.Unlock()
-	mpzd.InstallInitialSnapshot()
 	return mpzd
 }
 
@@ -689,11 +698,9 @@ func TestASignerWithNothingHandedAndASerialKeepsItsForeignRows(t *testing.T) {
 // inline-signing off, and the zone not loaded yet.
 func (r *signerRig) restart(t *testing.T) {
 	t.Helper()
+	r.mpzd = signerZoneUnpublished(t, r.mpzd.ZoneName, r.kdb, r.records...)
+	r.mpzd.EnsureMP()
 	r.mpzd.MP.MPdata = &MPdata{Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}}
-	r.mpzd.SetRuntimeOption(tdns.OptInlineSigning, false)
-	r.mpzd.Lock()
-	r.mpzd.Ready = false
-	r.mpzd.Unlock()
 }
 
 // firstLoad is the signer's first load of records: its data the config parse's
@@ -702,6 +709,7 @@ func (r *signerRig) firstLoad(t *testing.T, records ...string) {
 	t.Helper()
 	r.restart(t)
 	r.mpzd.MPPreRefresh(incomingCopy(t, r.mpzd.ZoneName, records...), nil, nil, r.conf.MpConfig())
+	r.mpzd.InstallInitialSnapshot()
 }
 
 // A signer's first load with nothing handed takes no role from its copy, also
@@ -730,6 +738,28 @@ func TestAFirstLoadWithNothingHandedTakesNoRoleAndIsWithheld(t *testing.T) {
 	}
 	if line := signerActingLine(zone); line != "waiting for its agent's hand-over" {
 		t.Errorf("the status says %q", line)
+	}
+}
+
+// A signer restarted with what its agent handed it, kept in its keystore, acts by
+// that at its first load: it has its role, and is not withheld. It is the one with
+// nothing held that answers nobody until its agent hands it something.
+func TestARestartedSignerHoldingAHandOverIsNotWithheld(t *testing.T) {
+	const zone = "holding.restarted.signer.example."
+	records := sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)
+	r := newSignerRig(t, zone, records...)
+	r.hand(handoverFor(t, zone, records...), sigUs)
+	s, err := loadActingStore(NewHsyncDB(r.kdb))
+	if err != nil {
+		t.Fatal(err)
+	}
+	actingHeld.Store(s)
+	r.firstLoad(t, records...)
+	if r.mpzd.Withheld() {
+		t.Error("restarted with its hand-over kept, the zone is withheld")
+	}
+	if d := r.mpzd.MP.MPdata; d == nil || !d.WeAreSigner {
+		t.Errorf("restarted with its hand-over kept, its data is %+v", d)
 	}
 }
 

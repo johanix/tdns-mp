@@ -165,6 +165,8 @@ github.com/johanix/tdns/v2 v2.0.0-20261030115455-0cc79ba37d47 h1:5H35NLfKLAlXDBo
 github.com/johanix/tdns/v2 v2.0.0-20261030115455-0cc79ba37d47/go.mod h1:83TZ0IeS2C9m1hU4kVxOr0qEVqJHpqnYN10rlJFiZSw=
 github.com/johanix/tdns/v2 v2.0.0-20261102143859-91b4e41c48b6 h1:mBrJ2o06iqfrXfqfsy7gegCSU6zTtK2Tv02+IlZgXZQ=
 github.com/johanix/tdns/v2 v2.0.0-20261102143859-91b4e41c48b6/go.mod h1:83TZ0IeS2C9m1hU4kVxOr0qEVqJHpqnYN10rlJFiZSw=
+github.com/johanix/tdns/v2 v2.0.0-20261103181114-f19f7214f643 h1:WixFstoYRJsU2Raq4jYdXMIXh5+7grp4hGh6XwtTDwU=
+github.com/johanix/tdns/v2 v2.0.0-20261103181114-f19f7214f643/go.mod h1:83TZ0IeS2C9m1hU4kVxOr0qEVqJHpqnYN10rlJFiZSw=
 github.com/johanix/tdns/v2/cache v0.0.0-20261030115455-0cc79ba37d47 h1:o/s19yn1T0Bf4IxuxBL1uLGl2D8SkiBYkhwiuVXIyBA=
 github.com/johanix/tdns/v2/cache v0.0.0-20261030115455-0cc79ba37d47/go.mod h1:kFEyTCL7pIVo/K+DGeMiUanKo9mzcstT8zvTey1NJq0=
 github.com/johanix/tdns/v2/cache v0.0.0-20261102143859-91b4e41c48b6 h1:6YttZ0AMwZ/qreiGcCg78BUGFPRVUmKmm9FqqK1W7Kc=

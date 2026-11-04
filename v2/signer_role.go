@@ -13,10 +13,11 @@
  *   - in KeySigners and not Signing: the policy is bound with no signing, also
  *     after a restart, since no first load binds it, and the zone relays its
  *     copy while the key machine runs (BindPolicyWithoutSigning).
- *   - in Signing: the zone signs (StartSigning, which ends both of the others). One
- *     that serves nothing has its policy bound first: its first keys are its key
- *     machine's, which sign from the start (SignsAtNaming), and a start waits for
- *     them. One that serves has its first keys from tdns, as at a first load.
+ *   - in Signing: the zone signs (StartSigning, which ends both of the others). Its
+ *     first keys are tdns's, as at a first load, active at once; a zone its key
+ *     machine already runs has them from the machine (T2a), and a start waits for
+ *     them. Nothing that validates sees them yet: the leader's steps hold back the
+ *     provider's DS and NS records (reconcile_add.go).
  *
  * An agent takes the zone from its own signer, so one with no copy has nothing
  * to read instructions from and can hand its signer nothing, for as long as its
@@ -137,15 +138,14 @@ func (conf *Config) signerRoleTurn(ctx context.Context, zone string) {
 	withheld := mpzd.Withheld()
 
 	named := self != "" && has(r.Signing, self)
-	if self != "" && has(r.KeySigners, self) && !bound && (!named || !has(r.Servers, self)) {
-		if !conf.bindForKeys(mpzd) && named {
-			return
-		}
+	if self != "" && has(r.KeySigners, self) && !bound && !named {
+		conf.bindForKeys(mpzd)
 	}
 	if named && !signs {
-		// its key machine makes its first keys one at a time, and tdns takes a KSK
-		// alone for a CSK: it would sign the zone with that until its next signing
-		if !has(r.Servers, self) && !firstKeysThere(mpzd) {
+		// a key machine that runs the zone makes its keys one at a time, and tdns
+		// takes a KSK alone for a CSK: it would sign the zone with that until its
+		// next signing
+		if o := conf.InternalMp.KeyLifecycleOwner; o != nil && o.taken(zone) && !firstKeysThere(mpzd) {
 			return
 		}
 		switch err := startSigning(ctx, mpzd.ZoneData); {
@@ -198,37 +198,21 @@ func firstKeysThere(mpzd *MPZoneData) bool {
 }
 
 // bindForKeys binds the zone's policy with no signing, so that its key machine runs.
-func (conf *Config) bindForKeys(mpzd *MPZoneData) bool {
+func (conf *Config) bindForKeys(mpzd *MPZoneData) {
 	zone := mpzd.ZoneName
 	if err := bindWithoutSigning(mpzd.ZoneData); err != nil {
 		conf.roleFailure(zone, "the zone's DNSSEC policy could not be bound, so its key machine does not run; tried again", err)
-		return false
+		return
 	}
 	conf.noRoleFailure(zone)
 	conf.tookRole(zone)
-	return true
-}
-
-// keysStartOver, at the hand-over of its keys' step, on the handler's own goroutine:
-// keys a joiner holds start over before its inventory says anything of them, also
-// where no first load bound its policy, as for a provider put back. Binding signs
-// nothing, so it does not wait as a start does.
-func (conf *Config) keysStartOver(mpzd *MPZoneData) {
-	mpzd.Lock()
-	bound := mpzd.DnssecPolicy != nil
-	mpzd.Unlock()
-	if bound {
-		conf.tookRole(mpzd.ZoneName)
-		return
-	}
-	conf.bindForKeys(mpzd)
 }
 
 // tookRole: the key machine may take the zone now, not at its next tick.
 func (conf *Config) tookRole(zone string) {
 	if e := conf.InternalMp.KeyLifecycle; e != nil {
 		e.TakeConfiguredZones()
-		e.startOver(zone)
+		e.distributeAtJoining(zone)
 	}
 }
 

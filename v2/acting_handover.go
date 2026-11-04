@@ -58,7 +58,7 @@ type ActingHandover struct {
 	// hand it nothing (plan S18b, signerAgentHasNoCopy).
 	NoCopy bool `json:"no_copy,omitempty"`
 	// Joining: to the signer alone. Its provider's keys-step of its joining is
-	// held: its keys start over (plan S18b, T20).
+	// held: its keys go to the other signers once more (plan S18b, reading 20).
 	Joining bool `json:"joining,omitempty"`
 }
 

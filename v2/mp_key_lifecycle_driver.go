@@ -14,7 +14,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -74,11 +73,11 @@ type Wire interface {
 	// Resign asks tdns to re-sign the zone.
 	Resign(zone string)
 	// JoiningSince: this provider's keys-step of its joining is held, and since
-	// when (plan S18b, reading 20).
+	// when (plan S18b, reading 20): its keys go to the other signers once more.
 	JoiningSince(zone string) (time.Time, bool)
 	// SignsAtNaming: this provider signs the zone and serves nothing of it: no
 	// NS record is to name it, so no validator sees its signatures, and its
-	// first keys sign from the start (signsFromTheStart).
+	// first keys go straight to active (T2a).
 	SignsAtNaming(zone string) bool
 	// ServedDnskeyTTL is the TTL the zone's DNSKEY RRset is served with: how
 	// long a cache may hold the set from before a new key was in it (E5), and
@@ -185,6 +184,9 @@ type ZoneKeyLifecycle struct {
 	// hold: the signer's agent holds the zone (the hand-over's hold, plan S6):
 	// the tick starts nothing new (Tick)
 	hold bool
+	// joinSent, by key: the keys-step of this provider's joining the key was last
+	// distributed under (JoiningSince), so that it goes once for that step.
+	joinSent map[uint16]time.Time
 }
 
 // NewZoneKeyLifecycle is a driver with nothing in flight; Reload picks up
@@ -200,7 +202,7 @@ func NewZoneKeyLifecycle(zone string, kdb *tdns.KeyDB, clock Clock, pol Lifecycl
 	l := &ZoneKeyLifecycle{Zone: dns.Fqdn(zone), KDB: kdb, Clock: clock, Policy: pol, Wire: wire,
 		dist: map[uint16]*distribution{}, dsGone: map[uint16]bool{}, rolls: map[string]bool{}, reported: map[uint16]bool{}, known: known,
 		dsPresent: map[uint16]dsPresence{}, promoteWait: map[uint16]time.Time{}, promoteTold: map[uint16]bool{}, algorithms: map[string]uint8{},
-		dsGoneAt: map[uint16]dsPresence{}, lastDSTTL: map[uint16]time.Duration{}, kskLeft: map[uint8]bool{}}
+		dsGoneAt: map[uint16]dsPresence{}, lastDSTTL: map[uint16]time.Duration{}, kskLeft: map[uint8]bool{}, joinSent: map[uint16]time.Time{}}
 	if kdb != nil {
 		if _, err := kdb.DB.Exec(HsyncTables["MPKeyDistribution"]); err != nil {
 			// without the table nothing in flight would survive a restart:
@@ -312,6 +314,7 @@ func (l *ZoneKeyLifecycle) zoneView(k tdns.DnssecKeyWithTimestamps, all map[uint
 		Margin:           l.Policy.Margin,
 		ParentKnown:      l.parentKnown,
 		ParentServesNoDS: l.parentEmpty,
+		SignsAtNaming:    l.Wire.SignsAtNaming(l.Zone),
 		Now:              l.Clock.Now(),
 	}
 	ttl, known := l.Wire.ServedDnskeyTTL(l.Zone)
@@ -567,8 +570,7 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 	}
 	switch next {
 	case KeyStateMpdist:
-		// T20's key is in the agent's set already: a resend has it distribute it
-		l.startDistribution(keyid, false, k.State != KeyStateCreated)
+		l.startDistribution(keyid, false, false)
 		if len(l.dist[keyid].Expected) == 0 {
 			// nobody to wait for (T3'): published at once
 			if _, _, err := l.applyLocked(keyid, EvDistributed); err != nil {
@@ -584,6 +586,13 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 			l.saveDist(keyid)
 		}
 	case KeyStateActive:
+		if row.ID == "T2a" {
+			l.startDistribution(keyid, false, false)
+			if len(l.dist[keyid].Expected) == 0 {
+				delete(l.dist, keyid)
+				l.saveDist(keyid)
+			}
+		}
 		l.Wire.Resign(l.Zone)
 		// the previous active key of the role retires (T10); during an
 		// algorithm rollover the old KSK goes on signing with its DS
@@ -640,11 +649,6 @@ func (l *ZoneKeyLifecycle) write(k tdns.DnssecKeyWithTimestamps, state string, s
 	if !ok {
 		return fmt.Errorf("no columns for state %s", state)
 	}
-	early, err := l.signsFromTheStart(k, state)
-	if err != nil {
-		return err
-	}
-	cols.Sign = cols.Sign || early
 	if err := tdns.UpdateKeyRowFrom(l.KDB, l.Zone, k.KeyTag, state, k.State, cols); err != nil {
 		return fmt.Errorf("key %d of %s %s -> %s: %w", k.KeyTag, l.Zone, k.State, state, err)
 	}
@@ -652,87 +656,40 @@ func (l *ZoneKeyLifecycle) write(k tdns.DnssecKeyWithTimestamps, state string, s
 	return nil
 }
 
-// StartOver has the keys of a provider that joins start over (T20), at once, so
-// that its inventory says so before its agent distributes them.
-func (l *ZoneKeyLifecycle) StartOver() error {
+// DistributeAtJoining sends this provider's keys to the other signers once for its
+// keys-step (distributeAtJoiningLocked), at once.
+func (l *ZoneKeyLifecycle) DistributeAtJoining() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	all, err := l.rows()
 	if err != nil {
 		return err
 	}
-	return l.startOverLocked(all)
+	return l.distributeAtJoiningLocked(all)
 }
 
-// startOverLocked is T20 for each key that was not published since this provider's
-// keys-step began, at the second tdns stamps it to. A key that was has been through
-// T3 in this joining, and stays. What a provider's steps read as its keys having
-// propagated must have been so in this joining.
-func (l *ZoneKeyLifecycle) startOverLocked(all map[uint16]tdns.DnssecKeyWithTimestamps) error {
-	for _, keyid := range l.dueToStartOver(all) {
-		if _, _, err := l.applyLocked(keyid, EvStartOver); err != nil {
-			return fmt.Errorf("start key %d of %s over: %w", keyid, l.Zone, err)
+// distributeAtJoiningLocked is T6 for each key this provider holds, once for each
+// keys-step of its joining. A key it made before the other signers named it, as it
+// acted by its own copy or at an earlier time, was refused or never sent, and the
+// agent's set does not change for it, so nothing else sends it. The record brings a
+// resend until they have applied it (E12), and a rejection from before is gone.
+func (l *ZoneKeyLifecycle) distributeAtJoiningLocked(all map[uint16]tdns.DnssecKeyWithTimestamps) error {
+	since, joining := l.Wire.JoiningSince(l.Zone)
+	if !joining || len(l.Wire.OtherSigners(l.Zone)) == 0 {
+		return nil
+	}
+	for _, keyid := range keytagsOf(all) {
+		switch all[keyid].State {
+		case KeyStateMpdist, KeyStatePublished, KeyStateStandby, KeyStateActive, KeyStateRetired:
+			if l.joinSent[keyid].Equal(since) {
+				continue
+			}
+			if _, _, err := l.applyLocked(keyid, CmdRetry); err != nil {
+				return fmt.Errorf("distribute key %d of %s to the other signers: %w", keyid, l.Zone, err)
+			}
 		}
 	}
 	return nil
-}
-
-// dueToStartOver are the keys T20 is for, while this provider's keys-step is held.
-func (l *ZoneKeyLifecycle) dueToStartOver(all map[uint16]tdns.DnssecKeyWithTimestamps) []uint16 {
-	since, joining := l.Wire.JoiningSince(l.Zone)
-	if !joining {
-		return nil
-	}
-	since = since.Truncate(time.Second)
-	var due []uint16
-	for _, keyid := range keytagsOf(all) {
-		k := all[keyid]
-		if (k.State == KeyStateActive || k.State == KeyStateStandby) && (k.PublishedAt == nil || k.PublishedAt.Before(since)) {
-			due = append(due, keyid)
-		}
-	}
-	return due
-}
-
-// StartOverDue: a start-over has not happened, as its write failed say. Its signer
-// then does not say it signs, so its agent does not hold the keys' step and the step
-// stays, whose hand-over is what has the next tick try again. Not known counts as due.
-func (l *ZoneKeyLifecycle) StartOverDue() bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	all, err := l.rows()
-	if err != nil {
-		return true
-	}
-	return len(l.dueToStartOver(all)) > 0
-}
-
-// signsFromTheStart: k, on its way to state, is a first key that signs before T9
-// (the transition table's P1, amended 2026-11-03). It is the first key of its role
-// of a provider named a signer that serves nothing, and it signs from its first
-// distribution, staying so until T9 makes that the state's. T3, T8 and T9 run as
-// ever: they say what the others have applied and what the parent serves.
-func (l *ZoneKeyLifecycle) signsFromTheStart(k tdns.DnssecKeyWithTimestamps, state string) (bool, error) {
-	if state != KeyStateMpdist && state != KeyStatePublished && state != KeyStateStandby {
-		return false, nil
-	}
-	cols, err := l.columnsOf(k.KeyTag)
-	if err != nil {
-		return false, err
-	}
-	if cols.Sign {
-		return true, nil
-	}
-	if k.State != KeyStateCreated || !l.Wire.SignsAtNaming(l.Zone) {
-		return false, nil
-	}
-	inv, err := tdns.GetKeyInventory(l.KDB, l.Zone)
-	if err != nil {
-		return false, fmt.Errorf("inventory of %s: %w", l.Zone, err)
-	}
-	return !slices.ContainsFunc(inv, func(it tdns.KeyInventoryItem) bool {
-		return it.Sign && it.State != KeyStateForeign && roleOf(it.Flags) == roleOf(k.Flags)
-	}), nil
 }
 
 // SetForeignDS writes another provider's key's ds column (design §1 P3:
@@ -788,6 +745,9 @@ func (l *ZoneKeyLifecycle) startDistribution(keyid uint16, removal, resend bool)
 	}
 	l.dist[keyid] = d
 	l.saveDist(keyid)
+	if since, joining := l.Wire.JoiningSince(l.Zone); joining {
+		l.joinSent[keyid] = since
+	}
 	switch {
 	case resend:
 		l.Wire.Resend(l.Zone, keyid, removal)
@@ -1174,12 +1134,9 @@ func (l *ZoneKeyLifecycle) Tick() error {
 		l.logf("key lifecycle: a tick step failed; the key waits for the next tick", "zone", l.Zone, "keyid", keyid, "step", what, "err", err)
 		errs = append(errs, err)
 	}
-	if err := l.startOverLocked(all); err != nil {
-		l.logf("key lifecycle: a joiner's keys could not start over; next tick", "zone", l.Zone, "err", err)
+	if err := l.distributeAtJoiningLocked(all); err != nil {
+		l.logf("key lifecycle: a joiner's keys could not be distributed; next tick", "zone", l.Zone, "err", err)
 		errs = append(errs, err)
-	}
-	if all, err = l.rows(); err != nil {
-		return err
 	}
 	// another provider's key whose row appeared since its provider's word
 	// came gets its ds now (#58)
