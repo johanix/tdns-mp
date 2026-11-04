@@ -15,14 +15,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"slices"
 	"sync"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
-	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -49,8 +47,10 @@ func imrServingLookup(ctx context.Context, zone, ns string) (*core.RRset, error)
 	return imrServingQuery(ctx, zone, ns, dns.TypeSOA)
 }
 
-// imrServingQuery finds ns's addresses through the IMR and asks them,
-// without recursion and with DNSSEC OK, for the zone's RRset of qtype.
+// servingAskTimeout bounds one exchange with one address of a nameserver.
+const servingAskTimeout = 2 * time.Second
+
+// imrServingQuery finds ns's addresses through the IMR and asks them (askServing).
 func imrServingQuery(ctx context.Context, zone, ns string, qtype uint16) (*core.RRset, error) {
 	imr := tdns.Globals.ImrEngine
 	if imr == nil {
@@ -76,18 +76,101 @@ func imrServingQuery(ctx context.Context, zone, ns string, qtype uint16) (*core.
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("the IMR finds no address for %s", ns)
 	}
-	rrset, rcode, answer, err := imr.AuthDNSQuery(ctx, zone, qtype, addrs, log.Default(), false)
+	return askServing(ctx, zone, qtype, addrs)
+}
+
+// askServing asks addrs in turn, each a host and port, without recursion and with
+// DNSSEC OK, for the zone's RRset of qtype, until one answers for the name. It asks
+// them itself: tdns's AuthDNSQuery stores what it reads in the IMR's cache, unvalidated
+// and over what the cache holds. A nameserver answering NODATA had the resolver deny
+// the zone's DNSKEY RRset, so it could validate nothing of the zone's, and one answering
+// with a referral gave it that referral's NS RRset for the zone.
+func askServing(ctx context.Context, zone string, qtype uint16, addrs []string) (*core.RRset, error) {
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(zone), qtype)
+	m.RecursionDesired = false
+	m.SetEdns0(4096, true)
+	var last error
+	for _, addr := range addrs {
+		r, err := exchangeServing(ctx, m, addr)
+		if err != nil {
+			last = fmt.Errorf("%s: %w", addr, err)
+			continue
+		}
+		rrset, answered, err := servedAnswer(r, m, qtype)
+		if answered {
+			return rrset, err
+		}
+		last = fmt.Errorf("%s: %w", addr, err)
+	}
+	if last == nil {
+		last = errors.New("no address to ask")
+	}
+	return nil, last
+}
+
+// exchangeServing asks addr over UDP and, when the reply is truncated, over TCP: what
+// a truncated reply leaves out says nothing of what the server serves, and post-quantum
+// keys take a DNSKEY RRset past the buffer. No reply over TCP, or one truncated there
+// as well, is an error: the server has not answered.
+func exchangeServing(ctx context.Context, m *dns.Msg, addr string) (*dns.Msg, error) {
+	r, _, err := (&dns.Client{Net: "udp", Timeout: servingAskTimeout}).ExchangeContext(ctx, m, addr)
+	if err != nil {
+		return nil, err
+	}
+	if !r.Truncated {
+		return r, nil
+	}
+	r, _, err = (&dns.Client{Net: "tcp", Timeout: servingAskTimeout}).ExchangeContext(ctx, m, addr)
 	switch {
 	case err != nil:
-		return nil, err
-	case rrset == nil && answer == cache.ContextReferral:
-		// it does not serve the zone: a resolver goes on to another
-		return nil, fmt.Errorf("a referral, not an answer, for %s", dns.TypeToString[qtype])
-	case rrset == nil:
-		// NODATA or NXDOMAIN: no error, and no RRset
-		return nil, fmt.Errorf("no %s in the answer (%s): %w", dns.TypeToString[qtype], dns.RcodeToString[rcode], errServesNoRRset)
+		return nil, fmt.Errorf("a truncated reply, and over TCP: %w", err)
+	case r.Truncated:
+		return nil, errors.New("a truncated reply, over TCP as well")
 	}
-	return rrset, nil
+	return r, nil
+}
+
+// servedAnswer reads a whole reply to query. It has answered when it says what the
+// server does with the name: the RRset, errServesNoRRset when it serves the name
+// without one, or a referral, which is an error of its own as the server does not
+// serve the zone. Otherwise the error says why not, and another address may be asked.
+func servedAnswer(r, query *dns.Msg, qtype uint16) (rrset *core.RRset, answered bool, err error) {
+	q := query.Question[0]
+	if len(r.Question) != 1 || !sameName(r.Question[0].Name, q.Name) || r.Question[0].Qtype != q.Qtype || r.Question[0].Qclass != q.Qclass {
+		return nil, false, errors.New("a reply to another question")
+	}
+	noRRset := fmt.Errorf("no %s in the answer (%s): %w", dns.TypeToString[qtype], dns.RcodeToString[r.Rcode], errServesNoRRset)
+	soa := slices.ContainsFunc(r.Ns, func(rr dns.RR) bool {
+		_, ok := rr.(*dns.SOA)
+		return ok && dns.IsSubDomain(rr.Header().Name, q.Name)
+	})
+	switch r.Rcode {
+	case dns.RcodeSuccess:
+		served := &core.RRset{}
+		for _, rr := range r.Answer {
+			switch rr.Header().Rrtype {
+			case qtype:
+				served.RRs = append(served.RRs, rr)
+			case dns.TypeRRSIG:
+				served.RRSIGs = append(served.RRSIGs, rr)
+			}
+		}
+		switch {
+		case len(served.RRs) > 0:
+			return served, true, nil
+		case len(r.Answer) == 0 && len(r.Ns) > 0 && !soa:
+			// it does not serve the zone: a resolver goes on to another
+			return nil, true, fmt.Errorf("a referral, not an answer, for %s", dns.TypeToString[qtype])
+		}
+		return nil, true, noRRset
+	case dns.RcodeNameError:
+		if soa {
+			return nil, true, noRRset
+		}
+		return nil, false, errors.New("NXDOMAIN with no SOA")
+	}
+	return nil, false, fmt.Errorf("rcode %s", dns.RcodeToString[r.Rcode])
 }
 
 // servingChainOK: each of the nameservers serves the zone at an SOA serial

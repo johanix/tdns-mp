@@ -2413,6 +2413,62 @@ func TestALookThatSaysNothingHoldsAJoinersKeysStep(t *testing.T) {
 	}
 }
 
+// After a good look as well: it holds until the next good look, which goes on with
+// the count where it was, since that look changed nothing of what was seen served.
+func TestALookThatSaysNothingAfterAGoodOneHoldsAJoinersKeysStep(t *testing.T) {
+	t.Run("no way to ask", func(t *testing.T) {
+		w := newKeysWait(t, "blind.keys.adding.example.")
+		w.serves(keysNS1, 5*time.Minute, w.ksk, w.zsk)
+		w.serves(keysNS2, 5*time.Minute, w.ksk, w.zsk)
+		if got := w.look(); got == "" || strings.Contains(got, "not known") {
+			t.Fatalf("both serve them, it waits for %q, want the TTL", got)
+		}
+		good := w.answers[keysNS1]
+		w.answers[keysNS1] = func() (*core.RRset, error) { return nil, fmt.Errorf("%s: %w", keysNS1, errIMRNotRunning) }
+		if got := w.look(); !strings.Contains(got, "not known") {
+			t.Fatalf("no IMR after a good look, it waits for %q, want what is not known", got)
+		}
+		if got := w.after(time.Hour); !strings.Contains(got, "not known") {
+			t.Fatalf("no IMR, the count long over, it waits for %q, want what is not known", got)
+		}
+		w.answers[keysNS1] = good
+		if got := w.look(); got != "" {
+			t.Errorf("the next good look, the count long over, it waits for %q: the count started again", got)
+		}
+	})
+	t.Run("a copy that names none, the count not over", func(t *testing.T) {
+		w := newKeysWait(t, "blind-copy.keys.adding.example.")
+		w.serves(keysNS1, 5*time.Minute, w.ksk, w.zsk)
+		w.serves(keysNS2, 5*time.Minute, w.ksk, w.zsk)
+		w.look()
+		setZoneNS(t, w.r.zone)
+		if got := w.look(); !strings.Contains(got, "not known") {
+			t.Fatalf("a copy that names none, it waits for %q, want what is not known", got)
+		}
+		setZoneNS(t, w.r.zone, keysNS1, keysNS2)
+		if got := w.look(); got == "" || strings.Contains(got, "not known") {
+			t.Fatalf("named again, it waits for %q, want the rest of the TTL", got)
+		}
+		if got := w.after(5*time.Minute - 2*signerAddLookEvery); got != "" {
+			t.Errorf("the TTL since the first good look has passed, and it waits for %q: the count started again", got)
+		}
+	})
+	t.Run("a nameserver going silent is not this", func(t *testing.T) {
+		w := newKeysWait(t, "blind-silent.keys.adding.example.")
+		w.serves(keysNS1, 5*time.Minute, w.ksk, w.zsk)
+		w.serves(keysNS2, 5*time.Minute, w.ksk, w.zsk)
+		w.look()
+		w.silent(keysNS1)
+		w.silent(keysNS2)
+		if got := w.look(); got == "" || strings.Contains(got, "not known") {
+			t.Fatalf("both silent after serving them, it waits for %q, want the TTL", got)
+		}
+		if got := w.after(5 * time.Minute); got != "" {
+			t.Errorf("both silent, the TTL over, it waits for %q: silence holds nothing", got)
+		}
+	})
+}
+
 // What was served before the keys came counts: a cache may hold that RRset, without
 // them, for as long as it was served with.
 func TestAnAnswerBeforeTheKeysCountsInAJoinersWait(t *testing.T) {

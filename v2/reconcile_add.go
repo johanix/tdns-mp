@@ -456,13 +456,14 @@ type joinerKeysLooks struct {
 	copyTTL time.Duration   // the RRset's TTL in the zone's copy
 	since   time.Time       // since when none has held the step; zero while one does
 	looked  bool            // a look has found out
+	blind   bool            // the latest look found nothing out
 	running bool
 	at      time.Time
 }
 
 // note takes one look's finding, as of now.
 func (k *joinerKeysLooks) note(seen joinerKeysServed, now time.Time) {
-	k.ttl, k.copyTTL, k.looked = max(k.ttl, seen.ttl), seen.copyTTL, true
+	k.ttl, k.copyTTL, k.looked, k.blind = max(k.ttl, seen.ttl), seen.copyTTL, true, false
 	with := map[string]bool{}
 	for _, ns := range seen.with {
 		with[canonicalName(ns)] = true
@@ -497,7 +498,7 @@ func (k *joinerKeysLooks) waitTTL() time.Duration {
 // ("" for nothing), given the propagation delay.
 func (k *joinerKeysLooks) waitsFor(id string, delay time.Duration, now time.Time) string {
 	switch {
-	case !k.looked:
+	case !k.looked || k.blind:
 		return "the zone's nameservers (what they serve of " + id + "'s keys, not known yet)"
 	case len(k.without) > 0:
 		return strings.Join(k.without, ", ") + " (" + id + "'s keys)"
@@ -590,6 +591,8 @@ func (b *signerAddBook) lookForKeys(conf *Config, zone, id string, k *joinerKeys
 	wasHeld := k.since.IsZero()
 	if err == nil {
 		k.note(seen, k.at)
+	} else {
+		k.blind = true
 	}
 	cleared := wasHeld && !k.since.IsZero()
 	silent, ttl := slices.Clone(k.silent), k.waitTTL()
