@@ -1258,6 +1258,127 @@ func TestARejectionFromAMemberWithNoVoteDecidesNothing(t *testing.T) {
 	}
 }
 
+// A member with no vote can answer after the voters have settled the zone's
+// CSYNC (allRecipientsConfirmed). Whatever it answers ends the wait for it at
+// once, so the NOTIFY does not wait out the time-out for a member that has
+// answered, and it changes nothing of what the voters settled. Only a member
+// that is silent, or at other instructions, is waited for, up to the time-out.
+func TestALateAnswerFromAMemberWithNoVoteEndsTheCsyncsWaitForIt(t *testing.T) {
+	for _, member := range []struct {
+		name, zone, auditors string
+		want                 standing
+	}{
+		{"auditor", "lateauditor.reconcile.example.", "n", standingAuditor},
+		{"no role", "latenorole.reconcile.example.", "", standingNoRole},
+	} {
+		t.Run(member.name, func(t *testing.T) {
+			r := newReconcileRig(t, member.zone, roleA)
+			active := freezeAt(t, 42, "v", "a,b", member.auditors)
+			if err := r.store.update(r.zone, func(z *zoneSerials) error {
+				z.Active.Reading, z.Active.SerialDigest = active, sd(active)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			zone, us := ZoneName(r.zone), AgentId(r.conf.MpConfig().Identity)
+			if st := zoneStanding(instructionsFor(zone), roleN); st != member.want {
+				t.Fatalf("n's standing is %d, want %d", st, member.want)
+			}
+			rr, err := dns.NewRR(r.zone + " 3600 IN NS ns9.provider.example.")
+			if err != nil {
+				t.Fatal(err)
+			}
+			applied := func(d *ConfirmationDetail) { d.AppliedRecords = []string{rr.String()} }
+			ignored := func(d *ConfirmationDetail) { d.Status, d.IgnoredRecords = "IGNORED", []string{rr.String()} }
+			refused := func(d *ConfirmationDetail) {
+				d.Status, d.RejectedItems = "REJECTED", []RejectedItemInfo{{Record: rr.String(), Reason: "refused"}}
+			}
+			// the CSYNC, with the voters' answers in; this record stands in for it
+			settled := func(distID string, voters func(*ConfirmationDetail)) (*TrackedRR, *delegationCsync, func(string, func(*ConfirmationDetail))) {
+				zdr, err := NewZoneDataRepo()
+				if err != nil {
+					t.Fatal(err)
+				}
+				set := &TrackedRRset{Tracked: []TrackedRR{{RR: rr, State: RRStatePending, DistributionID: distID, ExpectedRecipients: []string{freezeCombiner, roleB, roleN}}}}
+				zdr.Tracking[zone] = map[AgentId]map[uint16]*TrackedRRset{us: {dns.TypeCSYNC: set}}
+				cur := &delegationCsync{record: rr.String(), distID: distID, made: time.Now()}
+				c := &r.conf.InternalMp.delegationSyncChains
+				c.mu.Lock()
+				if c.csyncs == nil {
+					c.csyncs = map[string]*delegationCsync{}
+				}
+				c.csyncs[r.zone] = cur
+				c.mu.Unlock()
+				hear := func(from string, change func(*ConfirmationDetail)) {
+					d := &ConfirmationDetail{DistributionID: distID, Zone: zone, Source: from, Status: "ok"}
+					change(d)
+					zdr.ProcessConfirmation(d, nil)
+					r.conf.delegationCsyncProgress(t.Context(), zdr, zone, d)
+				}
+				hear(freezeCombiner, voters)
+				hear(roleB, voters)
+				return &set.Tracked[0], cur, hear
+			}
+
+			for _, voters := range []struct {
+				name   string
+				answer func(*ConfirmationDetail)
+				state  RRState
+			}{
+				{"applied", applied, RRStateAccepted},
+				{"ignored", ignored, RRStateIgnored},
+			} {
+				for _, late := range []struct {
+					name   string
+					answer func(*ConfirmationDetail)
+					status string
+				}{
+					{"applied", applied, "accepted"},
+					{"ignored", ignored, "ignored"},
+					{"rejected", refused, "rejected"},
+				} {
+					what := "the voters " + voters.name + " the CSYNC and n " + late.name + " it"
+					tr, cur, hear := settled(voters.name+late.name, voters.answer)
+					if tr.State != voters.state || cur.confirmed {
+						t.Errorf("%s, before n's answer: %v, confirmed %v", what, tr.State, cur.confirmed)
+					}
+					hear(roleN, late.answer)
+					if !cur.confirmed || cur.failed != nil {
+						t.Errorf("%s: confirmed %v, failed %v, awaiting %v", what, cur.confirmed, cur.failed, cur.awaited)
+					}
+					if tr.State != voters.state || tr.Confirmations[roleN].Status != late.status {
+						t.Errorf("%s: the record reads %v, n's answer %q", what, tr.State, tr.Confirmations[roleN].Status)
+					}
+				}
+			}
+
+			// silent, it is waited for up to the time-out and no longer
+			_, cur, hear := settled("silent", applied)
+			if cur.confirmed {
+				t.Error("the CSYNC was confirmed inside the time-out with n silent")
+			}
+			// at other instructions it has decided nothing yet (rule 6)
+			hear(roleN, func(d *ConfirmationDetail) { ignored(d); d.NotYet = true })
+			if cur.confirmed {
+				t.Error("a word from n at other instructions ended the wait for it")
+			}
+			cur.made = time.Now().Add(-time.Hour)
+			hear(roleB, applied) // the engine looks again
+			if !cur.confirmed {
+				t.Errorf("after the time-out with n silent: not confirmed, awaiting %v", cur.awaited)
+			}
+
+			// a voter's word on a settled record stays as it was
+			tr, cur, hear := settled("voter", applied)
+			hear(roleB, ignored)
+			hear(roleB, refused)
+			if tr.Confirmations[roleB].Status != "accepted" || tr.State != RRStateAccepted || cur.failed != nil {
+				t.Errorf("b's late words: its answer %q, the record %v, failed %v", tr.Confirmations[roleB].Status, tr.State, cur.failed)
+			}
+		})
+	}
+}
+
 // A member that votes when a DNSKEY distribution starts and has no role
 // after a thaw while the distribution waits is not waited for past a
 // time-out: the look at the time-out is made, and made again.

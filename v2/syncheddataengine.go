@@ -1130,6 +1130,26 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		rejectedMap, ignoredSet = nil, nil
 	}
 
+	// A member with no vote can answer after the voters have settled a record
+	// (allRecipientsConfirmed). What it answers is recorded all the same and
+	// decides nothing: the record stays as the voters left it, and a CSYNC
+	// stops waiting for that member (delegationCsyncProgress).
+	lateNonVoter := func(tr *TrackedRR, rrStr string) bool {
+		if !nonVotingMember(detail.Zone, AgentId(source)) {
+			return false
+		}
+		if appliedSet[rrStr] {
+			setConfirmation(tr, "accepted", "")
+		} else if ignoredSet[rrStr] {
+			setConfirmation(tr, "ignored", "")
+		} else if reason, rejected := rejectedMap[rrStr]; rejected {
+			setConfirmation(tr, "rejected", reason)
+		} else {
+			return false
+		}
+		return true
+	}
+
 	// Walk all tracked RRs for this zone and match by distribution ID + RR string
 	zoneTracking := zdr.Tracking[detail.Zone]
 	if zoneTracking == nil {
@@ -1218,6 +1238,13 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 					// Already accepted — record this recipient's confirmation
 					if appliedSet[rrStr] {
 						setConfirmation(tr, "accepted", "")
+						matched++
+					} else if lateNonVoter(tr, rrStr) {
+						matched++
+					}
+
+				case RRStateIgnored:
+					if lateNonVoter(tr, rrStr) {
 						matched++
 					}
 
