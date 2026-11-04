@@ -105,6 +105,7 @@ func TestTheDSStepWaitsItsTTLPlusTheDelay(t *testing.T) {
 	r := newSweepRig(t, "dswait.remove.example.")
 	r.holds(roleN, dns.TypeDNSKEY)
 	r.toDSStep()
+	r.newLook()
 	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTTL: 120})
 	r.next()
 	if line := r.conf.thawLine(r.zone); !strings.Contains(line, "step 3 (its DS), waiting for the DS TTL until ") {
@@ -131,6 +132,7 @@ func TestTheDSStepTakesTheConfiguredDelay(t *testing.T) {
 	r := newSweepRig(t, "dsset.remove.example.")
 	r.conf.MpConfig().Transitions.ParentPublishDelay = 20
 	r.toDSStep()
+	r.newLook()
 	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTTL: 120})
 	r.next()
 	r.aged(2 * time.Minute)
@@ -150,10 +152,7 @@ func TestADSTTLNeverSeenIsAnHourAndTheDelay(t *testing.T) {
 	logs := captureLog(t)
 	r := newSweepRig(t, "dsnever.remove.example.")
 	r.toDSStep()
-	rb := &r.conf.InternalMp.reconciles
-	rb.mu.Lock()
-	rb.zone(canonicalName(r.zone)).parent = parentSeen{}
-	rb.mu.Unlock()
+	r.newLook()
 	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}})
 	r.next()
 	if !strings.Contains(logs.String(), "ttl_seen=false") {
@@ -406,6 +405,90 @@ func TestALookReadsEveryServerThatAnswers(t *testing.T) {
 	}
 	if _, err := parentAtEveryServer(nil, ask); err == nil {
 		t.Error("no server gave a look")
+	}
+}
+
+// The parent lowers the DS TTL while the leaver's DS is still served: what it
+// gave before can be held for the longer one from the look that saw it lowered.
+func TestALoweredDSTTLCountsUntilWhatItGaveHasRunOut(t *testing.T) {
+	r := newSweepRig(t, "dslowered.remove.example.")
+	r.holds(roleN, dns.TypeDNSKEY)
+	r.toDSStep()
+	// the rig's parent has served both DS at a TTL of 900
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1, 2}, dsTTL: 120})
+	r.next()
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTTL: 120})
+	r.next()
+	r.aged(8 * time.Minute) // past the lower TTL and the delay, within the longer's
+	r.next()
+	if slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Fatalf("its DNSKEY went while a resolver can hold the DS from the longer TTL: %v", r.withdrawals)
+	}
+	if line := r.conf.thawLine(r.zone); !strings.Contains(line, "for the DS TTL until ") {
+		t.Errorf("the status: %q", line)
+	}
+	r.aged(13 * time.Minute) // past the longer TTL and the delay
+	r.next()
+	if !slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Errorf("its DNSKEY did not go after them: %v, steps %v", r.withdrawals, r.taken())
+	}
+}
+
+// A longer NS TTL is held on to in the same way.
+func TestALoweredNSTTLCountsUntilWhatItGaveHasRunOut(t *testing.T) {
+	r := newLeaverRig(t, "nslowered.remove.example.", "agent")
+	r.zoneServesNS(60)
+	r.next()
+	r.next()
+	// the rig's parent has named it at a TTL of 600
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 60, nsServer: parentA})
+	r.next()
+	r.served(parentSeen{ns: []string{"ns1.a.example.", "ns1.b.example."}, nsTTL: 60, nsServer: parentA})
+	r.next()
+	r.aged(7 * time.Minute) // past the lower TTL and the delay, within the longer's
+	r.next()
+	if len(r.taken()) != 2 {
+		t.Fatalf("went on while a resolver can hold the NS from the longer TTL: %v", r.taken())
+	}
+	r.aged(9 * time.Minute) // past the longer TTL and the delay
+	r.next()
+	if !slices.Equal(r.taken(), []string{"names", "ns", "confirmers"}) {
+		t.Errorf("after them: %v", r.taken())
+	}
+}
+
+// Only a lowering counts, and what it counts runs out: no largest TTL ever seen
+// stays with the zone.
+func TestOnlyALoweredTTLIsHeldTo(t *testing.T) {
+	now := time.Now()
+	ttl := func(s int) time.Duration { return time.Duration(s) * time.Second }
+	seen := parentSeen{at: now, nsTTL: 900, dsTTL: 900}
+	seen.after(parentSeen{nsTTL: 300, dsTTL: 300})
+	if !seen.nsHeldTo.IsZero() || !seen.dsHeldTo.IsZero() {
+		t.Errorf("a TTL raised: %v, %v", seen.nsHeldTo, seen.dsHeldTo)
+	}
+	first := parentSeen{at: now, nsTTL: 300, dsTTL: 300}
+	first.after(parentSeen{nsTTL: 900, dsTTL: 900})
+	if !first.dsHeldTo.Equal(now.Add(ttl(900))) || !first.nsHeldTo.Equal(now.Add(ttl(900))) {
+		t.Errorf("a TTL lowered: %v, %v", first.nsHeldTo, first.dsHeldTo)
+	}
+	// as it stays where it was, it counts from no later look
+	later := parentSeen{at: now.Add(time.Minute), nsTTL: 300, dsTTL: 300}
+	later.after(first)
+	if !later.dsHeldTo.Equal(first.dsHeldTo) || !later.nsHeldTo.Equal(first.nsHeldTo) {
+		t.Errorf("a look at the same TTL moved it: %v, %v", later.nsHeldTo, later.dsHeldTo)
+	}
+	// a second lowering, from a TTL that ends sooner, does not bring it forward
+	again := parentSeen{at: now.Add(time.Minute), dsTTL: 60}
+	again.after(first)
+	if !again.dsHeldTo.Equal(first.dsHeldTo) {
+		t.Errorf("a second lowering brought it forward: %v", again.dsHeldTo)
+	}
+	// a DS no longer served is as last served, no lowering
+	none := parentSeen{at: now.Add(time.Minute)}
+	none.after(first)
+	if none.dsTTL != 300 || !none.dsHeldTo.Equal(first.dsHeldTo) {
+		t.Errorf("no DS: TTL %d, held to %v", none.dsTTL, none.dsHeldTo)
 	}
 }
 

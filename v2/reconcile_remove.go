@@ -380,6 +380,30 @@ type parentSeen struct {
 	noNS     bool         // of one server: its NS query failed, so it tells nothing of them
 	noDS     bool         // of one server: it tells nothing of its DS (parentAtEveryServer)
 	each     []parentSeen // what each server that answered serves
+	nsHeldTo time.Time    // until when a resolver may hold what a longer NS TTL gave (after)
+	dsHeldTo time.Time    // the same of a longer DS TTL
+}
+
+// after reads this look in after the last. A TTL lower than the last look's does
+// not shorten what is already out: the longer one may have been served right up
+// to this look, so what it gave may be held that long from here. That is a time,
+// not a TTL, so it runs out by itself.
+func (seen *parentSeen) after(last parentSeen) {
+	if seen.dsTTL == 0 {
+		seen.dsTTL = last.dsTTL // as last served
+	}
+	seen.nsHeldTo = heldTo(last.nsHeldTo, seen.at, seen.nsTTL, last.nsTTL)
+	seen.dsHeldTo = heldTo(last.dsHeldTo, seen.at, seen.dsTTL, last.dsTTL)
+}
+
+func heldTo(held, at time.Time, ttl, lastTTL uint32) time.Time {
+	if ttl >= lastTTL {
+		return held
+	}
+	if to := at.Add(time.Duration(lastTTL) * time.Second); to.After(held) {
+		return to
+	}
+	return held
 }
 
 func (one parentSeen) toldNS() bool { return !one.noNS }
@@ -538,14 +562,18 @@ func (conf *Config) parentNow(zone string) (parentSeen, bool) {
 			rb.mu.Lock()
 			zr := rb.zone(key)
 			zr.looking = false
+			lowered := false
 			if err == nil {
 				got.at = time.Now()
-				if got.dsTTL == 0 {
-					got.dsTTL = zr.parent.dsTTL // as last served
-				}
+				got.after(zr.parent)
+				lowered = !got.nsHeldTo.Equal(zr.parent.nsHeldTo) || !got.dsHeldTo.Equal(zr.parent.dsHeldTo)
 				zr.parent = got
 			}
 			rb.mu.Unlock()
+			if lowered {
+				lg.Info("the parent lowered a TTL of the zone; a removal's wait counts the longer one until what it gave has run out", "zone", zone,
+					"parent_ns_ttl", got.nsTTL, "ns_held_to", got.nsHeldTo.UTC().Format(time.RFC3339), "parent_ds_ttl", got.dsTTL, "ds_held_to", got.dsHeldTo.UTC().Format(time.RFC3339))
+			}
 			if err != nil {
 				if rb.sayOnce(key, "parent look "+err.Error()) {
 					lg.Warn("what the parent serves for the zone could not be read; a removal's step waits", "zone", zone, "err", err)
@@ -732,8 +760,11 @@ func (conf *Config) removalNSWait(zone, label, id string, agentNS bool) string {
 	publish := parentPublishDelayFor(conf.MpConfig())
 	since := rb.sinceFirst(key, wait, time.Now())
 	until := since.Add(max(time.Duration(seen.nsTTL)*time.Second+publish, time.Duration(zoneTTL)*time.Second+delay))
+	if held := seen.nsHeldTo.Add(publish); held.After(until) {
+		until = held
+	}
 	// the wait's terms as they are read, and again if one of them changes
-	if rb.sayOnce(key, fmt.Sprintf("%s terms %d %s %s %d %s %s", wait, seen.nsTTL, seen.nsServer, publish, zoneTTL, delay, since)) {
+	if rb.sayOnce(key, fmt.Sprintf("%s terms %d %s %s %d %s %s %s", wait, seen.nsTTL, seen.nsServer, publish, zoneTTL, delay, since, until)) {
 		lg.Info("a removal's NS step counts its wait", "zone", zone, "provider", id, "parent_ns_ttl", seen.nsTTL, "parent_server", seen.nsServer, "parent_publish_delay", publish,
 			"zone_ns_ttl", zoneTTL, "delay", delay, "delay_from", largest, "since", since.UTC().Format(time.RFC3339), "until", until.UTC().Format(time.RFC3339))
 	}
@@ -745,8 +776,9 @@ func (conf *Config) removalNSWait(zone, label, id string, agentNS bool) string {
 
 // removalDSWait is what the leaving provider's DS step waits for: its CDS
 // withdrawn, then until no server of the parent serves its DS, and from then the
-// parent's DS TTL, as last served, plus parent-publish-delay. The leader's
-// operator's word ends the watch, not what follows it. "" once passed.
+// parent's DS TTL, as last served, plus parent-publish-delay, and no sooner than
+// a longer TTL it lowered has run out (parentSeen.after). The leader's operator's
+// word ends the watch, not what follows it. "" once passed.
 func (conf *Config) removalDSWait(zone, label, id string) string {
 	if !conf.removalWithdrawn(zone, id, "CDS") {
 		return "for the withdrawal of its CDS to be confirmed"
@@ -777,8 +809,11 @@ func (conf *Config) removalDSWait(zone, label, id string) string {
 	publish := parentPublishDelayFor(conf.MpConfig())
 	since := rb.sinceFirst(key, wait, time.Now())
 	until := since.Add(ttl + publish)
+	if held := seen.dsHeldTo.Add(publish); held.After(until) {
+		until = held
+	}
 	// the wait's terms as they are read, and again if one of them changes
-	if rb.sayOnce(key, fmt.Sprintf("%s terms %s %s %s", wait, ttl, publish, since)) {
+	if rb.sayOnce(key, fmt.Sprintf("%s terms %s %s %s %s", wait, ttl, publish, since, until)) {
 		lg.Info("a removal's DS step counts its wait", "zone", zone, "provider", id, "parent_ds_ttl", ttl, "ttl_seen", seen.dsTTL != 0, "parent_publish_delay", publish,
 			"since", since.UTC().Format(time.RFC3339), "until", until.UTC().Format(time.RFC3339))
 	}

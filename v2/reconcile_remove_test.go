@@ -115,6 +115,15 @@ func (r *leaverRig) served(seen parentSeen) {
 	rb.zone(canonicalName(r.zone)).lookedAt = time.Time{}
 }
 
+// newLook has this agent know nothing of what the parent served before, as a new
+// leader knows nothing.
+func (r *leaverRig) newLook() {
+	rb := &r.conf.InternalMp.reconciles
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	rb.zone(canonicalName(r.zone)).parent = parentSeen{}
+}
+
 // tellsNS has the member id tell its NS names in its beats.
 func (r *leaverRig) statusNoDS() tdns.DelegationSyncStatus { return tdns.DelegationSyncStatus{} }
 
@@ -133,6 +142,8 @@ func (r *leaverRig) aged(d time.Duration) {
 	for k, at := range zr.since {
 		zr.since[k] = at.Add(-d)
 	}
+	zr.parent.nsHeldTo = zr.parent.nsHeldTo.Add(-d)
+	zr.parent.dsHeldTo = zr.parent.dsHeldTo.Add(-d)
 }
 
 // bHolds has b tell the step this agent holds, held by both its parts.
