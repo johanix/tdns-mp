@@ -1259,9 +1259,10 @@ func TestARejectionFromAMemberWithNoVoteDecidesNothing(t *testing.T) {
 }
 
 // A member that votes when a record is sent, and has lost its vote when it
-// rejects the record, decides nothing. If the voters have all answered by then
-// the record is settled at that rejection: nothing else would look at it again.
-func TestARejectionFromAMemberThatLostItsVoteSettlesTheRecord(t *testing.T) {
+// answers, decides nothing. If the voters have all answered by then the record
+// is settled at that answer, as they left it: nothing else would look at it
+// again.
+func TestAnAnswerFromAMemberThatLostItsVoteSettlesTheRecord(t *testing.T) {
 	r := newReconcileRig(t, "lostvoterecord.reconcile.example.", roleA)
 	activate := func(in *Instructions) {
 		t.Helper()
@@ -1295,14 +1296,18 @@ func TestARejectionFromAMemberThatLostItsVoteSettlesTheRecord(t *testing.T) {
 		state      RRState
 		voters     func(*ConfirmationDetail)
 		recipients []string
+		late       func(*ConfirmationDetail)
+		status     string
 		after      RRState
 	}{
-		{"an addition the voters applied", RRStatePending, applied, []string{freezeCombiner, roleB, roleN}, RRStateAccepted},
-		{"an addition the voters ignored", RRStatePending, ignored, []string{freezeCombiner, roleB, roleN}, RRStateIgnored},
-		{"a removal the voters did", RRStatePendingRemoval, removed, []string{freezeCombiner, roleB, roleN}, RRStateRemoved},
+		{"an addition the voters applied", RRStatePending, applied, []string{freezeCombiner, roleB, roleN}, refused, "rejected", RRStateAccepted},
+		{"an addition the voters ignored", RRStatePending, ignored, []string{freezeCombiner, roleB, roleN}, refused, "rejected", RRStateIgnored},
+		{"an addition the voters ignored, n applying it", RRStatePending, ignored, []string{freezeCombiner, roleB, roleN}, applied, "accepted", RRStateIgnored},
+		{"an addition the voters applied, n applying it", RRStatePending, applied, []string{freezeCombiner, roleB, roleN}, applied, "accepted", RRStateAccepted},
+		{"a removal the voters did", RRStatePendingRemoval, removed, []string{freezeCombiner, roleB, roleN}, refused, "rejected", RRStateRemoved},
 		// nobody is known to confirm it: nothing to settle it on
-		{"an addition with no recipients yet", RRStatePending, nil, nil, RRStatePending},
-		{"a removal with no recipients yet", RRStatePendingRemoval, nil, nil, RRStatePendingRemoval},
+		{"an addition with no recipients yet", RRStatePending, nil, nil, refused, "rejected", RRStatePending},
+		{"a removal with no recipients yet", RRStatePendingRemoval, nil, nil, refused, "rejected", RRStatePendingRemoval},
 	} {
 		activate(votes)
 		zdr, err := NewZoneDataRepo()
@@ -1320,9 +1325,9 @@ func TestARejectionFromAMemberThatLostItsVoteSettlesTheRecord(t *testing.T) {
 			t.Errorf("%s, with n still to answer: %v", tc.name, tr.State)
 		}
 		activate(noVote)
-		confirm(zdr, "d", roleN, refused)
-		if tr.State != tc.after || tr.Reason != "" || tr.Confirmations[roleN].Status != "rejected" {
-			t.Errorf("%s, and n rejects it with no vote: %v, reason %q, its answer %q", tc.name, tr.State, tr.Reason, tr.Confirmations[roleN].Status)
+		confirm(zdr, "d", roleN, tc.late)
+		if tr.State != tc.after || tr.Reason != "" || tr.Confirmations[roleN].Status != tc.status {
+			t.Errorf("%s, and n answers with no vote: %v, reason %q, its answer %q", tc.name, tr.State, tr.Reason, tr.Confirmations[roleN].Status)
 		}
 	}
 }
