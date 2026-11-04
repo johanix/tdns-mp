@@ -264,6 +264,126 @@ func TestTheDSStepWaitsForALookBeforeItsWithdrawal(t *testing.T) {
 	}
 }
 
+// One RRset that no server tells comes back with the look's error, and with what
+// the other told, and neither reads as every server having told of the DS.
+func TestALookWithOneRRsetUntoldKeepsTheOther(t *testing.T) {
+	failed := errors.New("no answer")
+	nsRR := &dns.NS{Hdr: dns.RR_Header{Ttl: 300}, Ns: "ns1.n.example."}
+	dsRR := &dns.DS{Hdr: dns.RR_Header{Ttl: 120}, KeyTag: 2}
+
+	seen, err := parentAtEveryServer([]string{"s1", "s2"}, func(_ string, rrtype uint16) ([]dns.RR, error) {
+		if rrtype == dns.TypeDS {
+			return nil, failed
+		}
+		return []dns.RR{nsRR}, nil
+	})
+	if !errors.Is(err, failed) || !slices.Contains(seen.ns, "ns1.n.example.") || !seen.noDS || seen.noNS || seen.dsTold {
+		t.Errorf("no server told the DS: err %v, %+v", err, seen)
+	}
+
+	seen, err = parentAtEveryServer([]string{"s1", "s2"}, func(_ string, rrtype uint16) ([]dns.RR, error) {
+		if rrtype == dns.TypeNS {
+			return nil, failed
+		}
+		return []dns.RR{dsRR}, nil
+	})
+	if !errors.Is(err, failed) || !slices.Contains(seen.ds, 2) || !seen.noNS || seen.noDS || seen.dsTold {
+		t.Errorf("no server told the NS: err %v, %+v", err, seen)
+	}
+}
+
+// The leaver's NS back at the parent, in a look no server tells the DS in, takes
+// the NS step's watch back: the wait does not run out on what an older look read.
+func TestAnNSBackInALookWithoutTheDSTakesTheWatchBack(t *testing.T) {
+	r := newLeaverRig(t, "nsback.remove.example.", "agent")
+	named := r.parent.ns
+	r.next()
+	r.next()
+	r.served(parentSeen{ns: []string{"ns1.a.example.", "ns1.b.example."}, nsTTL: 600, ds: r.parent.ds, dsTTL: 900})
+	r.next()
+	r.parentErr = errors.New("no answer")
+	r.served(parentSeen{ns: named, nsTTL: 600, noDS: true, each: []parentSeen{{noDS: true}}})
+	r.next()
+	r.aged(2 * time.Hour)
+	r.next()
+	r.next()
+	if !slices.Equal(r.taken(), []string{"names", "ns"}) {
+		t.Errorf("the step went on with its NS named: steps %v", r.taken())
+	}
+}
+
+// The leaver's DS back at the parent, in a look no server tells the NS in, takes
+// the DS step's watch back.
+func TestADSBackInALookWithoutTheNSTakesTheWatchBack(t *testing.T) {
+	r := newSweepRig(t, "dsback.remove.example.")
+	r.toDSStep()
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTTL: 120, dsTold: true})
+	r.next()
+	r.parentErr = errors.New("no answer")
+	named := r.parent.ns
+	r.served(parentSeen{ds: []uint16{1, 2}, dsTTL: 120, noNS: true, each: []parentSeen{{noNS: true}}})
+	r.next()
+	if seen, _ := r.conf.parentNow(r.zone); !slices.Equal(seen.ns, named) || seen.nsTTL != 600 {
+		t.Errorf("the NS not told, from %v: %+v", named, seen)
+	}
+	r.aged(3 * time.Hour)
+	r.next()
+	r.next()
+	if slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Errorf("its DNSKEY went with its DS at the parent: %v, steps %v", r.withdrawals, r.taken())
+	}
+}
+
+// What no server told stays as the last look that told it: a DS not told is not a
+// DS gone, and the look moves on only what it told.
+func TestAnRRsetNoServerToldStaysAsLastTold(t *testing.T) {
+	r := newSweepRig(t, "dsuntold.remove.example.")
+	r.toDSStep()
+	before, _ := r.conf.parentNow(r.zone)
+	r.parentErr = errors.New("no answer")
+	r.served(parentSeen{ns: []string{"ns1.a.example."}, nsTTL: 300, nsServer: "s1", noDS: true, each: []parentSeen{{noDS: true}}})
+	r.next()
+	seen, _ := r.conf.parentNow(r.zone)
+	if !slices.Equal(seen.ns, []string{"ns1.a.example."}) || seen.nsTTL != 300 || seen.nsServer != "s1" {
+		t.Errorf("the NS told did not move on: %+v", seen)
+	}
+	if !slices.Equal(seen.ds, before.ds) || len(seen.dsRRs) != len(before.dsRRs) || seen.dsTTL != before.dsTTL || seen.dsTold {
+		t.Errorf("the DS not told, from %+v: %+v", before, seen)
+	}
+	r.aged(3 * time.Hour)
+	r.next()
+	r.next()
+	if slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Errorf("a DS not told read as gone: %v, steps %v", r.withdrawals, r.taken())
+	}
+}
+
+// A look that told nothing leaves the last standing: it is not an RRset gone.
+func TestALookThatToldNothingLeavesTheLastStanding(t *testing.T) {
+	r := newSweepRig(t, "dsnothing.remove.example.")
+	r.toDSStep()
+	before, _ := r.conf.parentNow(r.zone)
+	r.parentErr = errors.New("no answer")
+	r.served(parentSeen{})
+	r.next()
+	seen, _ := r.conf.parentNow(r.zone)
+	if !slices.Equal(seen.ns, before.ns) || !slices.Equal(seen.ds, before.ds) || !seen.at.Equal(before.at) {
+		t.Errorf("from %+v: %+v", before, seen)
+	}
+}
+
+// With no look before it that told both, a look that tells one finds nothing out:
+// an empty DS would read as none.
+func TestAFirstLookWithOneRRsetUntoldIsNoLook(t *testing.T) {
+	r := newSweepRig(t, "dsfirst.remove.example.")
+	r.newLook()
+	r.parentErr = errors.New("no answer")
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, noDS: true, each: []parentSeen{{noDS: true}}})
+	if _, ok := r.conf.parentNow(r.zone); ok {
+		t.Error("a first look with no DS told reads as known")
+	}
+}
+
 // A DS that is neither its nor in the step's set has no say.
 func TestAnotherDSOutsideTheSetDoesNotHoldTheStep(t *testing.T) {
 	r := newSweepRig(t, "dsstray.remove.example.")
