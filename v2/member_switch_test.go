@@ -134,6 +134,21 @@ func TestMembershipIsReadFromTheActiveInstructions(t *testing.T) {
 	}
 }
 
+// A removal stored with no identity names nobody: an empty name is no name,
+// and does not become the root as a member.
+func TestARemovalWithNoIdentityAddsNoMember(t *testing.T) {
+	mpzd := instrTestZone(t, "noidentity.s15.example.", s15Records(7)...)
+	zone := ZoneName(mpzd.ZoneName)
+	s := newStore(t)
+	withStore(t, s)
+	activeAs(t, s, mpzd.ZoneName, readOf(t, s15Records(8)...))
+	want := ParticipantsForZone(zone)
+	keepRemoval(t, s, mpzd.ZoneName, "eps", "")
+	if got := ParticipantsForZone(zone); !slices.Equal(got, want) {
+		t.Errorf("a removal with no identity made the members %q, from %q", got, want)
+	}
+}
+
 // A provider whose removal is under way stays a member, with no role, until
 // its removal is done (design 3.3), whatever its record says: OFF, or no
 // record at all.

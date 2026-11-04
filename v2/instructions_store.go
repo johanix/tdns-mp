@@ -901,7 +901,7 @@ func (s *InstructionStore) removal(zone, label, identity string) (Removal, bool)
 
 // removalIdentities are the stored identities of the zone's providers whose
 // removal is under way, the zone named in any case (S12, S17b fill them),
-// each folded as a DNS name.
+// each folded as a DNS name. An empty one is no name, not the root.
 func (s *InstructionStore) removalIdentities(zone string) []string {
 	if s == nil {
 		return nil
@@ -914,7 +914,9 @@ func (s *InstructionStore) removalIdentities(zone string) []string {
 	}
 	var out []string
 	for _, r := range z.Removals {
-		out = append(out, core.CanonicalizeName(dns.Fqdn(r.Identity)))
+		if id := canonicalName(r.Identity); id != "" {
+			out = append(out, id)
+		}
 	}
 	return out
 }

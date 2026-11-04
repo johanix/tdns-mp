@@ -2238,7 +2238,7 @@ func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]s
 
 // broadcastElectToZone sends an election RFI message to the zone's voting
 // members and its auditors (the plan's 3.2), by an explicit test: Agents
-// holds the role holders today, and every member from the switch on.
+// holds every member, those with no role too (plan S15).
 func (ar *AgentRegistry) broadcastElectToZone(zone ZoneName, rfiType string, records map[string][]string) error {
 	zad, err := ar.GetZoneAgentData(zone)
 	if err != nil {
