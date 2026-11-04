@@ -831,18 +831,20 @@ func TestTheWarningNamesACopyAboveItsUpstream(t *testing.T) {
 		t.Errorf("a copy below its upstream: %s", got)
 	}
 
-	// the advice takes every upstream that answers being below the copy
+	// the advice takes every upstream that answers being below the copy, and with
+	// one that does not answer it says to look at that one first
 	for name, c := range map[string]struct {
 		upstreams []string
 		want      bool
+		first     bool
 	}{
-		"one lower, one higher":      {[]string{lower, soaServer(t, zone, 431)}, false},
-		"one higher, one lower":      {[]string{soaServer(t, zone, 431), lower}, false},
-		"one lower, one at the copy": {[]string{lower, soaServer(t, zone, 430)}, false},
-		"at the copy":                {[]string{soaServer(t, zone, 430)}, false},
-		"two lower":                  {[]string{lower, soaServer(t, zone, 428)}, true},
-		"one lower, one silent":      {[]string{lower, goneServer(t)}, true},
-		"silent":                     {[]string{goneServer(t)}, false},
+		"one lower, one higher":      {[]string{lower, soaServer(t, zone, 431)}, false, false},
+		"one higher, one lower":      {[]string{soaServer(t, zone, 431), lower}, false, false},
+		"one lower, one at the copy": {[]string{lower, soaServer(t, zone, 430)}, false, false},
+		"at the copy":                {[]string{soaServer(t, zone, 430)}, false, false},
+		"two lower":                  {[]string{lower, soaServer(t, zone, 428)}, true, false},
+		"one lower, one silent":      {[]string{lower, goneServer(t)}, true, true},
+		"silent":                     {[]string{goneServer(t)}, false, false},
 	} {
 		logs.Reset()
 		zd.Upstreams = nil
@@ -852,6 +854,12 @@ func TestTheWarningNamesACopyAboveItsUpstream(t *testing.T) {
 		warnCopyStuck(zone, 425, stampAlpha)
 		if got := strings.Contains(logs.String(), "a higher SOA"); got != c.want {
 			t.Errorf("%s: names a higher SOA: %v, want %v: %s", name, got, c.want, logs.String())
+		}
+		if got := strings.Contains(logs.String(), "looks at those first"); got != c.first {
+			t.Errorf("%s: says to look at an upstream that does not answer: %v, want %v: %s", name, got, c.first, logs.String())
+		}
+		if got := strings.Contains(logs.String(), "takes the zone out"); got != c.want {
+			t.Errorf("%s: says to take the zone out: %v, want %v: %s", name, got, c.want, logs.String())
 		}
 	}
 }

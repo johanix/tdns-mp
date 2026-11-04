@@ -1402,7 +1402,8 @@ func tdnsZoneNamed(zone string) (*tdns.ZoneData, bool) {
 // that answers is the case to name, as nothing else tells of it: a secondary keeps
 // the higher serial, and the owner's edits never reach this agent. It comes of an
 // upstream whose chain changed, a signer moved from another provider's to its own.
-// With an upstream at or above the copy a refresh can still replace it.
+// With an upstream at or above the copy a refresh can still replace it, and one
+// that does not answer may be that upstream, so the operator looks at it first.
 func warnCopyStuck(zone string, told uint32, member string) {
 	zd, ok := tdnsZoneNamed(zone)
 	if !ok || zd == nil {
@@ -1414,11 +1415,12 @@ func warnCopyStuck(zone string, told uint32, member string) {
 		return
 	}
 	var upstreams []string
-	above, notAbove := false, false
+	above, notAbove, silent := false, false, false
 	for _, up := range zd.Upstreams {
 		rrs, err := tdns.AuthQuery(zd.ZoneName, up.Addr, dns.TypeSOA)
 		if err != nil || len(rrs) == 0 {
 			upstreams = append(upstreams, up.Addr+"=no answer")
+			silent = true
 			continue
 		}
 		if s, ok := rrs[0].(*dns.SOA); ok {
@@ -1431,7 +1433,10 @@ func warnCopyStuck(zone string, told uint32, member string) {
 		}
 	}
 	msg := "a member tells newer instructions and refreshing the zone has not brought them"
-	if above && !notAbove {
+	switch {
+	case above && !notAbove && silent:
+		msg += "; this agent's copy has a higher SOA than every upstream that answers, and one that does not answer may be higher: its operator looks at those first, and if none is higher takes the zone out of the configuration and back"
+	case above && !notAbove:
 		msg += "; this agent's copy has a higher SOA than its upstream, so no refresh replaces it until the upstream's passes it: its operator takes the zone out of the configuration and back"
 	}
 	lgGossip.Warn(msg, "zone", zone, "told", told, "member", member, "copy_soa", soa.Serial, "upstream_soa", strings.Join(upstreams, " "))

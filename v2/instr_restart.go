@@ -59,20 +59,28 @@ func (s *InstructionStore) reading(zone string) *Instructions {
 // (design 5.1). None for a provider still leaving: it has its record under the
 // active serial, or is reconciling to the serial that took it, one edit taking
 // its roles and its record included. None from a serial the judge refuses, or
-// under an owner error. Called with the store's lock held.
+// under an owner error. None when the newest serial held does not name it, as
+// the readers read that one once the active serial goes, and it would have no
+// peer to learn an active serial from. Of the serials from the newest down that
+// name it, the oldest. Called with the store's lock held.
 func (z *zoneSerials) namedAgain(local string) *heldSerial {
 	if z.Active == nil || z.OwnerError != "" || z.reconciling() {
 		return nil
 	}
-	if members, _, _ := participantsOf(z.Active.Reading); memberSetOf(members).has(local) {
+	names := func(in *Instructions) bool {
+		members, _, _ := participantsOf(in)
+		return memberSetOf(members).has(local)
+	}
+	if names(z.Active.Reading) {
 		return nil
 	}
-	for i := range z.Held {
-		if members, _, _ := participantsOf(z.Held[i].Reading); len(z.Held[i].Refused) == 0 && memberSetOf(members).has(local) {
-			return &z.Held[i]
+	var named *heldSerial
+	for i := len(z.Held) - 1; i >= 0 && names(z.Held[i].Reading); i-- {
+		if len(z.Held[i].Refused) == 0 {
+			named = &z.Held[i]
 		}
 	}
-	return nil
+	return named
 }
 
 // startedOver is what startOver did: the store's name for the zone, the active

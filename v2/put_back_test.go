@@ -246,6 +246,33 @@ func TestARefusedSerialDoesNotBringAProviderBack(t *testing.T) {
 	}
 }
 
+// Named by one serial and taken again by the next before its turn, n stays where
+// it is: the readers would read the newer serial, which names no peer, and n
+// would have no active serial and no one to learn one from. A serial that names
+// it after that brings it back, and that one is what named it.
+func TestASerialThatTakesItAgainKeepsTheActiveSerial(t *testing.T) {
+	const zone = "taken.back.remove.example."
+	p := newPutBack(t, zone)
+	n := p.atNoRecord(t)
+	n.store.Note(zone, withN(t, 44), nil)
+	n.store.Note(zone, withoutN(t, 45), nil)
+	n.conf.thawTurn(zone)
+	if n.store.activeUnknown(zone) || n.active() != 43 {
+		t.Fatalf("a serial no longer the newest moved n: %+v", status(t, n.store, zone))
+	}
+	if !n.conf.safeToRemove(zone) {
+		t.Error("a serial no longer the newest ends n's safe to remove")
+	}
+	n.store.Note(zone, withN(t, 46), nil)
+	n.conf.thawTurn(zone)
+	if !n.store.activeUnknown(zone) {
+		t.Fatalf("named by the newest serial, n did not start over: %+v", status(t, n.store, zone))
+	}
+	if at := n.store.namedAt(zone); at == nil || *at != 46 {
+		t.Errorf("named at %v, want 46", at)
+	}
+}
+
 // Reconciling to the serial that took its record, n is still leaving: a serial
 // that names it waits until the transition is done.
 func TestAProviderReconcilingIsNotBroughtBack(t *testing.T) {
@@ -289,6 +316,9 @@ func TestNamedAgainReadsEveryGuard(t *testing.T) {
 	at := func(in *Instructions) *heldSerial { return &heldSerial{SerialDigest: sd(in), Reading: in} }
 	refused := heldSerial{SerialDigest: sd(with), Reading: with, Refused: []Refusal{{Code: RefusedRoleWithoutRecord}}}
 	withS := *at(with)
+	taken, after := withoutN(t, 46), withN(t, 47)
+	refusedTaken := heldSerial{SerialDigest: sd(taken), Reading: taken, Refused: []Refusal{{Code: RefusedRoleWithoutRecord}}}
+	refusedAfter := heldSerial{SerialDigest: sd(after), Reading: after, Refused: []Refusal{{Code: RefusedRoleWithoutRecord}}}
 	for _, c := range []struct {
 		name string
 		z    zoneSerials
@@ -301,6 +331,10 @@ func TestNamedAgainReadsEveryGuard(t *testing.T) {
 		{"no serial names it", zoneSerials{Active: at(without), Held: []heldSerial{*at(without2)}}, false},
 		{"none held", zoneSerials{Active: at(without)}, false},
 		{"only a refused serial names it", zoneSerials{Active: at(without), Held: []heldSerial{refused}}, false},
+		{"a later serial takes it again", zoneSerials{Active: at(without), Held: []heldSerial{withS, *at(taken)}}, false},
+		{"a later serial, refused, takes it again", zoneSerials{Active: at(without), Held: []heldSerial{withS, refusedTaken}}, false},
+		{"a refused serial names it above one that took it again", zoneSerials{Active: at(without), Held: []heldSerial{withS, *at(taken), refusedAfter}}, false},
+		{"a serial names it, and a refused one above it too", zoneSerials{Active: at(without), Held: []heldSerial{withS, refusedAfter}}, true},
 		{"an owner error", zoneSerials{Active: at(without), Held: []heldSerial{withS}, OwnerError: "x"}, false},
 		{"thawed from, until done", zoneSerials{Active: at(without), Held: []heldSerial{withS}, From: at(without)}, false},
 		{"its removal under way, one edit taking its roles and record", zoneSerials{Active: at(without), Held: []heldSerial{withS}, Removals: []Removal{{Identity: roleN}}}, false},
@@ -310,6 +344,10 @@ func TestNamedAgainReadsEveryGuard(t *testing.T) {
 		if got := c.z.namedAgain(roleN) != nil; got != c.want {
 			t.Errorf("%s: got %v", c.name, got)
 		}
+	}
+	// what names it is the serial after the last that does not
+	if h := (&zoneSerials{Active: at(without), Held: []heldSerial{withS, *at(taken), *at(after)}}).namedAgain(roleN); h == nil || h.Serial != 47 {
+		t.Errorf("named by %+v, want serial 47", h)
 	}
 	// an OFF record registers no member, and names no one back
 	off := jAt(t, 46, `servers="a,b" signers="a" nsmgmt="agent"`, freezeRecords[0], freezeRecords[1], `3600 IN HSYNC3 OFF n n.role.example. .`)
