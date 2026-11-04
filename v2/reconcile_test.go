@@ -1438,6 +1438,13 @@ func TestARecordSettlesWhenTheSilentMemberItWaitsForLosesItsVote(t *testing.T) {
 	if tr.State != RRStatePendingRemoval {
 		t.Errorf("a removal n alone was to answer, and rejected with no vote: %v", tr.State)
 	}
+	// nor when n gains a vote: nobody has removed the record
+	r.activate(t, votes)
+	r.conf.instrActivated(t.Context(), zdr, r.zone)
+	if tr.State != RRStatePendingRemoval {
+		t.Errorf("a removal n alone was to answer, rejected with no vote, and n now votes: %v", tr.State)
+	}
+	r.activate(t, noVote)
 	// a rejection from before n had a vote decides nothing, by the project
 	// owner's ruling, also once n has one: the removal finishes when the
 	// voters have removed the record, and n is not asked again

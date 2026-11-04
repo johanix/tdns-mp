@@ -1070,6 +1070,12 @@ func aRecipientVotes(zone ZoneName, tr *TrackedRR) bool {
 	return slices.ContainsFunc(tr.ExpectedRecipients, func(r string) bool { return !nonVotingMember(zone, AgentId(r)) })
 }
 
+// aRecipientRemoved: a recipient has removed the record. A rejection removes
+// nothing, so a removal with no such answer does not finish.
+func aRecipientRemoved(tr *TrackedRR) bool {
+	return slices.ContainsFunc(tr.ExpectedRecipients, func(r string) bool { return tr.Confirmations[r].Status == "removed" })
+}
+
 // settleTracked looks again at the zone's records still waiting for an answer.
 // A recipient that has lost its vote since a record was sent may be all it
 // waits for, and if that member stays silent no confirmation comes to settle
@@ -1090,7 +1096,7 @@ func (zdr *ZoneDataRepo) settleTracked(zone ZoneName) {
 				}
 				if tr.State == RRStatePending {
 					settleAddition(zone, tr)
-				} else if allRecipientsConfirmed(zone, tr) {
+				} else if aRecipientRemoved(tr) && allRecipientsConfirmed(zone, tr) {
 					zdr.finishRemoval(zone, agentId, rrtype, tr)
 				}
 				if tr.State != RRStatePending && tr.State != RRStatePendingRemoval {
@@ -1289,7 +1295,7 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 							tr.Reason = fmt.Sprintf("delete rejected: %s", reason)
 							lgEngine.Warn("delete rejected for RR", "source", source, "rr", rrStr, "reason", reason)
 						} else {
-							settles = aRecipientVotes(detail.Zone, tr) // it may have lost its vote after the voters answered
+							settles = aRecipientRemoved(tr) // it may have lost its vote after the voters answered
 						}
 					}
 					if settles && allRecipientsConfirmed(detail.Zone, tr) {
