@@ -1258,6 +1258,75 @@ func TestARejectionFromAMemberWithNoVoteDecidesNothing(t *testing.T) {
 	}
 }
 
+// A member that votes when a record is sent, and has lost its vote when it
+// rejects the record, decides nothing. If the voters have all answered by then
+// the record is settled at that rejection: nothing else would look at it again.
+func TestARejectionFromAMemberThatLostItsVoteSettlesTheRecord(t *testing.T) {
+	r := newReconcileRig(t, "lostvoterecord.reconcile.example.", roleA)
+	activate := func(in *Instructions) {
+		t.Helper()
+		if err := r.store.update(r.zone, func(z *zoneSerials) error {
+			z.Active.Reading, z.Active.SerialDigest = in, sd(in)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	votes, noVote := freezeAt(t, 42, "v", "a,b,n", ""), freezeAt(t, 43, "w", "a,b", "")
+	zone, us := ZoneName(r.zone), AgentId(r.conf.MpConfig().Identity)
+	rr, err := dns.NewRR(r.zone + " 3600 IN NS ns9.provider.example.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirm := func(zdr *ZoneDataRepo, distID, from string, change func(*ConfirmationDetail)) {
+		d := &ConfirmationDetail{DistributionID: distID, Zone: zone, Source: from, Status: "ok"}
+		change(d)
+		zdr.ProcessConfirmation(d, nil)
+	}
+	applied := func(d *ConfirmationDetail) { d.AppliedRecords = []string{rr.String()} }
+	ignored := func(d *ConfirmationDetail) { d.Status, d.IgnoredRecords = "IGNORED", []string{rr.String()} }
+	removed := func(d *ConfirmationDetail) { d.RemovedRecords = []string{rr.String()} }
+	refused := func(d *ConfirmationDetail) {
+		d.Status, d.RejectedItems = "REJECTED", []RejectedItemInfo{{Record: rr.String(), Reason: "refused"}}
+	}
+
+	for _, tc := range []struct {
+		name       string
+		state      RRState
+		voters     func(*ConfirmationDetail)
+		recipients []string
+		after      RRState
+	}{
+		{"an addition the voters applied", RRStatePending, applied, []string{freezeCombiner, roleB, roleN}, RRStateAccepted},
+		{"an addition the voters ignored", RRStatePending, ignored, []string{freezeCombiner, roleB, roleN}, RRStateIgnored},
+		{"a removal the voters did", RRStatePendingRemoval, removed, []string{freezeCombiner, roleB, roleN}, RRStateRemoved},
+		// nobody is known to confirm it: nothing to settle it on
+		{"an addition with no recipients yet", RRStatePending, nil, nil, RRStatePending},
+		{"a removal with no recipients yet", RRStatePendingRemoval, nil, nil, RRStatePendingRemoval},
+	} {
+		activate(votes)
+		zdr, err := NewZoneDataRepo()
+		if err != nil {
+			t.Fatal(err)
+		}
+		set := &TrackedRRset{Tracked: []TrackedRR{{RR: rr, State: tc.state, DistributionID: "d", ExpectedRecipients: tc.recipients}}}
+		zdr.Tracking[zone] = map[AgentId]map[uint16]*TrackedRRset{us: {dns.TypeNS: set}}
+		tr := &set.Tracked[0]
+		if tc.voters != nil {
+			confirm(zdr, "d", freezeCombiner, tc.voters)
+			confirm(zdr, "d", roleB, tc.voters)
+		}
+		if tr.State != tc.state {
+			t.Errorf("%s, with n still to answer: %v", tc.name, tr.State)
+		}
+		activate(noVote)
+		confirm(zdr, "d", roleN, refused)
+		if tr.State != tc.after || tr.Reason != "" || tr.Confirmations[roleN].Status != "rejected" {
+			t.Errorf("%s, and n rejects it with no vote: %v, reason %q, its answer %q", tc.name, tr.State, tr.Reason, tr.Confirmations[roleN].Status)
+		}
+	}
+}
+
 // A member with no vote can answer after the voters have settled the zone's
 // CSYNC (allRecipientsConfirmed). Whatever it answers ends the wait for it at
 // once, so the NOTIFY does not wait out the time-out for a member that has
