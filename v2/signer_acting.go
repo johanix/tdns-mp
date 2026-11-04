@@ -96,7 +96,14 @@ func (conf *Config) signerTakeHandover(sig *KeystateSignalMsg) {
 		refusalLogged.Delete(handoverKey(zone))
 		conf.signerHold(zone, h.Sets.Hold)
 		if _, held := store.get(zone); held {
-			if err := signerActed.Load().drop(zone); err != nil {
+			// One refresh or hand-over at a time (mpDataLock): before the
+			// zone's first load actBySignerHandover does not wait for it, and
+			// a load that read nothing held keeps its sets under this lock.
+			mpMu := mpDataLock(zone)
+			mpMu.Lock()
+			err := signerActed.Load().drop(zone)
+			mpMu.Unlock()
+			if err != nil {
 				lgSigner.Error("the sets the signer last acted by were not dropped", "zone", zone, "err", err)
 			}
 		}

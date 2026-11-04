@@ -813,6 +813,51 @@ func TestAHandOverEndsWhatTheSignerKept(t *testing.T) {
 	}
 }
 
+// A hand-over during the zone's first load does not wait for the load to act
+// (actBySignerHandover), but what it ends does: the load read that nothing was
+// held, and keeps its sets after that, under the lock (CodeRabbit's review of
+// #362). Left there, what it kept is what a restart acts by once a hand-over
+// with no records has cleared the one held.
+func TestAHandOverDuringTheFirstLoadEndsWhatItKeeps(t *testing.T) {
+	const zone = "duringload.waiting.signer.example."
+	noRole := sigRecords(`serial="5" servers="us,p2" signers="p2"`)
+	r := newSignerRig(t, zone, noRole...)
+	r.mpzd.Lock()
+	r.mpzd.Ready = false
+	r.mpzd.Unlock()
+	handed := handoverFor(t, zone, sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)...)
+
+	// the load, past its read of the hand-over state
+	mu := mpDataLock(zone)
+	mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		r.hand(handed, sigUs)
+		close(done)
+	}()
+	waitUntil(t, "the hand-over is held", func() bool {
+		_, held := actingHeld.Load().roles(zone)
+		return held
+	})
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := signerActed.Load().keep(zone, Roles{}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Unlock()
+	<-done
+
+	if _, kept := signerActed.Load().get(zone); kept {
+		t.Error("kept after the hand-over ended it")
+	}
+	r.restart(t)
+	if _, kept := signerActed.Load().get(zone); kept {
+		t.Error("kept on disk after the hand-over ended it")
+	}
+}
+
 // A signer handed nothing whose copy drops it altogether, its HSYNC3
 // record included, still waits: its key machine runs by the sets it last
 // acted by, with the label its identity has there (rule 5).
