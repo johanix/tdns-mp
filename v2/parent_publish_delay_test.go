@@ -106,12 +106,14 @@ func TestTheDSStepWaitsItsTTLPlusTheDelay(t *testing.T) {
 	r.holds(roleN, dns.TypeDNSKEY)
 	r.toDSStep()
 	r.newLook()
-	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTTL: 120})
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1, 2}, dsTTL: 120})
+	r.next()
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTTL: 120, dsTold: true})
 	r.next()
 	if line := r.conf.thawLine(r.zone); !strings.Contains(line, "step 3 (its DS), waiting for the DS TTL until ") {
 		t.Errorf("the status: %q", line)
 	}
-	for _, term := range []string{"a removal's DS step counts its wait", "zone=dswait.remove.example.", "parent_ds_ttl=2m0s", "ttl_seen=true", "parent_publish_delay=5m0s"} {
+	for _, term := range []string{"a removal's DS step counts its wait", "zone=dswait.remove.example.", "outcome=ds-seen", "parent_ds_ttl=2m0s", "ttl_seen=true", "parent_publish_delay=5m0s"} {
 		if !strings.Contains(logs.String(), term) {
 			t.Errorf("no %s in the log", term)
 		}
@@ -133,6 +135,8 @@ func TestTheDSStepTakesTheConfiguredDelay(t *testing.T) {
 	r.conf.MpConfig().Transitions.ParentPublishDelay = 20
 	r.toDSStep()
 	r.newLook()
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1, 2}, dsTTL: 120})
+	r.next()
 	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTTL: 120})
 	r.next()
 	r.aged(2 * time.Minute)
@@ -147,13 +151,15 @@ func TestTheDSStepTakesTheConfiguredDelay(t *testing.T) {
 	}
 }
 
-// A new leader, of a DS the parent had dropped before it looked.
+// Its DS seen, with no TTL to read.
 func TestADSTTLNeverSeenIsAnHourAndTheDelay(t *testing.T) {
 	logs := captureLog(t)
 	r := newSweepRig(t, "dsnever.remove.example.")
 	r.toDSStep()
 	r.newLook()
-	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}})
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1, 2}})
+	r.next()
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTold: true})
 	r.next()
 	if !strings.Contains(logs.String(), "ttl_seen=false") {
 		t.Errorf("the log does not say the TTL was never seen: %s", logs)
@@ -167,6 +173,313 @@ func TestADSTTLNeverSeenIsAnHourAndTheDelay(t *testing.T) {
 	r.next()
 	if !slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
 		t.Errorf("its DNSKEY did not go after them: %v, steps %v", r.withdrawals, r.taken())
+	}
+}
+
+// The project owner's rule: this DS not in the parent's DS RRset, the step ends at
+// once. Never seen here and every server telling so: no TTL, no delay, whatever
+// other providers' DS the parent serves.
+func TestALeaversDSNeverSeenEndsTheStepAtOnce(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		ds   []uint16
+	}{
+		{"no DS at all", nil},
+		{"only other signers' DS", []uint16{1}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			logs := captureLog(t)
+			r := newSweepRig(t, "dsatonce.remove.example.")
+			r.toDSStep()
+			r.newLook()
+			r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: c.ds, dsTTL: 120, dsTold: true})
+			r.next()
+			r.next()
+			if !slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+				t.Errorf("the step did not end at once: %v, steps %v", r.withdrawals, r.taken())
+			}
+			for _, term := range []string{"a removal's DS step ends at once", "zone=dsatonce.remove.example.", "outcome=never-seen"} {
+				if !strings.Contains(logs.String(), term) {
+					t.Errorf("no %s in the log", term)
+				}
+			}
+			if strings.Contains(logs.String(), "a removal's DS step counts its wait") {
+				t.Errorf("a wait was counted: %s", logs)
+			}
+		})
+	}
+}
+
+// A DS that is neither its nor in the step's set has no say.
+func TestAnotherDSOutsideTheSetDoesNotHoldTheStep(t *testing.T) {
+	r := newSweepRig(t, "dsstray.remove.example.")
+	r.toDSStep()
+	r.newLook()
+	r.dsThere = func(parentSeen) bool { return false } // dsLeft would hold it
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{7}, dsTTL: 120, dsTold: true})
+	r.next()
+	r.next()
+	if !slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Errorf("a DS not its held the step: %v, steps %v", r.withdrawals, r.taken())
+	}
+}
+
+// Seen, then gone: the DS TTL and the delay, even with every server telling it has
+// gone and a server silent later.
+func TestALeaversDSSeenAndGoneWaitsItsTTLAndTheDelay(t *testing.T) {
+	r := newSweepRig(t, "dsseen.remove.example.")
+	r.toDSStep()
+	r.newLook()
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1, 2}, dsTTL: 120})
+	r.next()
+	if line := r.conf.thawLine(r.zone); !strings.Contains(line, "until the parent no longer serves its DS") {
+		t.Errorf("the status while it is served: %q", line)
+	}
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, dsTold: true})
+	r.next()
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600})
+	r.aged(6 * time.Minute) // past the delay, within its sum with the DS TTL
+	r.next()
+	if slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Fatalf("its DNSKEY went before the DS TTL and the delay: %v", r.withdrawals)
+	}
+	r.aged(2 * time.Minute)
+	r.next()
+	if !slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Errorf("its DNSKEY did not go after them: %v, steps %v", r.withdrawals, r.taken())
+	}
+}
+
+// A server that has not told: the hour stays and the log says why, until every
+// server tells.
+func TestASilentServerKeepsTheHour(t *testing.T) {
+	logs := captureLog(t)
+	r := newSweepRig(t, "dssilent.remove.example.")
+	r.toDSStep()
+	r.newLook()
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTTL: 120})
+	r.next()
+	for _, term := range []string{"a removal's DS step counts its wait", "outcome=server-silent", "parent_ds_ttl=1h0m0s", "ttl_seen=false", "parent_publish_delay=5m0s"} {
+		if !strings.Contains(logs.String(), term) {
+			t.Errorf("no %s in the log", term)
+		}
+	}
+	if line := r.conf.thawLine(r.zone); !strings.Contains(line, "waiting for the hour, as a server of the parent has not told of its DS, until ") {
+		t.Errorf("the status: %q", line)
+	}
+	r.aged(62 * time.Minute)
+	r.next()
+	if slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Fatalf("its DNSKEY went within the hour and the delay: %v", r.withdrawals)
+	}
+	r.aged(4 * time.Minute)
+	r.next()
+	if !slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Errorf("its DNSKEY did not go after them: %v, steps %v", r.withdrawals, r.taken())
+	}
+
+	r = newSweepRig(t, "dstells.remove.example.")
+	r.toDSStep()
+	r.newLook()
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTTL: 120})
+	r.next()
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTTL: 120, dsTold: true})
+	r.next()
+	r.next()
+	if !slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Errorf("every server telling did not end it: %v, steps %v", r.withdrawals, r.taken())
+	}
+}
+
+// None of its KSKs held: which DS is its cannot be told. The hour stays, every
+// server telling or not, and the watch goes by dsLeft.
+func TestALeaverWithItsKeysUnknownKeepsTheHour(t *testing.T) {
+	logs := captureLog(t)
+	r := newSweepRig(t, "dskeys.remove.example.")
+	r.toDSStep()
+	r.newLook()
+	r.keysUnknown = true
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1, 2}, dsTTL: 120, dsTold: true})
+	r.next()
+	if line := r.conf.thawLine(r.zone); !strings.Contains(line, "until the parent no longer serves its DS") {
+		t.Errorf("the status while dsLeft holds: %q", line)
+	}
+	r.served(parentSeen{ns: r.parent.ns, nsTTL: 600, ds: []uint16{1}, dsTTL: 120, dsTold: true})
+	r.next()
+	for _, term := range []string{"a removal's DS step counts its wait", "outcome=keys-unknown", "parent_ds_ttl=1h0m0s", "ttl_seen=false"} {
+		if !strings.Contains(logs.String(), term) {
+			t.Errorf("no %s in the log", term)
+		}
+	}
+	if line := r.conf.thawLine(r.zone); !strings.Contains(line, "waiting for the hour, as this agent holds none of its KSKs, until ") {
+		t.Errorf("the status: %q", line)
+	}
+	r.aged(62 * time.Minute)
+	r.next()
+	if slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Fatalf("its DNSKEY went within the hour and the delay: %v", r.withdrawals)
+	}
+	r.aged(4 * time.Minute)
+	r.next()
+	if !slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Errorf("its DNSKEY did not go after them: %v, steps %v", r.withdrawals, r.taken())
+	}
+}
+
+// The leader's operator's word with no look that found anything: the hour stays.
+func TestTheWordWithNoLookKeepsTheHour(t *testing.T) {
+	logs := captureLog(t)
+	r := newSweepRig(t, "dsword.remove.example.")
+	r.toDSStep()
+	r.newLook()
+	r.parentErr = errors.New("no answer")
+	r.next()
+	if _, err := r.conf.goOnPastParent(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	r.next()
+	if !strings.Contains(logs.String(), "outcome=server-silent") {
+		t.Errorf("the log: %s", logs)
+	}
+	if slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Errorf("its DNSKEY went at the word: %v", r.withdrawals)
+	}
+}
+
+// leaverDS on real keys, by the same matching as dsLeft, of a provider's that told
+// them and of this agent's own signer's.
+func TestLeaverDSMatchesAsDSLeftDoes(t *testing.T) {
+	yes := true
+	r := newComputedDSRig(t, "leaverds.ds.example.", []string{"us", "p2"})
+	z := r.mpzd.ZoneName
+	item := invItem(t, z, 257, KeyStateActive, &yes)
+	zsk := invItem(t, z, 256, KeyStateActive, &yes)
+	foreign := invItem(t, z, 257, DnskeyStateForeign, nil)
+	r.owner.SetInventory(z, &KeyInventorySnapshot{Zone: z, Inventory: []KeyInventoryItem{item, zsk, foreign}})
+	rr, err := dns.NewRR(item.KeyRR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	own := rr.(*dns.DNSKEY)
+	told, toldZSK, stays := testDnskey(t, z, 257), testDnskey(t, z, 256), testDnskey(t, z, 257)
+	const leaver = "agent.p2.example."
+	r.distribution(t, AgentId(leaver), word{key: told, state: KeyStateActive, ds: &yes}, word{key: toldZSK, state: KeyStateActive, ds: &yes})
+	ourID := ourHsyncIdentities(r.conf.MpConfig())[0]
+
+	for _, c := range []struct {
+		name string
+		id   string
+		key  *dns.DNSKEY
+	}{
+		{"a provider's", leaver, told},
+		{"this agent's own", ourID, own},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			theirs, held := leaverDS(r.conf, z, c.id)
+			if !held {
+				t.Fatal("its KSKs are held")
+			}
+			sha384 := c.key.ToDS(dns.SHA384)
+			collides := *sha384
+			collides.Digest = strings.Repeat("0", len(sha384.Digest))
+			sha256 := c.key.ToDS(dns.SHA256)
+			collides256 := *sha256
+			collides256.Digest = strings.Repeat("0", len(sha256.Digest))
+			noneComputed := *sha384
+			noneComputed.DigestType = 99
+			otherAlgorithm := noneComputed
+			otherAlgorithm.Algorithm++
+			for _, d := range []struct {
+				name string
+				ds   *dns.DS
+				want bool
+			}{
+				{"SHA-256 of its key", sha256, true},
+				{"SHA-384 of its key", sha384, true},
+				{"SHA-1 of its key", c.key.ToDS(dns.SHA1), true},
+				{"another key's SHA-256, tag and algorithm shared", &collides256, false},
+				{"another key's SHA-384, tag and algorithm shared", &collides, false},
+				{"a digest type none is computed for", &noneComputed, true},
+				{"the same, another algorithm", &otherAlgorithm, false},
+				{"the SHA-256 of a key that stays", stays.ToDS(dns.SHA256), false},
+			} {
+				if got := theirs(d.ds); got != d.want {
+					t.Errorf("%s: got %v", d.name, got)
+				}
+			}
+		})
+	}
+
+	if _, held := leaverDS(r.conf, z, "agent.gone.example."); held {
+		t.Error("the KSKs of a provider that told none are not held")
+	}
+	if keys := r.conf.leaverKSKs(z, leaver); len(keys) != 1 || keys[0].KeyTag() != told.KeyTag() {
+		t.Errorf("its KSKs alone: %v", keys)
+	}
+	if keys := r.conf.leaverKSKs(z, ourID); len(keys) != 1 || keys[0].KeyTag() != own.KeyTag() {
+		t.Errorf("our signer's KSKs alone: %v", keys)
+	}
+}
+
+// Every server told, at a real look: an address that gives no NS RRset, or whose
+// query fails, has not told. Other providers' DS do not take it back.
+func TestOnlyEveryServerAnsweringTellsOfTheDS(t *testing.T) {
+	const zone = "told.remove.example."
+	const ds = "1 15 2 " + "aa00000000000000000000000000000000000000000000000000000000000000"
+	ask := func(server string, rrtype uint16) ([]dns.RR, error) { return tdns.AuthQuery(zone, server, rrtype) }
+	names := []string{"ns1.a.example."}
+	none := parentServer(t, zone, names, 300, nil, 0)
+	other := parentServer(t, zone, names, 300, nil, 0)
+	holds := parentServer(t, zone, names, 300, []string{ds}, 120)
+	empty := parentServer(t, zone, nil, 0, nil, 0)
+	gone := goneServer(t)
+	for _, tc := range []struct {
+		name    string
+		servers []string
+		want    bool
+	}{
+		{"every server answers, no DS", []string{none, other}, true},
+		{"every server answers, one holds a DS", []string{none, holds}, true},
+		{"one does not answer", []string{none, gone}, false},
+		{"one has no NS RRset", []string{none, empty}, false},
+	} {
+		seen, err := parentAtEveryServer(tc.servers, ask)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if seen.dsTold != tc.want {
+			t.Errorf("%s: dsTold = %v", tc.name, seen.dsTold)
+		}
+	}
+	for _, failed := range []uint16{dns.TypeNS, dns.TypeDS} {
+		seen, err := parentAtEveryServer([]string{none, other}, func(server string, rrtype uint16) ([]dns.RR, error) {
+			if server == other && rrtype == failed {
+				return nil, errors.New("refused")
+			}
+			return ask(server, rrtype)
+		})
+		if err != nil {
+			t.Fatalf("its %s query failing: %v", dns.TypeToString[failed], err)
+		}
+		if seen.dsTold {
+			t.Errorf("told with a server's %s query failing", dns.TypeToString[failed])
+		}
+	}
+}
+
+// What a look saw served stays known after the DS has gone, each once.
+func TestEveryDSServedIsKept(t *testing.T) {
+	ds := func(tag uint16) *dns.DS {
+		return &dns.DS{Hdr: dns.RR_Header{Name: "x.example.", Rrtype: dns.TypeDS, Class: dns.ClassINET}, KeyTag: tag, Algorithm: 15, DigestType: dns.SHA256, Digest: "aa"}
+	}
+	first := parentSeen{dsRRs: []*dns.DS{ds(1), ds(2)}}
+	first.after(parentSeen{})
+	second := parentSeen{dsRRs: []*dns.DS{ds(1)}}
+	second.after(first)
+	third := parentSeen{}
+	third.after(second)
+	if len(third.dsEver) != 2 {
+		t.Errorf("kept: %v", third.dsEver)
 	}
 }
 
