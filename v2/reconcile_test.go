@@ -1426,6 +1426,29 @@ func TestARecordSettlesWhenTheSilentMemberItWaitsForLosesItsVote(t *testing.T) {
 			t.Errorf("%s: n has said nothing, and its answer reads %q", tc.name, got.Status)
 		}
 	}
+
+	refused := func(d *ConfirmationDetail) {
+		d.Status, d.RejectedItems = "REJECTED", []RejectedItemInfo{{Record: r.rr.String(), Reason: "refused"}}
+	}
+	// n's rejection is no removal: as the only recipient, with no vote, it
+	// leaves the record where it was
+	r.activate(t, noVote)
+	zdr, tr := r.tracked(t, RRStatePendingRemoval, []string{roleN})
+	r.confirm(zdr, roleN, refused)
+	if tr.State != RRStatePendingRemoval {
+		t.Errorf("a removal n alone was to answer, and rejected with no vote: %v", tr.State)
+	}
+	// a rejection from before n had a vote decides nothing, by the project
+	// owner's ruling, also once n has one: the removal finishes when the
+	// voters have removed the record, and n is not asked again
+	zdr, tr = r.tracked(t, RRStatePendingRemoval, all)
+	r.confirm(zdr, roleN, refused)
+	r.activate(t, votes)
+	r.confirm(zdr, freezeCombiner, removed)
+	r.confirm(zdr, roleB, removed)
+	if tr.State != RRStateRemoved {
+		t.Errorf("a removal the voters did, that n rejected before it had a vote: %v", tr.State)
+	}
 }
 
 // A provider is down when another withdraws a record, and is then removed. It

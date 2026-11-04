@@ -254,11 +254,12 @@ func (conf *Config) releaseActivated(ctx context.Context, zdr *ZoneDataRepo) {
 // 3.3): the distributions of others that the zone keeps, in order, by the
 // active serial now (those made under it are taken, judged by the
 // instructions active now; those made under a lower one are refused; those
-// made under a higher one stay), and then what this agent sends again to
-// the peers that answered "not yet" (resendInStep). A member may have lost its
-// vote, so the zone's tracked records are looked at again (settleTracked). Run
-// by the data engine, which alone takes from the lists. A zone whose serials
-// this agent no longer keeps drops what it kept.
+// made under a higher one stay). A member may have lost its vote, so the
+// zone's tracked records are looked at again (settleTracked), and then what
+// this agent sends again to the peers that answered "not yet" (resendInStep)
+// goes: it is read from the repo, and must not name a removal just settled.
+// Run by the data engine, which alone takes from the lists. A zone whose
+// serials this agent no longer keeps drops what it kept.
 func (conf *Config) instrActivated(ctx context.Context, zdr *ZoneDataRepo, zone ZoneName) {
 	k := conf.InternalMp.Kept
 	if entries := k.entries(string(zone), listKept); len(entries) > 0 {
@@ -278,8 +279,8 @@ func (conf *Config) instrActivated(ctx context.Context, zdr *ZoneDataRepo, zone 
 			}
 		}
 	}
-	conf.resendInStep(zdr, zone)
 	zdr.settleTracked(zone)
+	conf.resendInStep(zdr, zone)
 }
 
 // releaseKept hands a kept distribution to the data engine's remote case

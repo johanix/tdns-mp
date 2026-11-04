@@ -2,6 +2,7 @@ package tdnsmp
 
 import (
 	"context"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -644,6 +645,36 @@ func (r *receiveRig) resent(distID string) bool {
 	return slices.ContainsFunc(r.queue.GetPendingMessages(), func(m transport.PendingMessageInfo) bool {
 		return m.RecipientID == roleB && m.DistributionID == distID
 	})
+}
+
+// What goes again to a peer now in step is read from the repo, so a removal
+// settled at the same look must be out of the repo by then: the peer would
+// keep what this agent has just removed.
+func TestALookSettlesARecordBeforeItSendsAgain(t *testing.T) {
+	r := newReceiveRig(t, "settlefirst.sender.example.")
+	logs := &lockedBuffer{}
+	logTo(t, lgEngine, slog.NewTextHandler(logs, nil))
+	zone := ZoneName(r.zone)
+	distID := r.notYetFromB(r.v)
+	r.agree()
+	r.done()
+	rr, err := dns.NewRR(r.zone + " 3600 IN NS ns9.a.example.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.zdr.AddConfirmedRR(zone, roleA, rr)
+	tr := r.zdr.trackedRR(zone, roleA, dns.TypeNS, rr.String())
+	tr.State, tr.DistributionID, tr.ExpectedRecipients = RRStatePendingRemoval, "w", []string{freezeCombiner, roleN}
+	tr.Confirmations = map[string]RRConfirmation{freezeCombiner: {Status: "removed"}}
+
+	r.activated()
+	if !r.resent(distID) || tr.State != RRStateRemoved {
+		t.Fatalf("the look: sent again %v, the record %v", r.resent(distID), tr.State)
+	}
+	settled, sent := strings.Index(logs.String(), "a tracked record is settled"), strings.Index(logs.String(), "sent again to a peer now in step")
+	if settled < 0 || sent < 0 || settled > sent {
+		t.Errorf("the record must settle before what goes again is read: settled at %d, sent at %d\n%s", settled, sent, logs)
+	}
 }
 
 func TestAfterActivationOwnContributionsGoAgainToThosePeers(t *testing.T) {
