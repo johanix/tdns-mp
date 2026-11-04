@@ -10,7 +10,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -280,6 +279,9 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 		return fmt.Errorf("RegisterSignerChunkHandler: %w", err)
 	}
 	conf.InternalMp.CombinerState = signerState
+
+	// Wire GetPeerAddress callback for a NOTIFY that names no endpoint
+	signerState.SetGetPeerAddress(peerAddressLookup(tm.PeerRegistry))
 
 	// Wire chunk handler into TM; the transport fetches query-mode records
 	signerState.ChunkHandler().Transport = tm.DNSTransport
@@ -809,34 +811,17 @@ func chunkQueryEndpoints(role string, mp *MultiProviderConf, chunkMode string) (
 	if cep != "include" && cep != "none" {
 		return "", false, fmt.Errorf("%s.dns.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", role, mp.Dns.ChunkQueryEndpoint)
 	}
+	if cep == "include" && endpoint == "" {
+		lgTransport.Warn("chunk_query_endpoint is include, but with no dns.addresses.publish a NOTIFY names no endpoint: receivers ask at the address they have for this peer", "role", role)
+	}
 	return endpoint, cep == "include", nil
 }
 
-// reachableListenAddress says whether another host can reach a listen
-// address, given with or without its port. Asked at a wildcard or loopback
-// address, a receiver would ask itself. A link-local address stops at its
-// link, a zone means something on this host only, and no one fetches from a
-// multicast or broadcast address. A private address counts: it reaches the
-// hosts on its network. A host name is taken as given, except localhost.
-func reachableListenAddress(listen string) bool {
-	host := listen
-	if h, _, err := net.SplitHostPort(listen); err == nil {
-		host = h
-	}
-	if host = strings.Trim(host, "[]"); host == "" || sameName(host, "localhost") {
-		return false
-	}
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return true // a host name
-	}
-	return addr.Zone() == "" && addr.Unmap().IsGlobalUnicast()
-}
-
 // buildAgentChunkQueryEndpoint builds the CHUNK query endpoint (host:port) from agent DNS config:
-// the first published address, else the first listen address another host
-// can reach. With neither there is no endpoint, and a receiver asks at the
-// address it has for this agent.
+// the first published address. A listen address is none: where the agent
+// binds says nothing of where another host can reach it, and a receiver
+// dials a named endpoint before the address it has for this agent. With
+// nothing published there is no endpoint, and a receiver asks at that address.
 func buildAgentChunkQueryEndpoint(mp *MultiProviderConf) string {
 	if mp == nil {
 		return ""
@@ -849,14 +834,6 @@ func buildAgentChunkQueryEndpoint(mp *MultiProviderConf) string {
 	var host string
 	if len(dnsConf.Addresses.Publish) > 0 {
 		host = strings.TrimSpace(dnsConf.Addresses.Publish[0])
-	}
-	if host == "" {
-		for _, listen := range dnsConf.Addresses.Listen {
-			if listen = strings.TrimSpace(listen); reachableListenAddress(listen) {
-				host = listen
-				break
-			}
-		}
 	}
 	if host == "" {
 		return ""

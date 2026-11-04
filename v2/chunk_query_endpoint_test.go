@@ -10,6 +10,7 @@ import (
 	"time"
 
 	transport "github.com/johanix/tdns-transport/v2/transport"
+	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
@@ -53,56 +54,26 @@ func TestChunkQueryEndpointsInEveryChunkMode(t *testing.T) {
 	}
 }
 
-// A listen address is the endpoint only if another host can reach it. Asked
-// at a wildcard or loopback address, a receiver would ask itself. What is
-// published stands: that is the operator's word for where the agent is.
-func TestOnlyAListenAddressAnotherHostCanReachIsTheEndpoint(t *testing.T) {
+// Only a published address is the endpoint: that is the operator's word for
+// where the agent is. Where it listens says nothing of where another host can
+// reach it.
+func TestOnlyAPublishedAddressIsTheEndpoint(t *testing.T) {
 	for _, c := range []struct {
 		publish, listen []string
 		want            string
 	}{
-		{listen: []string{"0.0.0.0"}},
 		{listen: []string{"0.0.0.0:5300"}},
-		{listen: []string{"::"}},
-		{listen: []string{"[::]:5300"}},
-		{listen: []string{":5300"}},
-		{listen: []string{"127.0.0.1"}},
 		{listen: []string{"127.0.0.1:5300"}},
-		{listen: []string{"::1"}},
-		{listen: []string{"[::1]:5300"}},
-		{listen: []string{"localhost:5300"}},
-		{listen: []string{"LOCALHOST."}},
-		{listen: []string{"[::1]"}},
-		{listen: []string{"::1%lo"}},
-		{listen: []string{"[::1%lo]:5300"}},
-		{listen: []string{"fe80::1%en0"}},
-		{listen: []string{"[fe80::1%en0]:5300"}},
-		{listen: []string{"::ffff:127.0.0.1"}},
-		{listen: []string{"::ffff:0.0.0.0"}},
-		{listen: []string{"::ffff:192.0.2.7%en0"}},
-		{listen: []string{"fe80::1"}},
-		{listen: []string{"[fe80::1]:5300"}},
-		{listen: []string{"169.254.1.1"}},
-		{listen: []string{"169.254.1.1:5300"}},
-		{listen: []string{"::ffff:169.254.1.1"}},
-		{listen: []string{"ff02::1"}},
-		{listen: []string{"ff05::1"}},
-		{listen: []string{"224.0.0.1"}},
-		{listen: []string{"239.1.1.1:5300"}},
-		{listen: []string{"255.255.255.255"}},
-		{listen: []string{"fe80::1", "169.254.1.1", "192.0.2.7"}, want: "192.0.2.7:5354"},
-		{listen: []string{"10.0.0.1"}, want: "10.0.0.1:5354"},
-		{listen: []string{"172.16.0.1:5300"}, want: "172.16.0.1:5300"},
-		{listen: []string{"192.168.1.1"}, want: "192.168.1.1:5354"},
-		{listen: []string{"fd00::1"}, want: "[fd00::1]:5354"},
-		{listen: []string{"[2001:db8::7]"}, want: "[2001:db8::7]:5354"},
-		{listen: []string{"192.0.2.7"}, want: "192.0.2.7:5354"},
-		{listen: []string{"192.0.2.7:5300"}, want: "192.0.2.7:5300"},
-		{listen: []string{"2001:db8::7"}, want: "[2001:db8::7]:5354"},
-		{listen: []string{"agent.example."}, want: "agent.example.:5354"},
-		{listen: []string{"127.0.0.1:5300", " 192.0.2.7:5300 "}, want: "192.0.2.7:5300"},
-		{publish: []string{"127.0.0.1"}, listen: []string{"192.0.2.7"}, want: "127.0.0.1:5354"},
-		{publish: []string{" "}, listen: []string{"0.0.0.0"}},
+		{listen: []string{"10.0.0.1:5300"}},
+		{listen: []string{"192.0.2.7"}},
+		{publish: []string{" "}, listen: []string{"192.0.2.7"}},
+		{publish: []string{"192.0.2.1"}, listen: []string{"192.0.2.7"}, want: "192.0.2.1:5354"},
+		{publish: []string{"192.0.2.1:5300"}, want: "192.0.2.1:5300"},
+		{publish: []string{"2001:db8::7"}, want: "[2001:db8::7]:5354"},
+		{publish: []string{"[2001:db8::7]"}, want: "[2001:db8::7]:5354"},
+		{publish: []string{"[2001:db8::7]:5300"}, want: "[2001:db8::7]:5300"},
+		{publish: []string{"127.0.0.1"}, want: "127.0.0.1:5354"},
+		{publish: []string{"agent.example."}, want: "agent.example.:5354"},
 	} {
 		mp := endpointConf("include")
 		mp.Dns.Addresses.Publish = c.publish
@@ -139,18 +110,16 @@ func endpointAgent(t *testing.T, mp *MultiProviderConf) *MPTransportBridge {
 	return bridge
 }
 
-// An agent that listens on a wildcard address and publishes nothing names no
-// endpoint, so a receiver fetches an oversized payload from the address it has
-// for the agent. Named, the wildcard address would have sent it elsewhere: here
-// to a port where nothing answers.
-func TestAReceiverAsksAWildcardListenerAtTheAddressItHasForIt(t *testing.T) {
-	const bob = "bob.agent.example."
+// chunkQueriesAt serves DNS on a loopback port, refuses every query, and
+// passes on the names of the CHUNK queries it is asked.
+func chunkQueriesAt(t *testing.T) (net.Addr, <-chan string) {
+	t.Helper()
 	asked := make(chan string, 8)
-	chunks, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &dns.Server{Listener: chunks, Net: "tcp", Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+	srv := &dns.Server{Listener: ln, Net: "tcp", Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
 		if r.Question[0].Qtype == core.TypeCHUNK {
 			asked <- r.Question[0].Name
 		}
@@ -160,32 +129,83 @@ func TestAReceiverAsksAWildcardListenerAtTheAddressItHasForIt(t *testing.T) {
 	})}
 	go func() { _ = srv.ActivateAndServe() }()
 	t.Cleanup(func() { _ = srv.Shutdown() })
+	return ln.Addr(), asked
+}
 
-	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true, ChunkMode: "edns0"})
-	aliceAddr := listenDNS(t, env, env.Alice).(*net.TCPAddr)
-	setDNSCarrier(t, env.Alice.Bridge.PeerRegistry.GetOrCreate(bob),
-		&transport.Address{Host: "127.0.0.1", Port: uint16(chunks.Addr().(*net.TCPAddr).Port), Transport: "tcp"})
-
-	mp := &MultiProviderConf{Identity: bob}
-	mp.Dns.Addresses.Listen = []string{"0.0.0.0:1"}
-	sender := endpointAgent(t, mp)
-
-	peer := transport.NewPeer(env.Alice.Identity)
-	setDNSCarrier(t, peer, &transport.Address{Host: "127.0.0.1", Port: uint16(aliceAddr.Port), Transport: "tcp"})
+// sendTooLarge has sender send receiver, at addr, a payload too large for one
+// DNS message, and wants the receiver to ask for it where asked listens.
+func sendTooLarge(t *testing.T, sender *MPTransportBridge, senderID, receiver string, addr net.Addr, asked <-chan string) {
+	t.Helper()
+	peer := transport.NewPeer(receiver)
+	setDNSCarrier(t, peer, loopbackCarrier(addr))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, _ = sender.DNSTransport.SendApp(ctx, peer, &transport.AppMessage{
 		TypeToken: "status", Payload: bytes.Repeat([]byte("x"), 70000), FireAndForget: true,
 	})
-
 	select {
 	case qname := <-asked:
-		if !strings.Contains(qname, bob) {
-			t.Errorf("the receiver asked for %q, not for a payload from %s", qname, bob)
+		if !strings.Contains(qname, senderID) {
+			t.Errorf("the receiver asked for %q, not for a payload from %s", qname, senderID)
 		}
 	case <-ctx.Done():
 		t.Fatal("the receiver never asked at the address it has for the sender")
 	}
+}
+
+func loopbackCarrier(addr net.Addr) *transport.Address {
+	return &transport.Address{Host: "127.0.0.1", Port: uint16(addr.(*net.TCPAddr).Port), Transport: "tcp"}
+}
+
+// An agent that publishes nothing names no endpoint, so a receiver fetches an
+// oversized payload from the address it has for the agent. Named, the listen
+// address would have sent it elsewhere: here to a port where nothing answers.
+func TestAReceiverAsksAnAgentThatPublishesNothingAtTheAddressItHasForIt(t *testing.T) {
+	const bob = "bob.agent.example."
+	for _, listen := range []string{"0.0.0.0:1", "127.0.0.1:1", "10.0.0.1:1"} {
+		t.Run(listen, func(t *testing.T) {
+			chunks, asked := chunkQueriesAt(t)
+			env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true, ChunkMode: "edns0"})
+			alice := listenDNS(t, env, env.Alice)
+			setDNSCarrier(t, env.Alice.Bridge.PeerRegistry.GetOrCreate(bob), loopbackCarrier(chunks))
+
+			mp := &MultiProviderConf{Identity: bob}
+			mp.Dns.Addresses.Listen = []string{listen}
+			sendTooLarge(t, endpointAgent(t, mp), bob, env.Alice.Identity, alice, asked)
+		})
+	}
+}
+
+// A signer replaces the bridge's chunk handler at its start. Named no
+// endpoint, it asks an agent at the address configured for the agent, and not
+// at the NOTIFY's source on port 53.
+func TestASignerAsksAnAgentThatNamesNoEndpointAtItsConfiguredAddress(t *testing.T) {
+	const bob, signer = "bob.agent.example.", "signer.agent.example."
+	chunks, asked := chunkQueriesAt(t)
+
+	// initMPSigner sets the process's store of hand-overs.
+	prev := actingHeld.Load()
+	t.Cleanup(func() { actingHeld.Store(prev) })
+
+	conf := &Config{Config: &tdns.Config{}}
+	conf.Config.Internal.KeyDB = newMPTestKeyDB(t)
+	conf.Config.Internal.StopCh = make(chan struct{})
+	t.Cleanup(func() { close(conf.Config.Internal.StopCh) })
+	mpSigner := &MultiProviderConf{Identity: signer, Agents: []*PeerConf{{Identity: bob, Address: chunks.String()}}}
+	if err := conf.initMPSigner(mpSigner); err != nil {
+		t.Fatalf("initMPSigner: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	serveDNS(t, ctx, ln, &peerEnv{Identity: signer, Bridge: conf.InternalMp.MPTransport})
+
+	mp := &MultiProviderConf{Identity: bob}
+	mp.Dns.Addresses.Listen = []string{"127.0.0.1:1"}
+	sendTooLarge(t, endpointAgent(t, mp), bob, signer, ln.Addr(), asked)
 }
 
 // An agent in the default edns0 mode that sends a payload too large for one
