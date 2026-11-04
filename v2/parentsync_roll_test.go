@@ -801,11 +801,9 @@ func TestAFailedRollIsRetriedOnItsOwnSchedule(t *testing.T) {
 	if ro := r.roll(t); ro == nil || ro.phase != rollPublished {
 		t.Errorf("the roll after its retry: %+v", ro)
 	}
-	if got := rollRetryFor(&MultiProviderConf{Transitions: struct {
-		LeavingTimeout int `yaml:"leaving-timeout" mapstructure:"leaving-timeout"`
-		NoRoleTimeout  int `yaml:"no-role-timeout" mapstructure:"no-role-timeout"`
-		RollRetry      int `yaml:"roll-retry" mapstructure:"roll-retry"`
-	}{RollRetry: 30}}); got != 30*time.Second {
+	mp := &MultiProviderConf{}
+	mp.Transitions.RollRetry = 30
+	if got := rollRetryFor(mp); got != 30*time.Second {
 		t.Errorf("roll-retry 30 reads %s", got)
 	}
 }

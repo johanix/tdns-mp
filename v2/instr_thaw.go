@@ -556,8 +556,9 @@ func (conf *Config) runThaws(ctx context.Context) {
 	}
 }
 
-// thawTurn is the zone's turn: with no active serial known here, the
-// restart rule's (knowActive, S9); otherwise a transition under way goes on
+// thawTurn is the zone's turn: an agent the owner names again after its
+// removal starts over (startOverIfNamedAgain); with no active serial known here,
+// the restart rule's (knowActive, S9); otherwise a transition under way goes on
 // (the reconciliation's turn, plan S12), the leader thaws it when it is
 // ready, and cancels its parent work when that is all the thaw waits for
 // (design 3.2: at the thaw's turn); every agent makes active a serial a
@@ -567,6 +568,7 @@ func (conf *Config) thawTurn(zone string) {
 	b := &conf.InternalMp.thaws
 	b.turn.Lock()
 	defer b.turn.Unlock()
+	conf.startOverIfNamedAgain(zone)
 	if conf.InternalMp.Instructions.activeUnknown(zone) {
 		conf.knowActive(zone)
 		return

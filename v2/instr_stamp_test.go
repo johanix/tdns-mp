@@ -9,6 +9,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,6 +19,7 @@ import (
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 )
 
 const (
@@ -711,5 +714,155 @@ func TestAFetchAsksOnlyForAZoneTdnsHolds(t *testing.T) {
 	}
 	if n := len(conf.Config.Internal.RefreshZoneCh); n != 0 {
 		t.Errorf("%d refreshes queued, want none", n)
+	}
+}
+
+// A serial told that refreshes do not bring is warned of once, past
+// copyStuckAfter, and not while a newer serial only moves what is told; caught
+// up, the count starts over.
+func TestACopyThatDoesNotMoveIsWarnedOfOnce(t *testing.T) {
+	seven, eight, nine, ten := stampAt(t, 7, "a"), stampAt(t, 8, "a"), stampAt(t, 9, "a"), stampAt(t, 10, "a")
+	bob := stampTableAt(t, stampBeta, seven)
+	bob.fetch = func(zone string) (string, bool) { return zone, true }
+	var warned []uint32
+	bob.copyStuck = func(_ string, told uint32, member string) {
+		warned = append(warned, told)
+		if member != stampAlpha {
+			t.Errorf("the member: %s", member)
+		}
+	}
+	seq := uint64(0)
+	hear := func(in *Instructions) {
+		seq++
+		bob.note(told(stampAlpha, 1, seq, tells(seven, in)), stampAlpha, "DNS")
+	}
+	aged := func(d time.Duration) {
+		bob.mu.Lock()
+		defer bob.mu.Unlock()
+		f := bob.fetched[canonicalName(stampZone)]
+		f.since, f.at = f.since.Add(-d), f.at.Add(-d)
+		bob.fetched[canonicalName(stampZone)] = f
+	}
+	hear(eight)
+	aged(copyStuckAfter - time.Minute)
+	hear(eight)
+	if len(warned) != 0 {
+		t.Fatalf("warned within copyStuckAfter: %v", warned)
+	}
+	aged(2 * time.Minute)
+	hear(eight)
+	if !slices.Equal(warned, []uint32{8}) {
+		t.Fatalf("past copyStuckAfter: warned %v", warned)
+	}
+	aged(time.Hour)
+	hear(nine)
+	hear(nine)
+	if len(warned) != 1 {
+		t.Errorf("warned again: %v", warned)
+	}
+
+	// the agent holds what it was told, and is later told more
+	bob.store.Note(stampZone, nine, nil)
+	hear(ten)
+	if len(warned) != 1 {
+		t.Errorf("caught up, the wait did not start over: %v", warned)
+	}
+	aged(copyStuckAfter + time.Minute)
+	hear(ten)
+	if !slices.Equal(warned, []uint32{8, 10}) {
+		t.Errorf("stuck again: warned %v", warned)
+	}
+}
+
+// soaServer answers for zone's SOA with serial; the address it listens on is
+// what it returns.
+func soaServer(t *testing.T, zone string, serial uint32) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	soa, err := dns.NewRR(fmt.Sprintf("%s 300 IN SOA ns. hostmaster. %d 1 1 1 1", zone, serial))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &dns.Server{PacketConn: pc, Net: "udp", Handler: dns.HandlerFunc(func(w dns.ResponseWriter, q *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(q)
+		m.Answer = []dns.RR{soa}
+		if err := w.WriteMsg(m); err != nil {
+			t.Error(err)
+		}
+	})}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	return pc.LocalAddr().String()
+}
+
+// The rig's RA1: the agent's copy came from another provider's chain, and its
+// own chain's SOA is lower. The warning names both and what its operator does.
+func TestTheWarningNamesACopyAboveItsUpstream(t *testing.T) {
+	const zone = "stuck.soa.example."
+	var logs bytes.Buffer
+	prev := lgGossip
+	lgGossip = slog.New(slog.NewTextHandler(&logs, nil))
+	t.Cleanup(func() { lgGossip = prev })
+	zd := seedZoneWithHSYNC3(t, zone, roleA)
+	soa, err := zd.GetSOA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	soa.Serial = 430
+	tdns.Zones.Set(zone, zd)
+	t.Cleanup(func() { tdns.Zones.Remove(zone) })
+
+	lower := soaServer(t, zone, 427)
+	zd.Upstreams = []tdns.PeerConf{{Addr: lower}}
+	warnCopyStuck("STUCK.soa.example.", 425, stampAlpha)
+	got := logs.String()
+	for _, term := range []string{"refreshing the zone has not brought them", "a higher SOA than its upstream", "takes the zone out", "zone=STUCK.soa.example.", "told=425", "copy_soa=430", "upstream_soa=", lower + "=427"} {
+		if !strings.Contains(got, term) {
+			t.Errorf("no %q in %s", term, got)
+		}
+	}
+
+	logs.Reset()
+	zd.Upstreams = []tdns.PeerConf{{Addr: soaServer(t, zone, 431)}}
+	warnCopyStuck(zone, 425, stampAlpha)
+	got = logs.String()
+	if !strings.Contains(got, "refreshing the zone has not brought them") || strings.Contains(got, "a higher SOA") {
+		t.Errorf("a copy below its upstream: %s", got)
+	}
+
+	// the advice takes every upstream that answers being below the copy, and with
+	// one that does not answer it says to look at that one first
+	for name, c := range map[string]struct {
+		upstreams []string
+		want      bool
+		first     bool
+	}{
+		"one lower, one higher":      {[]string{lower, soaServer(t, zone, 431)}, false, false},
+		"one higher, one lower":      {[]string{soaServer(t, zone, 431), lower}, false, false},
+		"one lower, one at the copy": {[]string{lower, soaServer(t, zone, 430)}, false, false},
+		"at the copy":                {[]string{soaServer(t, zone, 430)}, false, false},
+		"two lower":                  {[]string{lower, soaServer(t, zone, 428)}, true, false},
+		"one lower, one silent":      {[]string{lower, goneServer(t)}, true, true},
+		"silent":                     {[]string{goneServer(t)}, false, false},
+	} {
+		logs.Reset()
+		zd.Upstreams = nil
+		for _, addr := range c.upstreams {
+			zd.Upstreams = append(zd.Upstreams, tdns.PeerConf{Addr: addr})
+		}
+		warnCopyStuck(zone, 425, stampAlpha)
+		if got := strings.Contains(logs.String(), "a higher SOA"); got != c.want {
+			t.Errorf("%s: names a higher SOA: %v, want %v: %s", name, got, c.want, logs.String())
+		}
+		if got := strings.Contains(logs.String(), "looks at those first"); got != c.first {
+			t.Errorf("%s: says to look at an upstream that does not answer: %v, want %v: %s", name, got, c.first, logs.String())
+		}
+		if got := strings.Contains(logs.String(), "takes the zone out"); got != c.want {
+			t.Errorf("%s: says to take the zone out: %v, want %v: %s", name, got, c.want, logs.String())
+		}
 	}
 }
