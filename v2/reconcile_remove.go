@@ -240,6 +240,9 @@ func (l leaver) steps(p planView) []plannedStep {
 				held.DSSigners = withoutProvider(held.DSSigners, label)
 				return held
 			},
+			ready: func(conf *Config, zone string) string {
+				return conf.removalDSLook(zone, removalKey(label, "ds"))
+			},
 			start: func(conf *Config, zone string) {
 				askWithdrawal(conf, zone, Withdraw{Provider: id, RRtype: "CDS"})
 				logRemovalStep(zone, id, "3 (its DS)", "")
@@ -783,6 +786,18 @@ func (conf *Config) removalNSWait(zone, label, id string, agentNS bool) string {
 		return removalWaitSaid(conf, zone, id, "2 (its NS)", "for the NS TTL until "+removalTime(until))
 	}
 	return ""
+}
+
+// removalDSLook holds the DS step until the parent has been read. Its CDS goes
+// with the step, and a parent can drop its DS at once: unread until then, that DS
+// would read as never there. A signer that serves nothing has no step before this
+// one that reads the parent. The leader's operator's word goes on past it.
+func (conf *Config) removalDSLook(zone, step string) string {
+	if _, ok := conf.parentNow(zone); ok || conf.InternalMp.Instructions.parentWord(zone, step) {
+		return ""
+	}
+	conf.InternalMp.reconciles.watches(canonicalName(zone), step)
+	return "until the parent's DS RRset is known"
 }
 
 // removalDSWait is what the leaving provider's DS step waits for: its CDS

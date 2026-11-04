@@ -210,6 +210,60 @@ func TestALeaversDSNeverSeenEndsTheStepAtOnce(t *testing.T) {
 	}
 }
 
+// A signer that serves nothing has no step before its DS step that reads the
+// parent, and a parent can drop its DS as soon as its CDS goes. What the parent
+// served before the withdrawal decides: seen, it waits, however fast the parent.
+func TestAParentDroppingTheDSAtTheWithdrawalDoesNotMakeItNeverSeen(t *testing.T) {
+	logs := captureLog(t)
+	r := newLeaverRigAt(t, "dsfast.remove.example.", removalAt(t, 41, "agent", "a,b", "a,n"), removalAt(t, 42, "agent", "a,b", "a"),
+		parentSeen{ns: []string{"ns1.a.example."}, nsTTL: 60, ds: []uint16{1, 2}, dsTTL: 120, dsTold: true})
+	r.newLook()
+	r.dsThere = func(seen parentSeen) bool { return !slices.Contains(seen.ds, 2) }
+	withdraw := askWithdrawal
+	askWithdrawal = func(conf *Config, zone string, w Withdraw) {
+		withdraw(conf, zone, w)
+		if w.RRtype == "CDS" {
+			r.dsThere = nil
+			r.served(parentSeen{ns: r.parent.ns, nsTTL: 60, ds: []uint16{1}, dsTTL: 120, dsTold: true})
+		}
+	}
+	for range 4 {
+		r.next()
+	}
+	if !slices.Contains(r.withdrawals, "n.role.example CDS") {
+		t.Fatalf("its CDS did not go: %v, steps %v", r.withdrawals, r.taken())
+	}
+	if slices.Contains(r.withdrawals, "n.role.example DNSKEY") {
+		t.Errorf("its DNSKEY went with its DS in caches: %v, steps %v", r.withdrawals, r.taken())
+	}
+	if !strings.Contains(logs.String(), "outcome=ds-seen") {
+		t.Errorf("no ds-seen wait: %s", logs)
+	}
+}
+
+// With the parent not read, its CDS stays, and the leader's operator's word goes
+// on past that.
+func TestTheDSStepWaitsForALookBeforeItsWithdrawal(t *testing.T) {
+	r := newLeaverRigAt(t, "dslook.remove.example.", removalAt(t, 41, "agent", "a,b", "a,n"), removalAt(t, 42, "agent", "a,b", "a"),
+		parentSeen{ns: []string{"ns1.a.example."}, nsTTL: 60, ds: []uint16{1, 2}, dsTTL: 120, dsTold: true})
+	r.newLook()
+	r.parentErr = errors.New("no answer")
+	for range 3 {
+		r.next()
+		r.served(r.parent)
+	}
+	if len(r.withdrawals) != 0 {
+		t.Fatalf("its CDS went with the parent not read: %v, steps %v", r.withdrawals, r.taken())
+	}
+	if _, err := r.conf.goOnPastParent(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	r.next()
+	if !slices.Contains(r.withdrawals, "n.role.example CDS") {
+		t.Errorf("the word did not go on past it: %v, steps %v", r.withdrawals, r.taken())
+	}
+}
+
 // A DS that is neither its nor in the step's set has no say.
 func TestAnotherDSOutsideTheSetDoesNotHoldTheStep(t *testing.T) {
 	r := newSweepRig(t, "dsstray.remove.example.")
