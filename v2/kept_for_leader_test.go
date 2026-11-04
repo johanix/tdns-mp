@@ -162,6 +162,21 @@ func (r *notifyRig) votersBeat(t *testing.T, in *Instructions) {
 		Mechanism: transport.MechanismDNS, Zone: r.mpzd.ZoneName, Payload: body, ReceivedAt: time.Now(), SourceAddr: "127.0.0.1:0"})
 }
 
+// groupUnder is the hash of the zone's provider group under in.
+func (r *notifyRig) groupUnder(in *Instructions) string {
+	m := zoneMakeUp(r.mpzd.ZoneName, in)
+	return ComputeGroupHash(m.voting, m.auditors, m.noRole)
+}
+
+// placedIn: the zone is in the provider group want.
+func (r *notifyRig) placedIn(t *testing.T, what, want string) {
+	t.Helper()
+	pg := r.us.Registry.ProviderGroupManager.GetGroupForZone(ZoneName(r.mpzd.ZoneName))
+	if pg == nil || pg.GroupHash != want {
+		t.Fatalf("%s: the zone's group is %+v, want %s", what, pg, want)
+	}
+}
+
 // A provider that joins with no role and has the serial naming it from a
 // member before its own refresh brings it. The serial fetched moves what the
 // zone reads, so the zone moves to its group under that serial, and the
@@ -173,31 +188,20 @@ func (r *notifyRig) votersBeat(t *testing.T, in *Instructions) {
 func TestANewcomerThatFetchesBeforeItsRefreshLearnsTheLeader(t *testing.T) {
 	r, v, n := newcomerRig(t, "fetchfirst.join.example.")
 	z, peer := r.mpzd.ZoneName, r.peer.Identity
-	hashOf := func(in *Instructions) string {
-		m := zoneMakeUp(z, in)
-		return ComputeGroupHash(m.voting, m.auditors, m.noRole)
-	}
-	before, after := hashOf(v), hashOf(n)
-	placed := func(what, want string) {
-		t.Helper()
-		pg := r.us.Registry.ProviderGroupManager.GetGroupForZone(ZoneName(z))
-		if pg == nil || pg.GroupHash != want {
-			t.Fatalf("%s: the zone's group is %+v, want %s", what, pg, want)
-		}
-	}
-	placed("at the first load", before)
+	before, after := r.groupUnder(v), r.groupUnder(n)
+	r.placedIn(t, "at the first load", before)
 
 	if !r.conf.holdFetched(z, n, peer) {
 		t.Fatal("the serial fetched is not held")
 	}
-	placed("after the fetch", after)
+	r.placedIn(t, "after the fetch", after)
 	r.logs(t, `msg="an HSYNC3 record and no role: member, no vote, no edits"`)
 	r.logs(t, fmt.Sprintf(`msg="the zone joined a provider group" zone=%s group=%s was_in=%s`, z, shortHash(after), shortHash(before)))
 
 	s := r.conf.InternalMp.Instructions
 	s.Note(z, n, nil) // the refresh
 	r.conf.know(z, sd(n), nil, false, peer, knownFromRecords)
-	placed("once the serial is known", after)
+	r.placedIn(t, "once the serial is known", after)
 	if votesInZone(ZoneName(z), AgentId(r.us.Identity)) {
 		t.Fatal("the newcomer votes")
 	}
@@ -214,6 +218,39 @@ func TestANewcomerThatFetchesBeforeItsRefreshLearnsTheLeader(t *testing.T) {
 	r.heldCsync(t, rec)
 	r.keptForLeader(t, 0)
 	r.logs(t, fmt.Sprintf(`msg="a kept distribution is released" zone=%s`, z))
+}
+
+// A serial fetched before the zone's first load runs nothing yet: what a
+// change of the active instructions runs waits for the zone. The first load
+// runs it whatever the store holds, so the zone moves to the serial's group
+// then, although the load finds the reading already moved, and the voting
+// member's beat is taken.
+func TestAFetchBeforeTheFirstLoadMovesTheZoneAtTheFirstLoad(t *testing.T) {
+	r, v, n := newcomerRig(t, "fetchunloaded.join.example.")
+	z, peer := r.mpzd.ZoneName, r.peer.Identity
+	r.mpzd.Ready = false
+	if !r.conf.holdFetched(z, n, peer) {
+		t.Fatal("the serial fetched is not held")
+	}
+	if r.logCount(`msg="the zone's active instructions changed"`) != 0 {
+		t.Error("the fetch ran what a change of the active instructions runs on a zone not loaded")
+	}
+	r.placedIn(t, "after the fetch", r.groupUnder(v))
+
+	r.mpzd.Ready = true
+	incoming := refreshedZone(t, r.mpzd)
+	r.mpzd.FirstZoneLoad = true
+	r.mpzd.MPPreRefresh(incoming, nil, nil, nil)
+	r.mpzd.FirstZoneLoad = false
+	r.conf.InternalMp.Instructions.Note(z, n, nil) // the post-refresh callback
+	r.mpzd.PostRefresh(r.us.Bridge, nil)
+	r.placedIn(t, "after the first load", r.groupUnder(n))
+	r.logs(t, fmt.Sprintf(`msg="the zone joined a provider group" zone=%s group=%s`, z, shortHash(r.groupUnder(n))))
+
+	r.votersBeat(t, n)
+	if got, ok := r.lem.ZoneLeader(ZoneName(z)); !ok || string(got) != peer {
+		t.Fatalf("the leader known here is %q %v, want %s", got, ok, peer)
+	}
 }
 
 // With an active serial known a serial fetched moves nothing: the zone reads
@@ -318,6 +355,35 @@ func TestAnObserverKeepsTheNewLeadersCSYNCUntilTheEarlierLeaseRunsOut(t *testing
 	want := "a CSYNC is taken only from the zone's delegation sync leader: the sender is " + r.peer.Identity + ", the leader is " + string(old)
 	if c.Status != "REJECTED" || len(c.RejectedItems) != 1 || c.RejectedItems[0].Record != rec || c.RejectedItems[0].Reason != want {
 		t.Errorf("the sender got %+v, want the CSYNC refused for %q", *c, want)
+	}
+	r.keptForLeader(t, 0)
+}
+
+// The lease the observer knows runs out and no other leader is known: the
+// CSYNC stays kept, since judged then it would be refused for that alone. It
+// is judged once a leader is known, here the sender, and taken.
+func TestAnObserverKeepsTheCSYNCWhenTheLeaseRunsOutWithNoLeaderKnown(t *testing.T) {
+	r := leaderRig(t, "observer.noleader.kept.example.", true)
+	const old = AgentId("old.leader.example.")
+	lease := time.Now().Add(time.Second)
+	r.leaderUntil(old, lease)
+	op, rec := csyncOp(r.mpzd.ZoneName, 1000)
+	distID := r.receives(t, r.peer.Identity, r.peer.Identity, op)
+	r.keptForLeader(t, 1)
+	time.Sleep(time.Until(lease) + 50*time.Millisecond)
+	if who, known := r.lem.ZoneLeader(ZoneName(r.mpzd.ZoneName)); known {
+		t.Fatalf("setup: the leader %s is still known", who)
+	}
+	r.conf.askLeaderWaits()
+	time.Sleep(200 * time.Millisecond)
+	if n := len(r.keptForLeader(t, 1)); n != 1 || len(r.repo(t)[AgentId(r.peer.Identity)][dns.TypeCSYNC]) != 0 {
+		t.Fatal("the CSYNC was judged with no leader known")
+	}
+	r.learns(AgentId(r.peer.Identity))
+	held := r.heldCsync(t, rec)
+	r.confirms(rigCombiner, held.DistributionID, rec)
+	if c := r.answered(t, distID); c.Status != "SUCCESS" || !slices.Equal(c.AppliedRecords, []string{rec}) {
+		t.Errorf("the sender got the final confirmation %+v", *c)
 	}
 	r.keptForLeader(t, 0)
 }
