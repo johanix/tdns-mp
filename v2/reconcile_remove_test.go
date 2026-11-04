@@ -30,6 +30,7 @@ type leaverRig struct {
 	syncs       []string
 	rolls       int
 	dsThere     func(parentSeen) bool
+	keysUnknown bool     // this agent holds none of n's KSKs
 	bNS         []string // what b tells in its beats
 }
 
@@ -46,11 +47,11 @@ func removalAt(t *testing.T, serial uint32, nsmgmt, servers, signers string) *In
 // test ends.
 func (r *leaverRig) standIns(t *testing.T) {
 	t.Helper()
-	pl, pg, aw, ss, or, dl := parentLook, parentLookGo, askWithdrawal, stepSyncAsk, oweRemovalRoll, dsLeft
+	pl, pg, aw, ss, or, dl, ld := parentLook, parentLookGo, askWithdrawal, stepSyncAsk, oweRemovalRoll, dsLeft, leaverDS
 	t.Cleanup(func() {
-		parentLook, parentLookGo, askWithdrawal, stepSyncAsk, oweRemovalRoll, dsLeft = pl, pg, aw, ss, or, dl
+		parentLook, parentLookGo, askWithdrawal, stepSyncAsk, oweRemovalRoll, dsLeft, leaverDS = pl, pg, aw, ss, or, dl, ld
 	})
-	parentLook = func(*Config, string) (parentSeen, error) { return r.parent, r.parentErr }
+	parentLook = func(*Config, string) (parentSeen, error) { return r.parentServed(), r.parentErr }
 	parentLookGo = func(look func()) { look() }
 	askWithdrawal = func(conf *Config, zone string, w Withdraw) {
 		k := strings.TrimSuffix(w.Provider, ".") + " " + w.RRtype
@@ -64,6 +65,27 @@ func (r *leaverRig) standIns(t *testing.T) {
 	stepSyncAsk = func(_ *Config, _, why string) { r.syncs = append(r.syncs, why) }
 	oweRemovalRoll = func(*Config, ZoneName) { r.rolls++ }
 	dsLeft = func(_ *Config, _ string, seen parentSeen) bool { return r.dsThere == nil || r.dsThere(seen) }
+	leaverDS = func(*Config, string, string) (func(*dns.DS) bool, bool) {
+		return func(ds *dns.DS) bool { return ds.KeyTag == 2 }, !r.keysUnknown
+	}
+	rb := &r.conf.InternalMp.reconciles
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	rb.zone(canonicalName(r.zone)).parent.dsEver = []*dns.DS{{KeyTag: 2}} // this leader saw n's DS
+}
+
+// parentServed is what the rig's parent serves, as a look reads it. Key tag 2 is
+// n's DS; with no dsThere it has gone.
+func (r *leaverRig) parentServed() parentSeen {
+	seen := r.parent
+	if len(seen.dsRRs) == 0 {
+		for _, tag := range seen.ds {
+			if tag != 2 || r.dsThere != nil {
+				seen.dsRRs = append(seen.dsRRs, &dns.DS{KeyTag: tag})
+			}
+		}
+	}
+	return seen
 }
 
 func (r *leaverRig) confirmWithdrawal(provider, rrtype string) {

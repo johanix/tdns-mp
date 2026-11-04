@@ -15,7 +15,8 @@
  *     KeyConfirmers.
  *  3. If it leaves signers=: DSSigners drop it, its CDS is withdrawn, the
  *     leader syncs and watches the parent until no server of its serves its
- *     DS, and waits the DS TTL and parent-publish-delay from then.
+ *     DS, and waits the DS TTL and parent-publish-delay from then. Its DS never
+ *     seen there, and every server telling so, the step ends at once.
  *  4. Its DNSKEY is withdrawn; KeySigners and Signing drop it: it stops
  *     signing.
  *  5. The removal is done: every agent drops it from disk.
@@ -50,8 +51,9 @@ const (
 	// stepSyncEvery is how often a step that watches the parent asks the sync
 	// again: the zone's copy may follow the withdrawal only after the first.
 	stepSyncEvery = time.Minute
-	// removalTTLUnknown stands for a TTL this agent never saw served: a new
-	// leader's, of a DS the parent had dropped before it looked.
+	// removalTTLUnknown is what a removal's DS step counts for what it cannot
+	// read: a TTL it never saw served, a server of the parent that has not told,
+	// or a leaver of whose KSKs this agent holds none.
 	removalTTLUnknown = time.Hour
 )
 
@@ -379,6 +381,8 @@ type parentSeen struct {
 	dsTTL    uint32       // the largest, as last served
 	noNS     bool         // of one server: its NS query failed, so it tells nothing of them
 	noDS     bool         // of one server: it tells nothing of its DS (parentAtEveryServer)
+	dsTold   bool         // every server asked told of its DS, in this look
+	dsEver   []*dns.DS    // every DS this agent has seen served, whole (after)
 	each     []parentSeen // what each server that answered serves
 	nsHeldTo time.Time    // until when a resolver may hold what a longer NS TTL gave (after)
 	dsHeldTo time.Time    // the same of a longer DS TTL
@@ -391,6 +395,12 @@ type parentSeen struct {
 func (seen *parentSeen) after(last parentSeen) {
 	if seen.dsTTL == 0 {
 		seen.dsTTL = last.dsTTL // as last served
+	}
+	seen.dsEver = last.dsEver
+	for _, ds := range seen.dsRRs {
+		if !slices.ContainsFunc(seen.dsEver, func(held *dns.DS) bool { return dns.IsDuplicate(held, ds) }) {
+			seen.dsEver = append(slices.Clip(seen.dsEver), ds)
+		}
 	}
 	seen.nsHeldTo = heldTo(last.nsHeldTo, seen.at, seen.nsTTL, last.nsTTL)
 	seen.dsHeldTo = heldTo(last.dsHeldTo, seen.at, seen.dsTTL, last.dsTTL)
@@ -461,6 +471,7 @@ func parentAtEveryServer(servers []string, ask func(server string, rrtype uint16
 		}
 	}
 	if slices.ContainsFunc(seen.each, parentSeen.toldNS) && slices.ContainsFunc(seen.each, parentSeen.toldDS) {
+		seen.dsTold = len(seen.each) == len(servers) && !slices.ContainsFunc(seen.each, func(one parentSeen) bool { return one.noDS })
 		return seen, nil
 	}
 	if last == nil {
@@ -775,10 +786,14 @@ func (conf *Config) removalNSWait(zone, label, id string, agentNS bool) string {
 }
 
 // removalDSWait is what the leaving provider's DS step waits for: its CDS
-// withdrawn, then until no server of the parent serves its DS, and from then the
-// parent's DS TTL, as last served, plus parent-publish-delay, and no sooner than
-// a longer TTL it lowered has run out (parentSeen.after). The leader's operator's
-// word ends the watch, not what follows it. "" once passed.
+// withdrawn, then until no server of the parent serves its DS. Other providers'
+// DS have no say. Its DS seen at the parent, it waits from then the parent's DS
+// TTL, as last served, plus parent-publish-delay, and no sooner than a longer TTL
+// it lowered has run out (parentSeen.after). Never seen there, with every server
+// telling it does not serve it, the step ends at once. With a server that has not
+// told, or none of its KSKs held here, what is left cannot be read: an hour plus
+// the delay, and with its KSKs not held the watch goes by dsLeft. The leader's
+// operator's word ends the watch, not what follows it. "" once passed.
 func (conf *Config) removalDSWait(zone, label, id string) string {
 	if !conf.removalWithdrawn(zone, id, "CDS") {
 		return "for the withdrawal of its CDS to be confirmed"
@@ -794,17 +809,37 @@ func (conf *Config) removalDSWait(zone, label, id string) string {
 		return "until the parent's DS RRset is known"
 	}
 	wait := "ds " + id
-	if !word && !dsLeft(conf, zone, seen) {
+	theirs, keysHeld := leaverDS(conf, zone, id)
+	gone := func(one parentSeen) bool {
+		if keysHeld {
+			return !slices.ContainsFunc(one.dsRRs, theirs)
+		}
+		return dsLeft(conf, zone, one)
+	}
+	if !word && !gone(seen) {
 		conf.askStepSync(zone, "a removal's DS step")
 		rb.forgetWait(key, wait)
 		rb.watches(key, step)
-		text := behindSaid(seen.behind(parentSeen.toldDS, func(one parentSeen) bool { return !dsLeft(conf, zone, one) }))
+		text := behindSaid(seen.behind(parentSeen.toldDS, func(one parentSeen) bool { return !gone(one) }))
 		return removalWaitSaid(conf, zone, id, "3 (its DS)", "until the parent no longer serves its DS"+text+conf.parentRefusalNote(zone, id, step))
 	}
 	rb.watches(key, "")
 	ttl := removalTTLUnknown
-	if seen.dsTTL != 0 {
-		ttl = time.Duration(seen.dsTTL) * time.Second
+	outcome, said := "ds-seen", "for the DS TTL"
+	switch {
+	case keysHeld && slices.ContainsFunc(seen.dsEver, theirs):
+		if seen.dsTTL != 0 {
+			ttl = time.Duration(seen.dsTTL) * time.Second
+		}
+	case !keysHeld:
+		outcome, said = "keys-unknown", "for the hour, as this agent holds none of its KSKs,"
+	case !seen.dsTold:
+		outcome, said = "server-silent", "for the hour, as a server of the parent has not told of its DS,"
+	default:
+		if rb.sayOnce(key, wait+" at once") {
+			lg.Info("a removal's DS step ends at once", "zone", zone, "provider", id, "outcome", "never-seen", "parent_servers", len(seen.each))
+		}
+		return ""
 	}
 	publish := parentPublishDelayFor(conf.MpConfig())
 	since := rb.sinceFirst(key, wait, time.Now())
@@ -813,19 +848,20 @@ func (conf *Config) removalDSWait(zone, label, id string) string {
 		until = held
 	}
 	// the wait's terms as they are read, and again if one of them changes
-	if rb.sayOnce(key, fmt.Sprintf("%s terms %s %s %s %s", wait, ttl, publish, since, until)) {
-		lg.Info("a removal's DS step counts its wait", "zone", zone, "provider", id, "parent_ds_ttl", ttl, "ttl_seen", seen.dsTTL != 0, "parent_publish_delay", publish,
+	if rb.sayOnce(key, fmt.Sprintf("%s terms %s %s %s %s %s", wait, outcome, ttl, publish, since, until)) {
+		lg.Info("a removal's DS step counts its wait", "zone", zone, "provider", id, "outcome", outcome, "parent_ds_ttl", ttl, "ttl_seen", outcome == "ds-seen" && seen.dsTTL != 0, "parent_publish_delay", publish,
 			"since", since.UTC().Format(time.RFC3339), "until", until.UTC().Format(time.RFC3339))
 	}
 	if time.Now().Before(until) {
-		return removalWaitSaid(conf, zone, id, "3 (its DS)", "for the DS TTL until "+removalTime(until))
+		return removalWaitSaid(conf, zone, id, "3 (its DS)", said+" until "+removalTime(until))
 	}
 	return ""
 }
 
 // dsLeft: every DS the parent serves is one of the step's DS set: the leaving
 // provider's is gone. With the set not known it cannot be told, and the step
-// waits, as the syncher leaves the parent's DS alone then. A test stands in.
+// waits, as the syncher leaves the parent's DS alone then. The watch goes by this
+// only with none of the leaver's KSKs held (leaverDS). A test stands in.
 var dsLeft = func(conf *Config, zone string, seen parentSeen) bool {
 	return dsAllIntended(seen.dsRRs, func(digest uint8) ([]dns.RR, bool) {
 		intent, err := conf.computedDSIntent(zone, digest)
@@ -833,27 +869,92 @@ var dsLeft = func(conf *Config, zone string, seen parentSeen) bool {
 	})
 }
 
-// dsAllIntended: every DS served is one of the set, as intended gives it for the
-// DS's digest type, and compared whole: two providers' keys can share a tag and
-// an algorithm, and a parent may compute its own of any type. A digest type none
-// is computed for here goes by its tag and algorithm, against the SHA-256 set:
-// it may be served for a key that stays, and nothing would ever end that wait.
+// leaverDS tells the leaving provider's DS from others', matched as dsLeft
+// matches (dsInSet) against what its KSKs give. False with none of them held here,
+// when it cannot be told. A test stands in.
+var leaverDS = func(conf *Config, zone, id string) (func(*dns.DS) bool, bool) {
+	keys := conf.leaverKSKs(zone, id)
+	if len(keys) == 0 {
+		return nil, false
+	}
+	intended := func(digest uint8) ([]dns.RR, bool) {
+		var set []dns.RR
+		for _, key := range keys {
+			if ds := key.ToDS(digest); ds != nil {
+				set = append(set, ds)
+			}
+		}
+		return set, true
+	}
+	return func(ds *dns.DS) bool { return dsInSet(ds, intended) }, true
+}
+
+// leaverKSKs are the leaving provider's keys with the SEP flag, as this agent
+// holds them: its own signer's word, or what the provider told. They stay until
+// its DNSKEY step, which follows the DS step.
+func (conf *Config) leaverKSKs(zone, id string) []*dns.DNSKEY {
+	zone = dns.Fqdn(zone)
+	var keys []*dns.DNSKEY
+	add := func(key *dns.DNSKEY) {
+		if key.Flags&dns.SEP != 0 {
+			keys = append(keys, key)
+		}
+	}
+	if slices.ContainsFunc(ourHsyncIdentities(conf.MpConfig()), func(us string) bool { return core.EqualNames(us, id) }) {
+		if o := conf.InternalMp.KeyLifecycleOwner; o != nil {
+			if snap := o.inventoryOf(zone); snap != nil {
+				for _, it := range snap.Inventory {
+					if it.State == DnskeyStateForeign {
+						continue // another provider's: its DS stays
+					}
+					if rr, err := dns.NewRR(it.KeyRR); err == nil {
+						if key, ok := rr.(*dns.DNSKEY); ok {
+							add(key)
+						}
+					}
+				}
+			}
+		}
+		return keys
+	}
+	if tm := conf.InternalMp.MPTransport; tm != nil {
+		for agent, share := range tm.foreignSharesFor(ZoneName(zone)) {
+			if core.EqualNames(string(agent), id) {
+				for _, key := range share.dnskeys {
+					add(key)
+				}
+			}
+		}
+	}
+	return keys
+}
+
+// dsAllIntended: every DS served is one of the set (dsInSet).
 func dsAllIntended(served []*dns.DS, intended func(digest uint8) ([]dns.RR, bool)) bool {
 	for _, ds := range served {
-		set, known := intended(ds.DigestType)
-		whole := len(set) > 0
-		if known && !whole {
-			set, known = intended(dns.SHA256)
-		}
-		if !known || !slices.ContainsFunc(set, func(rr dns.RR) bool {
-			want, ok := rr.(*dns.DS)
-			return ok && want.KeyTag == ds.KeyTag && want.Algorithm == ds.Algorithm &&
-				(!whole || strings.EqualFold(want.Digest, ds.Digest)) // not-a-name: a digest in hex
-		}) {
+		if !dsInSet(ds, intended) {
 			return false
 		}
 	}
 	return true
+}
+
+// dsInSet: the DS is one of the set, as intended gives it for the DS's digest
+// type, and compared whole: two providers' keys can share a tag and an algorithm,
+// and a parent may compute its own of any type. A digest type none is computed
+// for here goes by its tag and algorithm, against the SHA-256 set: it may be
+// served for a key that stays, and nothing would ever end that wait.
+func dsInSet(ds *dns.DS, intended func(digest uint8) ([]dns.RR, bool)) bool {
+	set, known := intended(ds.DigestType)
+	whole := len(set) > 0
+	if known && !whole {
+		set, known = intended(dns.SHA256)
+	}
+	return known && slices.ContainsFunc(set, func(rr dns.RR) bool {
+		want, ok := rr.(*dns.DS)
+		return ok && want.KeyTag == ds.KeyTag && want.Algorithm == ds.Algorithm &&
+			(!whole || strings.EqualFold(want.Digest, ds.Digest)) // not-a-name: a digest in hex
+	})
 }
 
 // removalWaitSaid logs what a step waits until, once for each thing.
