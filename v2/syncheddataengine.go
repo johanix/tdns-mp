@@ -1053,9 +1053,11 @@ func (zdr *ZoneDataRepo) setExpectedRecipients(zone ZoneName, agent AgentId, dis
 
 // allRecipientsConfirmed returns true if every expected recipient has sent a
 // non-pending confirmation. A member with no vote holds no record's state
-// (design 4): it is sent to all the same, and what it answers is recorded. An
-// auditor's answer names a removal's records as applied (auditorConfirms), so
-// it would never count for a removal.
+// (design 4): it is sent to all the same, and what it answers is recorded, but
+// for an auditor's word on a removal. That answer names the removal's records
+// as applied (auditorConfirms), so it would never count for a removal; nothing
+// waits for it, and it is not recorded, as it would count here if the member
+// gained a vote.
 func allRecipientsConfirmed(zone ZoneName, tr *TrackedRR) bool {
 	if len(tr.ExpectedRecipients) == 0 {
 		return true // No tracking — behave as before
@@ -1184,6 +1186,42 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		rejectedMap, ignoredSet = nil, nil
 	}
 
+	// settleAddition: an addition is settled once every recipient with a vote
+	// has answered.
+	settleAddition := func(tr *TrackedRR) {
+		if !allRecipientsConfirmed(detail.Zone, tr) {
+			return
+		}
+		// If ANY recipient accepted, the RR is accepted.
+		// Only if ALL reported ignored does it go to RRStateIgnored.
+		if anyRecipientAccepted(detail.Zone, tr) {
+			tr.State = RRStateAccepted
+		} else {
+			tr.State = RRStateIgnored
+		}
+		tr.Reason = ""
+	}
+
+	// A member with no vote can answer after the voters have settled a record
+	// (allRecipientsConfirmed). What it answers is recorded all the same and
+	// decides nothing: the record stays as the voters left it, and a CSYNC
+	// stops waiting for that member (delegationCsyncProgress).
+	lateNonVoter := func(tr *TrackedRR, rrStr string) bool {
+		if !nonVotingMember(detail.Zone, AgentId(source)) {
+			return false
+		}
+		if appliedSet[rrStr] {
+			setConfirmation(tr, "accepted", "")
+		} else if ignoredSet[rrStr] {
+			setConfirmation(tr, "ignored", "")
+		} else if reason, rejected := rejectedMap[rrStr]; rejected {
+			setConfirmation(tr, "rejected", reason)
+		} else {
+			return false
+		}
+		return true
+	}
+
 	// Walk all tracked RRs for this zone and match by distribution ID + RR string
 	zoneTracking := zdr.Tracking[detail.Zone]
 	if zoneTracking == nil {
@@ -1225,38 +1263,26 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 						setConfirmation(tr, "ignored", "")
 						tr.UpdatedAt = now
 						matched++
-						if allRecipientsConfirmed(detail.Zone, tr) {
-							// If ANY recipient accepted, the RR is accepted.
-							// Only if ALL reported ignored does it go to RRStateIgnored.
-							if anyRecipientAccepted(detail.Zone, tr) {
-								tr.State = RRStateAccepted
-							} else {
-								tr.State = RRStateIgnored
-							}
-							tr.Reason = ""
-						}
+						settleAddition(tr)
 					} else if reason, rejected := rejectedMap[rrStr]; rejected {
 						setConfirmation(tr, "rejected", reason)
 						if !nonVotingMember(detail.Zone, AgentId(source)) { // holds no record's state (allRecipientsConfirmed)
 							tr.State = RRStateRejected
 							tr.Reason = reason
+						} else if len(tr.ExpectedRecipients) > 0 {
+							settleAddition(tr) // it may have lost its vote after the voters answered
 						}
 						tr.UpdatedAt = now
 						matched++
 					}
 
 				case RRStatePendingRemoval:
+					settles := false
 					if removedSet[rrStr] || withdrawn {
 						setConfirmation(tr, "removed", "")
 						tr.UpdatedAt = now
 						matched++
-						if allRecipientsConfirmed(detail.Zone, tr) {
-							zdr.deleteRRFromRepo(detail.Zone, agentId, rrtype, tr.RR)
-							tr.State = RRStateRemoved
-							tr.Reason = ""
-							removed++
-							lgEngine.Info("RR removed (all confirmed)", "source", source, "rr", rrStr)
-						}
+						settles = true
 					} else if reason, rejected := rejectedMap[rrStr]; rejected {
 						setConfirmation(tr, "rejected", reason)
 						tr.UpdatedAt = now
@@ -1265,13 +1291,29 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 							tr.State = RRStateAccepted
 							tr.Reason = fmt.Sprintf("delete rejected: %s", reason)
 							lgEngine.Warn("delete rejected for RR", "source", source, "rr", rrStr, "reason", reason)
+						} else {
+							settles = len(tr.ExpectedRecipients) > 0 // it may have lost its vote after the voters answered
 						}
+					}
+					if settles && allRecipientsConfirmed(detail.Zone, tr) {
+						zdr.deleteRRFromRepo(detail.Zone, agentId, rrtype, tr.RR)
+						tr.State = RRStateRemoved
+						tr.Reason = ""
+						removed++
+						lgEngine.Info("RR removed (all confirmed)", "source", source, "rr", rrStr)
 					}
 
 				case RRStateAccepted:
 					// Already accepted — record this recipient's confirmation
 					if appliedSet[rrStr] {
 						setConfirmation(tr, "accepted", "")
+						matched++
+					} else if lateNonVoter(tr, rrStr) {
+						matched++
+					}
+
+				case RRStateIgnored:
+					if lateNonVoter(tr, rrStr) {
 						matched++
 					}
 

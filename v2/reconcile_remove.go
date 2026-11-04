@@ -942,14 +942,6 @@ func (conf *Config) safeToRemoveSaid(zone string) string {
 
 // --- Other readers ---
 
-// stillConfirmsKeys: id is among the zone's KeyConfirmers at its step: a
-// leaving provider until its NS TTL has passed. Resolvers sent to it need
-// another signer's new DNSKEY, so that distribution has no time-out for it
-// (design 5.2).
-func stillConfirmsKeys(zone ZoneName, id AgentId) bool {
-	return isAmong(identities(rolesForZone(zone).KeyConfirmers), id)
-}
-
 // lookAgainAtDnskeyWaits has the zone's DNSKEY distributions look again at who
 // they wait for: a step took a provider out of the key confirmers, and a
 // rollover paused on it resumes (design 5.2).

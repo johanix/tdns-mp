@@ -2536,10 +2536,13 @@ type PendingDnskeyPropagation struct {
 	// Signing are those of ExpectedAgents whose provider signs the zone
 	// (its HSYNC identity's label is among the HSYNCPARAM signers); nil
 	// when the zone is not here to ask.
-	Signing      map[AgentId]bool
-	Rejected     bool   // True if any agent rejected
-	RejectionMsg string // First rejection reason
-	CreatedAt    time.Time
+	Signing  map[AgentId]bool
+	Rejected bool // True if a rejection was noted (noteRejectionLocked); only logged
+	// Reasons is, per agent and key, the reason of a rejection by an agent
+	// that could hold a key when it rejected (noteRejectionLocked). outcome
+	// reads those of agents that still can.
+	Reasons   map[AgentId]map[uint16]string
+	CreatedAt time.Time
 	// Stamps is each of ExpectedAgents' stamp per key: that of the answer
 	// that gave the key its result (Results), carried with the result by a
 	// resend (S5b). A later confirmation moves none: an agent's keys may
@@ -2720,9 +2723,9 @@ func (tm *MPTransportBridge) noRoleWait() time.Duration {
 // dnskeyNoRoleTimedOut ends the wait of a DNSKEY distribution for the
 // members with no vote that have not answered by the time-out (design 4):
 // each counts as answered, neither applying the keys nor rejecting them,
-// with one log line, and the distribution goes on without it. A voting
-// member is waited for as before, and looked at again after another
-// time-out, in case it has no role by then.
+// with one log line, and the distribution goes on without it. A member that
+// can hold a key (canHoldAKey) is waited for as before, and looked at again
+// after another time-out, in case it cannot by then.
 func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(ctx context.Context, distID string) {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
@@ -2753,7 +2756,7 @@ func (tm *MPTransportBridge) dnskeyNoRoleLookLocked(distID string) (string, bool
 		return distID, false
 	}
 	for _, a := range slices.Sorted(maps.Keys(prop.ExpectedAgents)) {
-		if prop.ExpectedAgents[a] || !nonVotingMember(prop.Zone, a) || stillConfirmsKeys(prop.Zone, a) {
+		if prop.ExpectedAgents[a] || canHoldAKey(prop.Zone, a) {
 			continue
 		}
 		lgTransport.Warn("a member with no vote did not confirm in time, going on", "zone", prop.Zone, "member", a, "what", "the DNSKEY distribution "+distID)
@@ -2812,25 +2815,36 @@ func signingAgents(zone ZoneName, agents []AgentId) map[AgentId]bool {
 // whose answers it would sign (design §5.4: every signing provider has
 // applied the key). An ignored answer from a provider that does not sign
 // the zone is no obstacle. When who signs is not known here (Signing nil),
-// an ignored answer counts as it comes. What a member with no vote rejects
-// decides nothing (design 4): it stays in Results, and rejects no key.
+// an ignored answer counts as it comes. What a member that cannot hold a key
+// answers decides nothing (canHoldAKey): it stays in Results, and rejects no
+// key. This is read here, at the end, so what a leaving provider answered
+// stops counting when it leaves the key confirmers. A rejection counts only if
+// the agent could hold a key when it rejected too: a member with no role that
+// gains a vote is not asked again, and what it rejected before decides nothing.
+// The reason given is that of a rejection that counts, or else of a signing
+// provider's ignoring the key.
 func (prop *PendingDnskeyPropagation) outcome() (propagated, removed, rejected []uint16, rejectionMsg string) {
-	rejectionMsg = prop.RejectionMsg
 	agents := make([]string, 0, len(prop.Results))
 	for a := range prop.Results {
 		agents = append(agents, string(a))
 	}
 	sort.Strings(agents)
+	var ignoredMsg string
 	for _, kt := range prop.KeyTags {
 		bad := false
 		for _, a := range agents {
 			switch r := prop.Results[AgentId(a)][kt]; {
-			case r == "rejected" && !nonVotingMember(prop.Zone, AgentId(a)):
+			case r == "rejected" && canHoldAKey(prop.Zone, AgentId(a)):
+				if reason, noted := prop.Reasons[AgentId(a)][kt]; noted {
+					bad = true
+					if rejectionMsg == "" {
+						rejectionMsg = reason
+					}
+				}
+			case r == "ignored" && prop.Signing[AgentId(a)] && canHoldAKey(prop.Zone, AgentId(a)):
 				bad = true
-			case r == "ignored" && prop.Signing[AgentId(a)]:
-				bad = true
-				if rejectionMsg == "" {
-					rejectionMsg = fmt.Sprintf("%s ignored the key, though its provider is one of the zone's signers", a)
+				if ignoredMsg == "" {
+					ignoredMsg = fmt.Sprintf("%s ignored the key, though its provider is one of the zone's signers", a)
 				}
 			}
 		}
@@ -2843,7 +2857,27 @@ func (prop *PendingDnskeyPropagation) outcome() (propagated, removed, rejected [
 			propagated = append(propagated, kt)
 		}
 	}
+	if rejectionMsg == "" {
+		rejectionMsg = ignoredMsg
+	}
 	return propagated, removed, rejected, rejectionMsg
+}
+
+// noteRejectionLocked: an agent has rejected a key. What a member that cannot
+// hold a key rejects decides nothing, then or later (outcome), so only what
+// another agent rejects is noted, with its reason. Under dnskeyPropMu.
+func (prop *PendingDnskeyPropagation) noteRejectionLocked(agent AgentId, kt uint16, reason string) {
+	if !canHoldAKey(prop.Zone, agent) {
+		return
+	}
+	prop.Rejected = true
+	if prop.Reasons == nil {
+		prop.Reasons = map[AgentId]map[uint16]string{}
+	}
+	if prop.Reasons[agent] == nil {
+		prop.Reasons[agent] = map[uint16]string{}
+	}
+	prop.Reasons[agent][kt] = reason
 }
 
 // ProcessDnskeyConfirmation checks if a confirmation is for a pending DNSKEY propagation.
@@ -2976,12 +3010,7 @@ func (tm *MPTransportBridge) processDnskeyConfirmation(distID string, source str
 			// a late rejection: the resend's answer decides
 		case rejectedTags[kt] || (wholeRejection && !doneTags[kt]):
 			results[kt] = "rejected"
-			if !nonVotingMember(prop.Zone, agentID) { // decides nothing (outcome)
-				prop.Rejected = true
-				if prop.RejectionMsg == "" {
-					prop.RejectionMsg = reason
-				}
-			}
+			prop.noteRejectionLocked(agentID, kt, reason)
 			lgTransport.Warn("DNSKEY confirmation rejected a key", "zone", prop.Zone, "distributionID", distID, "agent", source, "keytag", kt, "status", status, "reason", reason)
 		case doneTags[kt] || success:
 			results[kt] = "applied"
@@ -3129,12 +3158,7 @@ func (tm *MPTransportBridge) creditFromAnswerLocked(ans *sentAnswer, agent Agent
 			switch {
 			case rejectedTags[kt]:
 				results[kt] = "rejected"
-				if !nonVotingMember(prop.Zone, agent) { // decides nothing (outcome)
-					prop.Rejected = true
-					if prop.RejectionMsg == "" && len(rejectedItems) > 0 {
-						prop.RejectionMsg = rejectedItems[0].Reason
-					}
-				}
+				prop.noteRejectionLocked(agent, kt, rejectedItems[0].Reason) // the key is named among them
 			case success && covered:
 				results[kt] = "applied"
 			case (ignored || ignoredTags[kt]) && covered:
