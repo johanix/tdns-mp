@@ -322,6 +322,60 @@ func TestTheLeaderNamesTheNewKeyOnceItsKEYIsSent(t *testing.T) {
 	}
 }
 
+// underAnotherSerial notes distID as sent to the combiner under a serial this
+// agent no longer wants, as the gate does: a word on it other than a success
+// is not final, and the update goes again (plan S10). The func returned has
+// the combiner hold the serial wanted, and the update go again.
+func underAnotherSerial(tm *MPTransportBridge, zone ZoneName, distID string) func() {
+	handed, wanted := &ActingHandover{Serial: 1}, &ActingHandover{Serial: 2}
+	tr := newHandoverTracker("", func(ZoneName, *ZoneUpdate, string) (string, error) { return "", nil })
+	z := &zoneHandover{want: wanted, held: handed}
+	tr.zones[handoverKey(string(zone))] = z
+	tr.sent[distID] = &sentUpdate{zone: zone, update: &ZoneUpdate{}, under: handed, at: time.Now()}
+	tm.handover = tr
+	return func() {
+		tr.mu.Lock()
+		z.held = wanted
+		tr.mu.Unlock()
+		tr.drain(string(zone))
+	}
+}
+
+// The combiner's IGNORED on a KEY sent under another serial is no final word:
+// the KEY goes again, and the old key is not retired or deleted on it.
+func TestAWordNotFinalDoesNotEndTheRoll(t *testing.T) {
+	r := newRollRig(t, "roll.notfinal.example.")
+	k2 := r.start(t)
+	tm := r.conf.InternalMp.MPTransport
+	st, _ := tm.rollKEYs.state(r.zone)
+	sentAgain := underAnotherSerial(tm, r.zone, st.distID)
+	word := func(status transport.ConfirmStatus) {
+		tm.ChunkHandler.OnConfirmationReceived(confirmIn(st.distID, rigCombiner, status, string(r.zone), nil, nil, nil, nil, false, ""))
+	}
+	for _, rcpt := range st.expected {
+		if rcpt != canonicalName(rigCombiner) {
+			tm.rollKEYs.heard(st.distID, rcpt, "SUCCESS", "", false)
+		}
+	}
+	word(transport.ConfirmIgnored)
+	r.pass(t, syncOther)
+	if ro := r.roll(t); ro == nil || ro.phase != rollPublished || ro.failures != 0 {
+		t.Fatalf("the roll after a word not final: %+v", ro)
+	}
+	if got := r.parent.trusts(); !slices.Contains(got, r.old.keyid) {
+		t.Fatalf("the parent trusts %v, without the old key %d", got, r.old.keyid)
+	}
+	sentAgain()
+	word(transport.ConfirmSuccess)
+	r.pass(t, syncOther)
+	if ro := r.roll(t); ro != nil {
+		t.Errorf("the roll did not end on the final word: %+v", ro)
+	}
+	if got := r.parent.trusts(); !slices.Equal(got, []uint16{k2}) {
+		t.Errorf("the parent trusts %v, want %d alone", got, k2)
+	}
+}
+
 // A recipient that keeps the new KEY and applies it not by its role
 // (IGNORED) has taken it; a refusal fails the try, and the KEY goes again.
 func TestARefusedKEYIsSentAgainAndAnIgnoredOneIsTaken(t *testing.T) {
@@ -565,6 +619,32 @@ func TestAKEYPurgeIsAskedForAgainUntilTheCombinerHasMadeIt(t *testing.T) {
 	r.conf.retryKEYPurges(r.zdr)
 	if len(r.sends) != 4 {
 		t.Errorf("asked again once dropped: %d sends", len(r.sends))
+	}
+}
+
+// The combiner's IGNORED on a drop sent under another serial is no final word:
+// the KEY stays in the member's data until the word on the drop sent again.
+func TestAWordNotFinalDoesNotDropTheKEY(t *testing.T) {
+	r := newKeyPurgeRig(t, "roll.purgenotfinal.example.")
+	r.conf.dropOtherKEYs(r.zdr, r.zone, r.them)
+	if len(r.sends) != 1 {
+		t.Fatalf("the combiner was asked %d times", len(r.sends))
+	}
+	tm := r.conf.InternalMp.MPTransport
+	sentAgain := underAnotherSerial(tm, r.zone, r.sends[0])
+	word := func(status transport.ConfirmStatus) {
+		tm.ChunkHandler.OnConfirmationReceived(confirmIn(r.sends[0], rigCombiner, status, string(r.zone), nil, nil, nil, nil, false, ""))
+	}
+	word(transport.ConfirmIgnored)
+	r.conf.retryKEYPurges(r.zdr)
+	if !r.holds(earlierLeader) {
+		t.Fatal("a word not final dropped the KEY")
+	}
+	sentAgain()
+	word(transport.ConfirmSuccess)
+	r.conf.retryKEYPurges(r.zdr)
+	if r.holds(earlierLeader) {
+		t.Error("the KEY is kept after the combiner's final word")
 	}
 }
 
