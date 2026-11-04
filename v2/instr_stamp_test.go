@@ -830,4 +830,28 @@ func TestTheWarningNamesACopyAboveItsUpstream(t *testing.T) {
 	if !strings.Contains(got, "refreshing the zone has not brought them") || strings.Contains(got, "a higher SOA") {
 		t.Errorf("a copy below its upstream: %s", got)
 	}
+
+	// the advice takes every upstream that answers being below the copy
+	for name, c := range map[string]struct {
+		upstreams []string
+		want      bool
+	}{
+		"one lower, one higher":      {[]string{lower, soaServer(t, zone, 431)}, false},
+		"one higher, one lower":      {[]string{soaServer(t, zone, 431), lower}, false},
+		"one lower, one at the copy": {[]string{lower, soaServer(t, zone, 430)}, false},
+		"at the copy":                {[]string{soaServer(t, zone, 430)}, false},
+		"two lower":                  {[]string{lower, soaServer(t, zone, 428)}, true},
+		"one lower, one silent":      {[]string{lower, goneServer(t)}, true},
+		"silent":                     {[]string{goneServer(t)}, false},
+	} {
+		logs.Reset()
+		zd.Upstreams = nil
+		for _, addr := range c.upstreams {
+			zd.Upstreams = append(zd.Upstreams, tdns.PeerConf{Addr: addr})
+		}
+		warnCopyStuck(zone, 425, stampAlpha)
+		if got := strings.Contains(logs.String(), "a higher SOA"); got != c.want {
+			t.Errorf("%s: names a higher SOA: %v, want %v: %s", name, got, c.want, logs.String())
+		}
+	}
 }

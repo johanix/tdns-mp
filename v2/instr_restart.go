@@ -104,7 +104,8 @@ func (s *InstructionStore) startOver(zone, local string) (*startedOver, error) {
 		for i := range z.Held {
 			z.Held[i].Refused = nil
 		}
-		z.Active, z.LastFrom, z.LastThaw, z.NamedAt = nil, nil, nil, h.Serial
+		namedAt := h.Serial
+		z.Active, z.LastFrom, z.LastThaw, z.NamedAt = nil, nil, nil, &namedAt
 		z.Step, z.Taken, z.StepOf, z.StepWhat, z.Excused, z.ParentWords = 0, nil, 0, "", nil, nil
 		return nil
 	})
@@ -115,17 +116,17 @@ func (s *InstructionStore) startOver(zone, local string) (*startedOver, error) {
 }
 
 // namedAt is the serial that named this agent again (zoneSerials.NamedAt), the
-// zone named in any case; 0 with none.
-func (s *InstructionStore) namedAt(zone string) uint32 {
+// zone named in any case; nil with none. The store replaces it, never changes it.
+func (s *InstructionStore) namedAt(zone string) *uint32 {
 	if s == nil {
-		return 0
+		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, z := s.zoneLocked(zone); z != nil {
 		return z.NamedAt
 	}
-	return 0
+	return nil
 }
 
 // newestReading is the store's name for zone, named in any case, the newest
@@ -159,7 +160,7 @@ type restartView struct {
 	waits  []string // whom the leader waits for
 	differ []string // the voting members with a record, and what each tells
 	// namedAt: the serial that named this agent again; nothing below it counts
-	namedAt uint32
+	namedAt *uint32
 	// reconciling: those it is taken from tell a transition to it under
 	// way (plan S12)
 	reconciling bool
@@ -183,8 +184,8 @@ func (v restartView) line() string {
 		return "active not known since the start; waiting for " + strings.Join(v.waits, ", ")
 	case len(v.fetch) > 0:
 		return fmt.Sprintf("active not known since the start; fetching serial %d from %s", v.fetch[0].sd.Serial, v.fetch[0].member)
-	case v.namedAt != 0 && !v.leads:
-		return fmt.Sprintf("named again by serial %d; active not known; waiting for the leader's word", v.namedAt)
+	case v.namedAt != nil && !v.leads:
+		return fmt.Sprintf("named again by serial %d; active not known; waiting for the leader's word", *v.namedAt)
 	case !v.leads:
 		return "active not known since the start; waiting for the leader's word"
 	}
@@ -194,11 +195,12 @@ func (v restartView) line() string {
 // notBelow takes out of the view what it would fetch or take below the serial
 // that named this agent again: the leader may tell the serial this agent dropped
 // until it thaws, and a stamp from before the removal's end stays in the table.
-func (v *restartView) notBelow(serial uint32) {
-	if serial == 0 {
+func (v *restartView) notBelow(namedAt *uint32) {
+	if namedAt == nil {
 		return
 	}
-	v.namedAt = serial
+	v.namedAt = namedAt
+	serial := *namedAt
 	v.fetch = slices.DeleteFunc(v.fetch, func(f restartFetch) bool { return CompareSerial(f.sd.Serial, serial) < 0 })
 	if v.take != nil && CompareSerial(v.take.Serial, serial) < 0 {
 		v.take, v.thaw = nil, nil

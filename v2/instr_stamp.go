@@ -1398,10 +1398,11 @@ func tdnsZoneNamed(zone string) (*tdns.ZoneData, bool) {
 }
 
 // warnCopyStuck says that refreshes do not bring a serial a member tells, with
-// the SOA of this agent's copy and of its upstreams. A copy above its upstream is
-// the case to name, as nothing else tells of it: a secondary keeps the higher
-// serial, and the owner's edits never reach this agent. It comes of an upstream
-// whose chain changed, a signer moved from another provider's to its own.
+// the SOA of this agent's copy and of its upstreams. A copy above every upstream
+// that answers is the case to name, as nothing else tells of it: a secondary keeps
+// the higher serial, and the owner's edits never reach this agent. It comes of an
+// upstream whose chain changed, a signer moved from another provider's to its own.
+// With an upstream at or above the copy a refresh can still replace it.
 func warnCopyStuck(zone string, told uint32, member string) {
 	zd, ok := tdnsZoneNamed(zone)
 	if !ok || zd == nil {
@@ -1413,7 +1414,7 @@ func warnCopyStuck(zone string, told uint32, member string) {
 		return
 	}
 	var upstreams []string
-	above := false
+	above, notAbove := false, false
 	for _, up := range zd.Upstreams {
 		rrs, err := tdns.AuthQuery(zd.ZoneName, up.Addr, dns.TypeSOA)
 		if err != nil || len(rrs) == 0 {
@@ -1422,11 +1423,15 @@ func warnCopyStuck(zone string, told uint32, member string) {
 		}
 		if s, ok := rrs[0].(*dns.SOA); ok {
 			upstreams = append(upstreams, fmt.Sprintf("%s=%d", up.Addr, s.Serial))
-			above = above || CompareSerial(soa.Serial, s.Serial) > 0
+			if CompareSerial(soa.Serial, s.Serial) > 0 {
+				above = true
+			} else {
+				notAbove = true
+			}
 		}
 	}
 	msg := "a member tells newer instructions and refreshing the zone has not brought them"
-	if above {
+	if above && !notAbove {
 		msg += "; this agent's copy has a higher SOA than its upstream, so no refresh replaces it until the upstream's passes it: its operator takes the zone out of the configuration and back"
 	}
 	lgGossip.Warn(msg, "zone", zone, "told", told, "member", member, "copy_soa", soa.Serial, "upstream_soa", strings.Join(upstreams, " "))

@@ -201,8 +201,8 @@ func TestAProviderPutBackFollowsTheLeaderAndTakesItsRole(t *testing.T) {
 	if n.store.activeUnknown(zone) || n.active() != 44 {
 		t.Fatalf("n after the leader's word: %+v", status(t, n.store, zone))
 	}
-	if got := n.store.namedAt(zone); got != 0 {
-		t.Errorf("the serial that named n is kept past its active serial's: %d", got)
+	if got := n.store.namedAt(zone); got != nil {
+		t.Errorf("the serial that named n is kept past its active serial's: %d", *got)
 	}
 	n.stamps.note(p.toldDone, roleA, transport.MechanismDNS)
 	n.conf.thawTurn(zone)
@@ -339,12 +339,42 @@ func TestAZoneSpelledAnotherWayStartsOverToo(t *testing.T) {
 	if !s.activeUnknown(zone) {
 		t.Errorf("the zone still knows an active serial: %+v", status(t, s, zone))
 	}
-	if got := s.namedAt(turn); got != 44 {
-		t.Errorf("the serial that named it, by the turn's name: %d", got)
+	if got := s.namedAt(turn); got == nil || *got != 44 {
+		t.Errorf("the serial that named it, by the turn's name: %v", got)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if z := s.zones[turn]; z != nil {
 		t.Errorf("an entry beside the zone's: %+v", z)
+	}
+}
+
+// An owner's serial may be 0, and the serials before it stay below it: the one
+// this agent dropped, told until the leader thaws, is not fetched or taken.
+func TestANamingSerialOfZeroIsAFloorToo(t *testing.T) {
+	const zone = "zero.back.remove.example."
+	const before = uint32(4294967290)
+	s := newStore(t)
+	noteKnown(t, s, zone, withoutN(t, before))
+	s.Note(zone, withN(t, 0), nil)
+	started, err := s.startOver(zone, roleN)
+	if err != nil || started == nil {
+		t.Fatalf("named again by serial 0: %+v, %v", started, err)
+	}
+	named := s.namedAt(zone)
+	if named == nil || *named != 0 {
+		t.Fatalf("the serial that named it: %v", named)
+	}
+	v := restartView{take: &SerialDigest{Serial: before}, fetch: []restartFetch{{sd: SerialDigest{Serial: before}}, {sd: SerialDigest{Serial: 0}}}}
+	v.notBelow(named)
+	if v.take != nil {
+		t.Errorf("took the serial below it: %+v", v.take)
+	}
+	if len(v.fetch) != 1 || v.fetch[0].sd.Serial != 0 {
+		t.Errorf("fetches: %+v", v.fetch)
+	}
+	v.fetch = nil
+	if !strings.Contains(v.line(), "named again by serial 0") {
+		t.Errorf("the status: %q", v.line())
 	}
 }
