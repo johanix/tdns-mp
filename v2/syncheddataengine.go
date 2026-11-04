@@ -170,6 +170,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 		case <-trackingEvictTicker.C:
 			zdr.evictStaleTracking(1 * time.Hour)
 			conf.csyncsLookAgain(ctx, zdr)
+			// when a full queue came between the change of a member's vote
+			// and the look it asks for (askActivated)
+			for zone := range zdr.Tracking {
+				zdr.settleTracked(zone)
+			}
 
 		case <-ownReadTicker.C:
 			owner.tick(ctx)
@@ -1037,6 +1042,72 @@ func anyRecipientAccepted(zone ZoneName, tr *TrackedRR) bool {
 	return false
 }
 
+// settleAddition: an addition is settled once every recipient with a vote has
+// answered.
+func settleAddition(zone ZoneName, tr *TrackedRR) {
+	if !allRecipientsConfirmed(zone, tr) {
+		return
+	}
+	// If ANY recipient accepted, the RR is accepted.
+	// Only if ALL reported ignored does it go to RRStateIgnored.
+	if anyRecipientAccepted(zone, tr) {
+		tr.State = RRStateAccepted
+	} else {
+		tr.State = RRStateIgnored
+	}
+	tr.Reason = ""
+}
+
+// finishRemoval: every recipient with a vote has removed the record.
+func (zdr *ZoneDataRepo) finishRemoval(zone ZoneName, agent AgentId, rrtype uint16, tr *TrackedRR) {
+	zdr.deleteRRFromRepo(zone, agent, rrtype, tr.RR)
+	tr.State = RRStateRemoved
+	tr.Reason = ""
+}
+
+// aRecipientVotes: a recipient of the record has a vote.
+func aRecipientVotes(zone ZoneName, tr *TrackedRR) bool {
+	return slices.ContainsFunc(tr.ExpectedRecipients, func(r string) bool { return !nonVotingMember(zone, AgentId(r)) })
+}
+
+// aRecipientRemoved: a recipient has removed the record. A rejection removes
+// nothing, so a removal with no such answer does not finish.
+func aRecipientRemoved(tr *TrackedRR) bool {
+	return slices.ContainsFunc(tr.ExpectedRecipients, func(r string) bool { return tr.Confirmations[r].Status == "removed" })
+}
+
+// settleTracked looks again at the zone's records still waiting for an answer.
+// A recipient that has lost its vote since a record was sent may be all it
+// waits for, and if that member stays silent no confirmation comes to settle
+// it: a removal stayed in the repo, where a resync and a catch-up answer read
+// it. A record with no recipient that votes has no answer to settle it on, and
+// stays as it is. Run by the data engine, which alone writes the tracking.
+func (zdr *ZoneDataRepo) settleTracked(zone ZoneName) {
+	now := time.Now()
+	for agentId, agentTracking := range zdr.Tracking[zone] {
+		for rrtype, trackedRRset := range agentTracking {
+			for i := range trackedRRset.Tracked {
+				tr := &trackedRRset.Tracked[i]
+				if tr.State != RRStatePending && tr.State != RRStatePendingRemoval {
+					continue
+				}
+				if !aRecipientVotes(zone, tr) {
+					continue
+				}
+				if tr.State == RRStatePending {
+					settleAddition(zone, tr)
+				} else if aRecipientRemoved(tr) && allRecipientsConfirmed(zone, tr) {
+					zdr.finishRemoval(zone, agentId, rrtype, tr)
+				}
+				if tr.State != RRStatePending && tr.State != RRStatePendingRemoval {
+					tr.UpdatedAt = now
+					lgEngine.Info("a tracked record is settled: what it still waited for has no vote", "zone", zone, "rr", tr.RR.String(), "state", tr.State.String())
+				}
+			}
+		}
+	}
+}
+
 // ProcessConfirmation updates tracked RR states based on combiner confirmation feedback.
 func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *MsgQs) {
 	now := time.Now()
@@ -1132,22 +1203,6 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		rejectedMap, ignoredSet = nil, nil
 	}
 
-	// settleAddition: an addition is settled once every recipient with a vote
-	// has answered.
-	settleAddition := func(tr *TrackedRR) {
-		if !allRecipientsConfirmed(detail.Zone, tr) {
-			return
-		}
-		// If ANY recipient accepted, the RR is accepted.
-		// Only if ALL reported ignored does it go to RRStateIgnored.
-		if anyRecipientAccepted(detail.Zone, tr) {
-			tr.State = RRStateAccepted
-		} else {
-			tr.State = RRStateIgnored
-		}
-		tr.Reason = ""
-	}
-
 	// A member with no vote can answer after the voters have settled a record
 	// (allRecipientsConfirmed). What it answers is recorded all the same and
 	// decides nothing: the record stays as the voters left it, and a CSYNC
@@ -1202,7 +1257,7 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 						tr.UpdatedAt = now
 						matched++
 						if nonVotingMember(detail.Zone, AgentId(source)) && len(tr.ExpectedRecipients) > 0 {
-							settleAddition(tr) // it may have lost its vote after the voters answered
+							settleAddition(detail.Zone, tr) // it may have lost its vote after the voters answered
 						} else if allRecipientsConfirmed(detail.Zone, tr) {
 							tr.State = RRStateAccepted
 							tr.Reason = ""
@@ -1211,14 +1266,14 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 						setConfirmation(tr, "ignored", "")
 						tr.UpdatedAt = now
 						matched++
-						settleAddition(tr)
+						settleAddition(detail.Zone, tr)
 					} else if reason, rejected := rejectedMap[rrStr]; rejected {
 						setConfirmation(tr, "rejected", reason)
 						if !nonVotingMember(detail.Zone, AgentId(source)) { // holds no record's state (allRecipientsConfirmed)
 							tr.State = RRStateRejected
 							tr.Reason = reason
 						} else if len(tr.ExpectedRecipients) > 0 {
-							settleAddition(tr) // it may have lost its vote after the voters answered
+							settleAddition(detail.Zone, tr) // it may have lost its vote after the voters answered
 						}
 						tr.UpdatedAt = now
 						matched++
@@ -1240,13 +1295,11 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 							tr.Reason = fmt.Sprintf("delete rejected: %s", reason)
 							lgEngine.Warn("delete rejected for RR", "source", source, "rr", rrStr, "reason", reason)
 						} else {
-							settles = len(tr.ExpectedRecipients) > 0 // it may have lost its vote after the voters answered
+							settles = aRecipientRemoved(tr) // it may have lost its vote after the voters answered
 						}
 					}
 					if settles && allRecipientsConfirmed(detail.Zone, tr) {
-						zdr.deleteRRFromRepo(detail.Zone, agentId, rrtype, tr.RR)
-						tr.State = RRStateRemoved
-						tr.Reason = ""
+						zdr.finishRemoval(detail.Zone, agentId, rrtype, tr)
 						removed++
 						lgEngine.Info("RR removed (all confirmed)", "source", source, "rr", rrStr)
 					}

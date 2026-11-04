@@ -226,8 +226,8 @@ type InstructionStore struct {
 	// (instr_freeze.go), after the change is written and the lock let go.
 	onFreeze func(zone string, frozen bool)
 	// onActive is told when a zone's active serial changes, becomes known
-	// or goes (instr_receive.go), after the change is written and the lock
-	// let go.
+	// or goes, or a member's removal starts or ends, which changes who votes
+	// (instr_receive.go), after the change is written and the lock let go.
 	onActive func(zone string)
 }
 
@@ -364,9 +364,9 @@ func (s *InstructionStore) persist(zone string, z *zoneSerials) error {
 // errEndOfService drops the zone's serials, under the same lock. A change
 // that freezes the zone, ends its freeze, or moves the serial a frozen
 // zone agrees on, is told to onFreeze once the lock is let go; one that
-// changes the active serial, to onActive, first: others' kept distributions
-// are released at the activation, before this agent's own owed changes
-// (design 3.3).
+// changes the active serial, or who is being removed, to onActive, first:
+// others' kept distributions are released at the activation, before this
+// agent's own owed changes (design 3.3).
 func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) error {
 	var froze *bool
 	activeMoved := false
@@ -393,6 +393,10 @@ func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) err
 	var wasActive *SerialDigest
 	if old != nil && old.Active != nil {
 		wasActive = &old.Active.SerialDigest
+	}
+	var wasLeaving []Removal
+	if old != nil {
+		wasLeaving = old.Removals
 	}
 	if err := f(z); err != nil {
 		if errors.Is(err, errEndOfService) {
@@ -422,7 +426,8 @@ func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) err
 	if frozen != wasFrozen || moved {
 		froze = &frozen
 	}
-	activeMoved = (z.Active == nil) != (wasActive == nil) || z.Active != nil && z.Active.SerialDigest != *wasActive
+	activeMoved = (z.Active == nil) != (wasActive == nil) || z.Active != nil && z.Active.SerialDigest != *wasActive ||
+		!slices.EqualFunc(wasLeaving, z.Removals, func(a, b Removal) bool { return a.Identity == b.Identity })
 	return nil
 }
 

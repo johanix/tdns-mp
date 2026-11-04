@@ -1332,6 +1332,195 @@ func TestAnAnswerFromAMemberThatLostItsVoteSettlesTheRecord(t *testing.T) {
 	}
 }
 
+// lostVoteRig is a zone of the leader a, where n votes until a test changes the
+// active serial, with what the tests below read and write of a tracked record.
+type lostVoteRig struct {
+	*reconcileRig
+	zone ZoneName
+	us   AgentId
+	rr   dns.RR
+}
+
+func newLostVoteRig(t *testing.T, name string) *lostVoteRig {
+	t.Helper()
+	r := newReconcileRig(t, name, roleA)
+	rr, err := dns.NewRR(name + " 3600 IN NS ns9.provider.example.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &lostVoteRig{r, ZoneName(name), AgentId(r.conf.MpConfig().Identity), rr}
+}
+
+func (r *lostVoteRig) activate(t *testing.T, in *Instructions) {
+	t.Helper()
+	if err := r.store.update(string(r.zone), func(z *zoneSerials) error {
+		z.Active.Reading, z.Active.SerialDigest = in, sd(in)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (r *lostVoteRig) tracked(t *testing.T, state RRState, recipients []string) (*ZoneDataRepo, *TrackedRR) {
+	t.Helper()
+	zdr, err := NewZoneDataRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := &TrackedRRset{Tracked: []TrackedRR{{RR: r.rr, State: state, DistributionID: "d", ExpectedRecipients: recipients}}}
+	zdr.Tracking[r.zone] = map[AgentId]map[uint16]*TrackedRRset{r.us: {dns.TypeNS: set}}
+	return zdr, &set.Tracked[0]
+}
+
+func (r *lostVoteRig) confirm(zdr *ZoneDataRepo, from string, change func(*ConfirmationDetail)) {
+	d := &ConfirmationDetail{DistributionID: "d", Zone: r.zone, Source: from, Status: "ok"}
+	change(d)
+	zdr.ProcessConfirmation(d, nil)
+}
+
+// A record that waits for a member that has lost its vote, and stays silent, is
+// settled when the vote goes, as the voters left it: no confirmation is coming.
+// One a voter has not answered waits on. One with no recipient that votes has
+// no answer to settle it on, and stays as it is.
+func TestARecordSettlesWhenTheSilentMemberItWaitsForLosesItsVote(t *testing.T) {
+	r := newLostVoteRig(t, "lostvotesilent.reconcile.example.")
+	votes, noVote := freezeAt(t, 42, "v", "a,b,n", ""), freezeAt(t, 43, "w", "a,b", "")
+	applied := func(d *ConfirmationDetail) { d.AppliedRecords = []string{r.rr.String()} }
+	ignored := func(d *ConfirmationDetail) { d.Status, d.IgnoredRecords = "IGNORED", []string{r.rr.String()} }
+	removed := func(d *ConfirmationDetail) { d.RemovedRecords = []string{r.rr.String()} }
+	all := []string{freezeCombiner, roleB, roleN}
+
+	for _, tc := range []struct {
+		name       string
+		state      RRState
+		recipients []string
+		answer     func(*ConfirmationDetail)
+		answered   []string
+		after      RRState
+	}{
+		{"an addition the voters applied", RRStatePending, all, applied, []string{freezeCombiner, roleB}, RRStateAccepted},
+		{"an addition the voters ignored", RRStatePending, all, ignored, []string{freezeCombiner, roleB}, RRStateIgnored},
+		{"a removal the voters did", RRStatePendingRemoval, all, removed, []string{freezeCombiner, roleB}, RRStateRemoved},
+		{"an addition b has not answered", RRStatePending, all, applied, []string{freezeCombiner}, RRStatePending},
+		{"a removal b has not answered", RRStatePendingRemoval, all, removed, []string{freezeCombiner}, RRStatePendingRemoval},
+		{"an addition with n its only recipient", RRStatePending, []string{roleN}, nil, nil, RRStatePending},
+		{"a removal with n its only recipient", RRStatePendingRemoval, []string{roleN}, nil, nil, RRStatePendingRemoval},
+		{"an addition with no recipients yet", RRStatePending, nil, nil, nil, RRStatePending},
+		{"a removal with no recipients yet", RRStatePendingRemoval, nil, nil, nil, RRStatePendingRemoval},
+	} {
+		r.activate(t, votes)
+		zdr, tr := r.tracked(t, tc.state, tc.recipients)
+		for _, from := range tc.answered {
+			r.confirm(zdr, from, tc.answer)
+		}
+		r.conf.instrActivated(t.Context(), zdr, r.zone)
+		if tr.State != tc.state {
+			t.Errorf("%s, while n votes: %v", tc.name, tr.State)
+		}
+		r.activate(t, noVote)
+		r.conf.instrActivated(t.Context(), zdr, r.zone)
+		if tr.State != tc.after {
+			t.Errorf("%s, when n has lost its vote: %v, want %v", tc.name, tr.State, tc.after)
+		}
+		if got, ok := tr.Confirmations[roleN]; ok {
+			t.Errorf("%s: n has said nothing, and its answer reads %q", tc.name, got.Status)
+		}
+	}
+
+	refused := func(d *ConfirmationDetail) {
+		d.Status, d.RejectedItems = "REJECTED", []RejectedItemInfo{{Record: r.rr.String(), Reason: "refused"}}
+	}
+	// n's rejection is no removal: as the only recipient, with no vote, it
+	// leaves the record where it was
+	r.activate(t, noVote)
+	zdr, tr := r.tracked(t, RRStatePendingRemoval, []string{roleN})
+	r.confirm(zdr, roleN, refused)
+	if tr.State != RRStatePendingRemoval {
+		t.Errorf("a removal n alone was to answer, and rejected with no vote: %v", tr.State)
+	}
+	// nor when n gains a vote: nobody has removed the record
+	r.activate(t, votes)
+	r.conf.instrActivated(t.Context(), zdr, r.zone)
+	if tr.State != RRStatePendingRemoval {
+		t.Errorf("a removal n alone was to answer, rejected with no vote, and n now votes: %v", tr.State)
+	}
+	r.activate(t, noVote)
+	// a rejection from before n had a vote decides nothing, by the project
+	// owner's ruling, also once n has one: the removal finishes when the
+	// voters have removed the record, and n is not asked again
+	zdr, tr = r.tracked(t, RRStatePendingRemoval, all)
+	r.confirm(zdr, roleN, refused)
+	r.activate(t, votes)
+	r.confirm(zdr, freezeCombiner, removed)
+	r.confirm(zdr, roleB, removed)
+	if tr.State != RRStateRemoved {
+		t.Errorf("a removal the voters did, that n rejected before it had a vote: %v", tr.State)
+	}
+}
+
+// A provider is down when another withdraws a record, and is then removed. It
+// loses its vote when the leader's step names the removal, not at the
+// activation. The record settles then, and a catch-up answer, which reads the
+// repo, stops naming what was withdrawn.
+func TestAWithdrawnRecordDoesNotComeBackOnceTheSilentProviderIsRemoved(t *testing.T) {
+	r := newLostVoteRig(t, "withdrawnback.reconcile.example.")
+	told := 0
+	r.store.onActive = func(string) { told++ }
+	r.activate(t, freezeAt(t, 42, "v", "a,b,n", ""))
+	zdr, err := NewZoneDataRepo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	zdr.AddConfirmedRR(r.zone, r.us, r.rr)
+	zdr.markOwnState(r.zone, true, "")
+	tr := zdr.trackedRR(r.zone, r.us, dns.TypeNS, r.rr.String())
+	tr.State, tr.DistributionID, tr.ExpectedRecipients = RRStatePendingRemoval, "d", []string{freezeCombiner, roleB, roleN}
+	named := func() bool {
+		zu := r.conf.buildCatchUpAnswer(zdr, r.zone, &CatchUp{Request: "r1", Reason: "start"})
+		return slices.Contains(ops(zu)["NS"].Records, r.rr.String())
+	}
+	removed := func(d *ConfirmationDetail) { d.RemovedRecords = []string{r.rr.String()} }
+	r.confirm(zdr, freezeCombiner, removed)
+	r.confirm(zdr, roleB, removed)
+	if tr.State != RRStatePendingRemoval || !named() {
+		t.Fatalf("with n down and still voting: %v, named %v", tr.State, named())
+	}
+
+	// the serial that has no record of n: nothing names its removal yet, and
+	// the record waits on
+	r.activate(t, jAt(t, 43, `servers="a,b" nsmgmt="agent" suffix="w"`, freezeRecords[:2]...))
+	r.conf.instrActivated(t.Context(), zdr, r.zone)
+	if tr.State != RRStatePendingRemoval {
+		t.Fatalf("at the activation, before the removal's step: %v", tr.State)
+	}
+
+	// the step names the removal: the engine is told, and looks again
+	told = 0
+	setRemoval := func(step int) {
+		t.Helper()
+		if err := r.store.update(string(r.zone), func(z *zoneSerials) error {
+			z.Removals = []Removal{{Label: "n", Identity: roleN, Step: step}}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setRemoval(1)
+	if told != 1 {
+		t.Errorf("a removal under way that starts was told %d times, want once", told)
+	}
+	r.conf.instrActivated(t.Context(), zdr, r.zone)
+	if tr.State != RRStateRemoved || named() {
+		t.Errorf("when the removal has taken n's vote: %v, named %v", tr.State, named())
+	}
+	// the same member still leaving, at the next step, is nothing new
+	told = 0
+	setRemoval(2)
+	if told != 0 {
+		t.Errorf("a removal already under way was told again %d times", told)
+	}
+}
+
 // A member with no vote can answer after the voters have settled the zone's
 // CSYNC (allRecipientsConfirmed). Whatever it answers ends the wait for it at
 // once, so the NOTIFY does not wait out the time-out for a member that has

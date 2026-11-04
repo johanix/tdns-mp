@@ -216,9 +216,9 @@ func respond(u *SynchedDataUpdate, resp *AgentMsgResponse) {
 }
 
 // askActivated asks the data engine to handle what waits for the zone's
-// active serial (instrActivated), when it changes, becomes known or goes.
-// A full queue leaves it to the engine's next own-read tick
-// (releaseActivated).
+// active serial (instrActivated), when it changes, becomes known or goes, or
+// a removal under way starts or ends. A full queue leaves it to the engine's
+// next own-read tick (releaseActivated), and its tracking tick (settleTracked).
 func (conf *Config) askActivated(zone ZoneName) {
 	msgQs := conf.InternalMp.MsgQs
 	if msgQs == nil || msgQs.SynchedDataCmd == nil {
@@ -254,10 +254,12 @@ func (conf *Config) releaseActivated(ctx context.Context, zdr *ZoneDataRepo) {
 // 3.3): the distributions of others that the zone keeps, in order, by the
 // active serial now (those made under it are taken, judged by the
 // instructions active now; those made under a lower one are refused; those
-// made under a higher one stay), and then what this agent sends again to
-// the peers that answered "not yet" (resendInStep). Run by the data engine,
-// which alone takes from the lists. A zone whose serials this agent no
-// longer keeps drops what it kept.
+// made under a higher one stay). A member may have lost its vote, so the
+// zone's tracked records are looked at again (settleTracked), and then what
+// this agent sends again to the peers that answered "not yet" (resendInStep)
+// goes: it is read from the repo, and must not name a removal just settled.
+// Run by the data engine, which alone takes from the lists. A zone whose
+// serials this agent no longer keeps drops what it kept.
 func (conf *Config) instrActivated(ctx context.Context, zdr *ZoneDataRepo, zone ZoneName) {
 	k := conf.InternalMp.Kept
 	if entries := k.entries(string(zone), listKept); len(entries) > 0 {
@@ -277,6 +279,7 @@ func (conf *Config) instrActivated(ctx context.Context, zdr *ZoneDataRepo, zone 
 			}
 		}
 	}
+	zdr.settleTracked(zone)
 	conf.resendInStep(zdr, zone)
 }
 
