@@ -610,7 +610,8 @@ func (b *signerAddBook) lookForKeys(conf *Config, zone, id string, k *joinerKeys
 		lg.Warn("a nameserver of the zone does not answer; a new signer's keys step does not wait for it, and waits at least the TTL of the zone's copy", "zone", zone, "provider", id, "nameservers", silent, "err", seen.why)
 	}
 	if cleared {
-		lg.Info("the zone's nameservers serve a new signer's keys; its keys step waits the propagation delay and their TTL", "zone", zone, "provider", id, "ttl", ttl)
+		delay, _ := conf.delegationNotifyWaitAnnounced(zone)
+		lg.Info("the zone's nameservers serve a new signer's keys; its keys step waits the propagation delay and their TTL", "zone", zone, "provider", id, "delay", delay, "ttl", ttl)
 	}
 	conf.askThaw(zone)
 }
