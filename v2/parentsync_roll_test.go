@@ -1400,4 +1400,9 @@ func TestSeveralKEYsSendNothingWithAKeyTheParentNoLongerTrusts(t *testing.T) {
 	if got, sent := r.explicitSync(t); sent || !strings.Contains(got, "does not trust key") {
 		t.Errorf("a key the parent no longer trusts signed: sent %v, %q", sent, got)
 	}
+	// and that word ends this lead's: the next sync is held for the key, and
+	// owed, rather than failing at the send again (CodeRabbit at bba7a10)
+	if got, sent := r.explicitSync(t); sent || !strings.Contains(got, "is not heard in this lead") {
+		t.Errorf("the sync after the parent's refusal: sent %v, %q", sent, got)
+	}
 }
