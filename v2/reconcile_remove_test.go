@@ -915,6 +915,49 @@ func TestAnExcusedLeaversNSStepComesFirstAndItsPausedRolloversResume(t *testing.
 	}
 }
 
+// A signer that serves nothing leaves the key confirmers at the removal's first
+// step. A DNSKEY distribution waiting only for it goes on then, as at the step
+// that takes out a signer that serves too. The look runs whenever the step's
+// sets change here (onSetsChanged), which a member that takes the leader's
+// step also runs, without the step's start (CodeRabbit at 00eb7cb).
+func TestADNSKEYWaitForALeaverEndsWhenTheSetsTakeItOutOfTheKeyConfirmers(t *testing.T) {
+	r := newLeaverRigAt(t, "signeronly.confirmers.remove.example.", removalAt(t, 41, "agent", "a,b", "a,n"), removalAt(t, 42, "agent", "a,b", "a"),
+		parentSeen{ns: []string{"ns1.a.example.", "ns1.b.example."}, nsTTL: 600, ds: []uint16{1, 2}, dsTTL: 900})
+	tm := r.conf.InternalMp.MPTransport
+	tm.noRoleTimeout = time.Hour // the test ends the waits itself
+	zone := ZoneName(r.zone)
+	pending := func(id string) bool {
+		tm.dnskeyPropMu.Lock()
+		defer tm.dnskeyPropMu.Unlock()
+		_, ok := tm.pendingDnskeyPropagations[id]
+		return ok
+	}
+	tm.TrackDnskeyPropagation(t.Context(), zone, "d1", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.ProcessDnskeyConfirmation("d1", roleB, transport.ConfirmSuccess.String(), nil, nil)
+	if !pending("d1") {
+		t.Fatal("the distribution did not wait for n while n confirms keys")
+	}
+	r.next()
+	if !slices.Equal(r.taken(), []string{"names"}) {
+		t.Fatalf("the steps taken: %v", r.taken())
+	}
+	if slices.Contains(providerLabels(r.sets().KeyConfirmers), "n") {
+		t.Fatalf("n confirms on: %+v", r.sets())
+	}
+	if pending("d1") {
+		t.Error("the distribution waits on for a signer that left the key confirmers at the first step")
+	}
+	// a member that takes the step has its sets change, not the step's start
+	tm.TrackDnskeyPropagation(t.Context(), zone, "d2", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.ProcessDnskeyConfirmation("d2", roleB, transport.ConfirmSuccess.String(), nil, nil)
+	if mpzd, ok := Zones.Get(r.zone); ok {
+		r.conf.onSetsChanged(mpzd, true)
+	}
+	if pending("d2") {
+		t.Error("a change of the sets did not end the wait for the leaver")
+	}
+}
+
 func TestALeaverExcusedDuringTheReconciliationIsPlannedAsExcused(t *testing.T) {
 	logs := captureLog(t)
 	r := newLeaverRig(t, "excusedlater.remove.example.", "agent")

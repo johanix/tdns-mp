@@ -1120,6 +1120,9 @@ func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack b
 		if conf.csyncAwaited(mpzd.ZoneName) {
 			conf.askCsyncProgress(nil, ZoneName(mpzd.ZoneName))
 		}
+		// and a DNSKEY distribution waiting for a leaver the sets no longer
+		// name a key confirmer goes on
+		conf.lookAgainAtDnskeyWaits(ZoneName(mpzd.ZoneName))
 	}
 	givenBack = conf.followParentSyncParam(mpzd)
 	// A refresh runs the give-back itself, after PostRefresh; a change of

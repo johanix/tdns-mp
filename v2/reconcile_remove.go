@@ -230,7 +230,6 @@ func (l leaver) steps(p planView) []plannedStep {
 				},
 				start: func(conf *Config, zone string) {
 					logRemovalStep(zone, id, "2 (its NS): it leaves the key confirmers", "")
-					conf.lookAgainAtDnskeyWaits(ZoneName(zone), AgentId(id))
 				},
 			})
 		}
@@ -815,12 +814,21 @@ func stillConfirmsKeys(zone ZoneName, id AgentId) bool {
 	return isAmong(identities(rolesForZone(zone).KeyConfirmers), id)
 }
 
-// lookAgainAtDnskeyWaits has the zone's DNSKEY distributions look again at the
-// provider a step took out of the key confirmers: a rollover paused on it
-// resumes (design 5.2).
-func (conf *Config) lookAgainAtDnskeyWaits(zone ZoneName, left AgentId) {
-	if tm := conf.InternalMp.MPTransport; tm != nil {
-		tm.lookAgainAtDnskeyPropagations(zone, left)
+// lookAgainAtDnskeyWaits has the zone's DNSKEY distributions look again at each
+// provider being removed that is no longer a key confirmer: a rollover paused
+// on it resumes (design 5.2). It runs whenever the step's sets change here
+// (onSetsChanged), at the leader and at a member that takes the step, so
+// whichever step takes the provider out: a signer that serves nothing leaves
+// at the first.
+func (conf *Config) lookAgainAtDnskeyWaits(zone ZoneName) {
+	tm := conf.InternalMp.MPTransport
+	if tm == nil {
+		return
+	}
+	for _, id := range conf.InternalMp.Instructions.removalIdentities(string(zone)) {
+		if !stillConfirmsKeys(zone, AgentId(id)) {
+			tm.lookAgainAtDnskeyPropagations(zone, AgentId(id))
+		}
 	}
 }
 
