@@ -113,6 +113,57 @@ func TestALostWithdrawalIsSweptWhenTheZoneIsDone(t *testing.T) {
 	}
 }
 
+// At a real combiner a swept KEY takes its stored publish instruction with it:
+// kept, a reapply puts the KEY back, to be served beside the zone's key at a
+// later take-up. A purge of another type leaves the KEY and its instruction.
+func TestASweptKEYDoesNotComeBackAtAReapply(t *testing.T) {
+	mpzd, hdb := csyncCombinerZone(t, "reapply.sweep.combiner.example.", true, true)
+	zone := mpzd.ZoneName
+	local := map[string]bool{csyncOurAgent: true}
+	key := testSig0Key(t, newMPTestKeyDB(t), zone).key
+	resp := CombinerProcessUpdate(&CombinerSyncRequest{SenderID: csyncLeaderA, DeliveredBy: csyncOurAgent, Zone: zone,
+		Operations:     []core.RROperation{{Operation: "replace", RRtype: "KEY", Records: []string{key.String()}}},
+		Publish:        &core.PublishInstruction{KEYRRs: []string{key.String()}, Locations: []string{"at-apex"}},
+		DistributionID: nextDistributionID(), Timestamp: time.Now()}, nil, local, hdb, nil)
+	if resp.Status != "ok" {
+		t.Fatalf("the leader's KEY: %s: %s (%v)", resp.Status, resp.Message, resp.RejectedItems)
+	}
+	sweep := func(rrtype uint16) {
+		t.Helper()
+		zu := sweepPurge(ZoneName(zone), csyncLeaderA, rrtype)
+		resp := CombinerProcessUpdate(&CombinerSyncRequest{SenderID: string(zu.AgentId), DeliveredBy: csyncOurAgent, Zone: zone,
+			Operations: zu.Operations, Publish: zu.Publish, Removal: zu.Withdraw != nil,
+			DistributionID: nextDistributionID(), Timestamp: time.Now()}, nil, local, hdb, nil)
+		if resp.Status != "ok" {
+			t.Fatalf("the purge of %s: %s: %s", dns.TypeToString[rrtype], resp.Status, resp.Message)
+		}
+	}
+	holds := func() int { return len(mpzd.MP.AgentContributions[csyncLeaderA][zone][dns.TypeKEY].RRs) }
+	stored := func() *StoredPublishInstruction {
+		t.Helper()
+		s, err := GetPublishInstruction(hdb, zone, csyncLeaderA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+
+	sweep(dns.TypeCDS)
+	if holds() != 1 || stored() == nil {
+		t.Fatalf("a purge of CDS: %d KEYs held, instruction %+v", holds(), stored())
+	}
+	sweep(dns.TypeKEY)
+	if holds() != 0 || stored() != nil {
+		t.Errorf("after the sweep: %d KEYs held, instruction %+v", holds(), stored())
+	}
+	if _, err := CombinerReapplyContributions(zone, hdb); err != nil {
+		t.Fatal(err)
+	}
+	if holds() != 0 {
+		t.Errorf("the reapply put the swept KEY back: %d held", holds())
+	}
+}
+
 // The combiner is asked first. A contribution it could not be asked to drop
 // stays here with its tracking, the record of what is owed, and the other
 // purges go on. The tick asks again once roll-retry has passed, for as long as
