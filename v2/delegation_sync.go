@@ -429,10 +429,6 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 	// Room for more than the two NOTIFYs a sync sends (CSYNC, CDS): the sync
 	// must not wait for a reader that comes only when it has returned.
 	taken := make(chan tdns.NotifyRequest, 8)
-	// with several KEYs at the apex, only a key the parent trusts now signs
-	if terr := conf.trustBeforeSigning(runCtx, ds); terr != nil {
-		return "", 0, tdns.UpdateResult{}, false, terr
-	}
 	msg, rcode, ur, err = conf.sendDelegationSync(runCtx, hdb.KeyDB, taken, ds, syncstate, imr)
 	var notifies []tdns.NotifyRequest
 	for len(taken) > 0 {

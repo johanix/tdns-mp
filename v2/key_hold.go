@@ -678,7 +678,15 @@ func (conf *Config) sendDelegationSync(ctx context.Context, kdb *tdns.KeyDB, not
 	syncstate tdns.DelegationSyncStatus, imr *tdns.Imr) (string, uint8, tdns.UpdateResult, error) {
 	zd := ds.ZoneData
 	if !syncstate.InSync && mpLeaderSync(conf, ds) {
-		if why := conf.syncKeyHold(ctx, ZoneName(ds.ZoneName)); why != "" {
+		why := conf.syncKeyHold(ctx, ZoneName(ds.ZoneName))
+		// with several KEYs at the apex, only a key the parent trusts now
+		// signs an UPDATE (trustBeforeSigning); a NOTIFY needs none
+		if why == "" {
+			if err := conf.trustBeforeSigning(ctx, ds); err != nil {
+				why = err.Error()
+			}
+		}
+		if why != "" {
 			target := parentNotifyTarget(ctx, conf, zd)
 			if target == nil {
 				return "", 0, tdns.UpdateResult{}, fmt.Errorf("the zone's SIG(0) key holds an UPDATE (%s) and the parent gave no NOTIFY target", why)

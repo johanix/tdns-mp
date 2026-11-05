@@ -111,6 +111,11 @@ type InstrStamp struct {
 	Step        *InstrStep     `json:"step,omitempty"`
 	StepHeld    bool           `json:"step_held,omitempty"`
 	Removals    []InstrRemoval `json:"removals,omitempty"`
+	// RollOwed is since when the zone's SIG(0) key roll is owed at the
+	// sender, and RollDone when one was last done (plan S17b): an owed roll
+	// outlives the removal and the lead until it is done.
+	RollOwed time.Time `json:"roll_owed,omitzero"`
+	RollDone time.Time `json:"roll_done,omitzero"`
 }
 
 // InstrStep is a step of the reconciliation as an agent holds it (plan

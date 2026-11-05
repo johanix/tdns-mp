@@ -101,6 +101,13 @@ type zoneSerials struct {
 	// StepFloor is what the nameservers served at the first check of this
 	// agent's own upstream's step (other_keys.go): nil from that step's end.
 	StepFloor *stepFloor `json:"step_floor,omitempty"`
+	// RollOwed is since when the zone's SIG(0) key roll is owed, and
+	// RollDone when one was last done, as this agent has them or has heard
+	// a voting member tell them (plan S17b). An owed roll outlives the
+	// removal and the lead until it is done: the next leader owes it (the
+	// project owner, 2026-11-05).
+	RollOwed time.Time `json:"roll_owed,omitzero"`
+	RollDone time.Time `json:"roll_done,omitzero"`
 	// Pending: a transition to the active serial may be under way, and this
 	// agent holds no step's sets. It moved straight to the active serial
 	// (S7) or knew it by another's word (S9): it hands its parts nothing
@@ -1146,6 +1153,9 @@ func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) {
 		if conf.csyncAwaited(mpzd.ZoneName) {
 			conf.askCsyncProgress(nil, ZoneName(mpzd.ZoneName))
 		}
+		// and a DNSKEY distribution waiting for a leaver the sets no longer
+		// name a key confirmer goes on
+		conf.lookAgainAtDnskeyWaits(ZoneName(mpzd.ZoneName))
 	}
 	conf.followParentSyncParam(mpzd)
 	// asked once the parentsync option follows the step's sets: a step that
@@ -1156,4 +1166,49 @@ func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) {
 	}
 	conf.followNSmgmt(mpzd)
 	conf.handOverToParts(mpzd.ZoneName) // the agent's combiner and signer act by the sets too (S10, S11)
+}
+
+// rollDebt is since when the zone's roll is owed here, and when one was last
+// done; zero times for none.
+func (s *InstructionStore) rollDebt(zone string) (owed, done time.Time) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, z := s.zoneLocked(dns.Fqdn(zone)); z != nil {
+		return z.RollOwed, z.RollDone
+	}
+	return
+}
+
+// noteRollDebt keeps a roll owed since owed and one done at done, as this
+// agent comes to know them: a roll done at or after the roll owed ends it, and
+// a roll owed counts only after the last one done, so an older telling does not
+// raise a roll done again. A zero time tells nothing. Written only when it
+// changes something.
+func (s *InstructionStore) noteRollDebt(zone string, owed, done time.Time) error {
+	if s == nil {
+		return nil
+	}
+	merge := func(curOwed, curDone time.Time) (time.Time, time.Time) {
+		if done.After(curDone) {
+			curDone = done
+		}
+		if curOwed.IsZero() {
+			curOwed = owed
+		}
+		if !curOwed.IsZero() && !curDone.Before(curOwed) {
+			curOwed = time.Time{}
+		}
+		return curOwed, curDone
+	}
+	curOwed, curDone := s.rollDebt(zone)
+	if o, d := merge(curOwed, curDone); o.Equal(curOwed) && d.Equal(curDone) {
+		return nil
+	}
+	return s.update(dns.Fqdn(zone), func(z *zoneSerials) error {
+		z.RollOwed, z.RollDone = merge(z.RollOwed, z.RollDone)
+		return nil
+	})
 }
