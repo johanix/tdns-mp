@@ -203,7 +203,7 @@ func TestTransportBoundary_HelloRejection(t *testing.T) {
 		ctx.Peer = env.Bob.Bridge.PeerRegistry.GetOrCreate(roleless)
 		err := env.Bob.Bridge.Router.Route(ctx, transport.MessageType("sync"))
 		body, _ := ctx.Data["response"].([]byte)
-		if err == nil && !strings.Contains(string(body), "not a voting member") {
+		if err == nil || !strings.Contains(string(body), "not a voting member") {
 			t.Errorf("the SYNC of a member with no role was not refused: err %v, response %s", err, body)
 		}
 		if _, leaked := recvMsgWithin(t, env.Bob.MsgQs.Msg, 100*time.Millisecond); leaked {

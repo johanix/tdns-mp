@@ -765,16 +765,38 @@ func (conf *Config) fetchInstructions(zone string, sd SerialDigest, member, why 
 			lg.Warn("a member's answer with the zone's instructions is not taken", "zone", zone, "serial", sd.Serial, "member", member, "err", err)
 			return
 		}
-		switch err := conf.InternalMp.Instructions.Hold(zone, in); {
-		case err == nil:
-			lg.Info("a serial of the zone's instructions is held, fetched from a member", "zone", zone, "serial", sd.Serial, "member", member)
-		case errors.Is(err, errHeldAlready):
-		default:
-			lg.Warn("a serial of the zone's instructions fetched from a member is not kept", "zone", zone, "serial", sd.Serial, "member", member, "err", err)
-			return
+		if conf.holdFetched(zone, in, member) {
+			conf.askThaw(zone)
 		}
-		conf.askThaw(zone)
 	}()
+}
+
+// holdFetched keeps in, a serial of the zone's instructions fetched from
+// member (Hold), and reports whether the zone holds that serial now. With no
+// active serial known the zone reads its newest serial (design 3.4), so a
+// serial above the others moves what the zone reads, and what follows such a
+// move runs here: the refresh that brings the serial later, and the serial's
+// becoming known, find nothing changed. Without it the zone stays in its group
+// under the serial it read before, gossip for its new group is not taken, and
+// a member with no role never learns the leader (plan S15).
+func (conf *Config) holdFetched(zone string, in *Instructions, member string) bool {
+	s := conf.InternalMp.Instructions
+	before := s.reading(zone)
+	switch err := s.Hold(zone, in); {
+	case err == nil:
+		lg.Info("a serial of the zone's instructions is held, fetched from a member", "zone", zone, "serial", in.Serial, "member", member)
+	case errors.Is(err, errHeldAlready):
+		return true
+	default:
+		lg.Warn("a serial of the zone's instructions fetched from a member is not kept", "zone", zone, "serial", in.Serial, "member", member, "err", err)
+		return false
+	}
+	if after := s.reading(zone); !sameInstructions(before, after) {
+		if mpzd, ok := Zones.Get(zone); ok && mpzd != nil && mpzd.Ready {
+			mpzd.onActiveChanged(conf.InternalMp.MPTransport, before, after)
+		}
+	}
+	return true
 }
 
 // instructionsAsk is the instructions RFI's records: the serial and digest

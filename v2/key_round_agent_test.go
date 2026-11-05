@@ -503,3 +503,45 @@ func TestAnUnreadableParentKeepsAskingAndMakesNoKey(t *testing.T) {
 		t.Error("with the parent known, no key was made")
 	}
 }
+
+// The hold's line is hourly, but a new reason is logged at once: a line from
+// before a roll must not stand for a hold that comes after it. Several KEYs
+// are named as such, not as a key not held.
+func TestTheKeyHoldLogsWhenItsReasonChanges(t *testing.T) {
+	r := newKeyRoundRig(t, "reason.hold.example.", "UPDATE")
+	local := testSig0Key(t, r.mpzd.KeyDB, string(r.zone))
+	other := testSig0Key(t, newMPTestKeyDB(t), string(r.zone))
+	r.publish(t, other)
+	r.caughtUp()
+	explicit := func() string {
+		t.Helper()
+		resp := make(chan tdns.DelegationSyncStatus, 1)
+		r.q <- tdns.DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: string(r.zone), ZoneData: r.mpzd.ZoneData, Response: resp}
+		got, ok := recvWithin(resp, 2*time.Second)
+		if !ok {
+			t.Fatal("no answer to the sync")
+		}
+		return got.Msg
+	}
+	lines := func() int {
+		return strings.Count(r.alog.String(), "the sync with the parent waits for the zone's SIG(0) key")
+	}
+	if got := explicit(); !strings.Contains(got, "(not held)") {
+		t.Errorf("the answer for a key not held: %q", got)
+	}
+	explicit()
+	if n := lines(); n != 1 {
+		t.Errorf("%d lines for one reason, want 1\n%s", n, r.alog)
+	}
+	r.publish(t, local, other)
+	if got := explicit(); !strings.Contains(got, "(the zone publishes several KEYs)") {
+		t.Errorf("the answer for several KEYs: %q", got)
+	}
+	explicit()
+	if n := lines(); n != 2 {
+		t.Errorf("%d lines after the reason changed, want 2\n%s", n, r.alog)
+	}
+	if !strings.Contains(r.alog.String(), "reason=\"the zone publishes several KEYs\"") {
+		t.Errorf("no line names several KEYs:\n%s", r.alog)
+	}
+}
