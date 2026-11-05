@@ -1249,15 +1249,12 @@ func TestAPurgeOlderThanTheLastKEYTakesNothingBack(t *testing.T) {
 	if resp.Status != "ok" {
 		t.Fatalf("the KEY: %s: %s (%v)", resp.Status, resp.Message, resp.RejectedItems)
 	}
-	purge := func(when time.Time) {
+	purge := func(when time.Time) *CombinerSyncResponse {
 		t.Helper()
 		zu := keyPurge(ZoneName(zone), csyncLeaderA)
-		resp := CombinerProcessUpdate(&CombinerSyncRequest{SenderID: string(zu.AgentId), DeliveredBy: csyncOurAgent, Zone: zone,
+		return CombinerProcessUpdate(&CombinerSyncRequest{SenderID: string(zu.AgentId), DeliveredBy: csyncOurAgent, Zone: zone,
 			Operations: zu.Operations, Publish: zu.Publish, Removal: zu.Withdraw != nil,
 			DistributionID: nextDistributionID(), Timestamp: when}, nil, local, hdb, nil)
-		if resp.Status != "ok" {
-			t.Fatalf("the purge: %s: %s", resp.Status, resp.Message)
-		}
 	}
 	holds := func() int { return len(mpzd.MP.AgentContributions[csyncLeaderA][zone][dns.TypeKEY].RRs) }
 	stored := func() *StoredPublishInstruction {
@@ -1269,11 +1266,17 @@ func TestAPurgeOlderThanTheLastKEYTakesNothingBack(t *testing.T) {
 		return s
 	}
 
-	purge(at.Add(-time.Minute))
+	// the older drop is refused, not told as made: its agent asks again
+	// (CodeRabbit at 290cd90)
+	if resp := purge(at.Add(-time.Minute)); resp.Status == "ok" || len(resp.RejectedItems) != 1 {
+		t.Errorf("the older purge: %s: %s (%v)", resp.Status, resp.Message, resp.RejectedItems)
+	}
 	if holds() != 1 || stored() == nil {
 		t.Errorf("after an older purge: %d KEYs held, instruction %+v", holds(), stored())
 	}
-	purge(at.Add(time.Minute))
+	if resp := purge(at.Add(time.Minute)); resp.Status != "ok" {
+		t.Fatalf("the newer purge: %s: %s", resp.Status, resp.Message)
+	}
 	if holds() != 0 || stored() != nil {
 		t.Errorf("after a newer purge: %d KEYs held, instruction %+v", holds(), stored())
 	}

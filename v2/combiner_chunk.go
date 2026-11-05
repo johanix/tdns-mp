@@ -1334,6 +1334,15 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 					"zone", zonename, "sender", req.SenderID, "rrtype", op.RRtype,
 					"this", req.Timestamp.UTC().Format(time.RFC3339Nano), "thisDistrib", req.DistributionID,
 					"applied", applied.Time.UTC().Format(time.RFC3339Nano), "appliedDistrib", applied.DistID)
+				// A KEY's drop skipped so has dropped nothing: it is refused,
+				// not told as done, and the agent asks again, later than the
+				// KEY that overtook it (keyPurge, plan S17a)
+				if req.Removal && rrtype == dns.TypeKEY {
+					rejectedItems = append(rejectedItems, RejectedItem{
+						Record: fmt.Sprintf("(replace %s)", op.RRtype),
+						Reason: "the drop is older than the KEY applied here: not made",
+					})
+				}
 				continue
 			}
 
