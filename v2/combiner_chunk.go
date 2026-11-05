@@ -572,20 +572,22 @@ func (mpzd *MPZoneData) combinerApplyPublishInstruction(req *CombinerSyncRequest
 	zone := req.Zone
 	senderID := req.SenderID
 
+	// An instruction older than the sender's last KEY is not applied, as the
+	// replace that came with it was not: it would put an older KEY back, or
+	// take the newer one away, and be kept in the newer one's place
+	if stale, applied := staleCombinerReplace(req, zone, dns.TypeKEY); stale {
+		lgCombiner.Warn("ignored a stale publish instruction: older than the KEY applied", "zone", zone, "sender", senderID,
+			"this", req.Timestamp.UTC().Format(time.RFC3339Nano), "thisDistrib", req.DistributionID,
+			"applied", applied.Time.UTC().Format(time.RFC3339Nano), "appliedDistrib", applied.DistID)
+		return
+	}
+
 	var storedInstr *StoredPublishInstruction
 	if hdb != nil {
 		storedInstr, _ = GetPublishInstruction(hdb, zone, senderID)
 	}
 
 	if len(instr.Locations) == 0 {
-		// A retraction older than the sender's last KEY takes nothing back,
-		// as the empty replace that came with it did not
-		if stale, applied := staleCombinerReplace(req, zone, dns.TypeKEY); stale {
-			lgCombiner.Warn("ignored a stale retraction of a KEY: older than the REPLACE applied", "zone", zone, "sender", senderID,
-				"this", req.Timestamp.UTC().Format(time.RFC3339Nano), "thisDistrib", req.DistributionID,
-				"applied", applied.Time.UTC().Format(time.RFC3339Nano), "appliedDistrib", applied.DistID)
-			return
-		}
 		if _, _, _, err := mpzd.replaceAndPublish(senderID, zone, dns.TypeKEY, nil); err != nil {
 			lgCombiner.Error("publish instruction: retracting the at-apex KEY failed", "zone", zone, "sender", senderID, "err", err)
 		}
