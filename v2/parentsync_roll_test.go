@@ -1230,3 +1230,51 @@ func asKEY(rr dns.RR) *dns.KEY {
 	k, _ := rr.(*dns.KEY)
 	return k
 }
+
+// A purge older than the origin's last KEY REPLACE takes nothing back: the
+// queue can deliver it after that REPLACE, and its empty replace is refused
+// as stale, so its retraction must not take the newer KEY and its instruction
+// (an agent that lost the lead and quickly had it back). One newer than the
+// REPLACE drops both.
+func TestAPurgeOlderThanTheLastKEYTakesNothingBack(t *testing.T) {
+	mpzd, hdb := csyncCombinerZone(t, "roll.stalepurge.combiner.example.", true, true)
+	zone := mpzd.ZoneName
+	local := map[string]bool{csyncOurAgent: true}
+	key := testSig0Key(t, newMPTestKeyDB(t), zone).key
+	at := time.Now()
+	resp := CombinerProcessUpdate(&CombinerSyncRequest{SenderID: csyncLeaderA, DeliveredBy: csyncOurAgent, Zone: zone,
+		Operations:     []core.RROperation{{Operation: "replace", RRtype: "KEY", Records: []string{key.String()}}},
+		Publish:        &core.PublishInstruction{KEYRRs: []string{key.String()}, Locations: []string{"at-apex"}},
+		DistributionID: nextDistributionID(), Timestamp: at}, nil, local, hdb, nil)
+	if resp.Status != "ok" {
+		t.Fatalf("the KEY: %s: %s (%v)", resp.Status, resp.Message, resp.RejectedItems)
+	}
+	purge := func(when time.Time) {
+		t.Helper()
+		zu := keyPurge(ZoneName(zone), csyncLeaderA)
+		resp := CombinerProcessUpdate(&CombinerSyncRequest{SenderID: string(zu.AgentId), DeliveredBy: csyncOurAgent, Zone: zone,
+			Operations: zu.Operations, Publish: zu.Publish, Removal: zu.Withdraw != nil,
+			DistributionID: nextDistributionID(), Timestamp: when}, nil, local, hdb, nil)
+		if resp.Status != "ok" {
+			t.Fatalf("the purge: %s: %s", resp.Status, resp.Message)
+		}
+	}
+	holds := func() int { return len(mpzd.MP.AgentContributions[csyncLeaderA][zone][dns.TypeKEY].RRs) }
+	stored := func() *StoredPublishInstruction {
+		t.Helper()
+		s, err := GetPublishInstruction(hdb, zone, csyncLeaderA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+
+	purge(at.Add(-time.Minute))
+	if holds() != 1 || stored() == nil {
+		t.Errorf("after an older purge: %d KEYs held, instruction %+v", holds(), stored())
+	}
+	purge(at.Add(time.Minute))
+	if holds() != 0 || stored() != nil {
+		t.Errorf("after a newer purge: %d KEYs held, instruction %+v", holds(), stored())
+	}
+}
