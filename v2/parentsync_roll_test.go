@@ -748,7 +748,7 @@ func TestAFailedAddLeavesTheOldKeyInUse(t *testing.T) {
 	if ro == nil || ro.phase != rollMade || ro.failures != 1 || ro.newKeyid != k2 {
 		t.Fatalf("the roll after a failed add: %+v", ro)
 	}
-	if line := r.conf.zoneKeyLine(r.ctx, r.zone); !strings.HasPrefix(line, "roll owed, next try at ") {
+	if line := r.conf.zoneKeyLine(r.ctx, r.zone); !strings.HasPrefix(line, "roll owed since ") || !strings.Contains(line, ", next try at ") {
 		t.Errorf("the status after a failed add: %q", line)
 	}
 	if !strings.Contains(r.alog.String(), "the roll of the zone's SIG(0) key failed, trying again") {
@@ -862,7 +862,7 @@ func TestARollIsHeldWhileTheZoneIsAgreeing(t *testing.T) {
 	if u := r.parent.updates(); len(u) != 0 {
 		t.Fatalf("the parent got %+v during the freeze", u)
 	}
-	if line := r.conf.zoneKeyLine(r.ctx, r.zone); line != "roll owed, held until the zone's transition is done" {
+	if line := r.conf.zoneKeyLine(r.ctx, r.zone); !strings.HasPrefix(line, "roll owed since ") || !strings.HasSuffix(line, ", held until the zone's transition is done") {
 		t.Errorf("the status during the freeze: %q", line)
 	}
 	r.pass(t, syncStep)
@@ -994,7 +994,7 @@ func TestARollARemovalOwesIsMadeByItsPasses(t *testing.T) {
 	if ro == nil || ro.phase != rollOwed || ro.newKeyid != 0 {
 		t.Fatalf("the roll owed: %+v", ro)
 	}
-	if line := r.conf.rollLine(r.mpzd.KeyDB, r.zone); line != "roll owed, the new key is not made yet" {
+	if line := r.conf.rollLine(r.mpzd.KeyDB, r.zone); !strings.HasPrefix(line, "roll owed since ") || !strings.HasSuffix(line, ", the new key is not made yet") {
 		t.Errorf("the status: %q", line)
 	}
 	r.conf.oweRoll(r.zone) // a new leader's turn, or a restart's: no second
@@ -1045,6 +1045,74 @@ func TestARollOwedWaitsForTheParentsWordOnTheKey(t *testing.T) {
 	r.pass(t, syncStep)
 	if ro = r.roll(t); ro == nil || ro.phase == rollOwed || ro.newKeyid == 0 {
 		t.Errorf("the roll at the pass after the parent's word: %+v", ro)
+	}
+}
+
+// debtStore gives the rig an instruction store of its own, which keeps the
+// roll owed.
+func debtStore(t *testing.T, conf *Config) *InstructionStore {
+	t.Helper()
+	_, hdb := keptDB(t)
+	s := loadStore(t, hdb)
+	conf.InternalMp.Instructions = s
+	return s
+}
+
+// The roll owed is kept with the zone's serials, told in this agent's stamp,
+// and ended when the roll is done (here: a zone with no key to roll), whatever
+// its phase; the roll done is told too (plan S17b; the project owner,
+// 2026-11-05).
+func TestARollOwedIsKeptAndToldUntilItIsDone(t *testing.T) {
+	r := newKeyRoundRig(t, "debt.nokey.roll.example.", "NOTIFY")
+	t.Cleanup(r.conf.InternalMp.sig0Rolls.wait)
+	r.caughtUp()
+	s := debtStore(t, r.conf)
+	r.conf.oweRoll(r.zone)
+	owed, _ := s.rollDebt(string(r.zone))
+	if owed.IsZero() {
+		t.Fatal("the roll owed is not kept with the zone's serials")
+	}
+	if st, ok := s.stampOf(string(r.zone)); !ok || !st.RollOwed.Equal(owed) {
+		t.Errorf("the stamp does not tell the roll owed: %+v", st)
+	}
+	waitUntil(t, "a pass of the roll still runs", func() bool { return r.conf.rollOnce(r.ctx, r.zone, syncStep) })
+	owed, done := s.rollDebt(string(r.zone))
+	if !owed.IsZero() || done.IsZero() {
+		t.Errorf("after the roll is done: owed %v, done %v", owed, done)
+	}
+	if st, _ := s.stampOf(string(r.zone)); !st.RollOwed.IsZero() || st.RollDone.IsZero() {
+		t.Errorf("the stamp after the roll is done: owed %v, done %v", st.RollOwed, st.RollDone)
+	}
+}
+
+// A leader with a roll owed and none on its disk owes it itself: the debt it
+// heard while a member, or kept from an earlier lead, outlives that lead.
+func TestALeaderOwesTheRollOwedThatItHolds(t *testing.T) {
+	r := newRollRig(t, "debt.leader.roll.example.")
+	s := debtStore(t, r.conf)
+	if err := s.noteRollDebt(string(r.zone), time.Now().Add(-time.Minute), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	r.conf.rollDebtTurn(string(r.zone))
+	if ro := r.roll(t); ro == nil || ro.phase != rollOwed {
+		t.Fatalf("the leader did not owe the roll it held: %+v", ro)
+	}
+	if line := r.conf.rollLine(r.mpzd.KeyDB, r.zone); !strings.Contains(line, "roll owed since "+removalTime(time.Now().Add(-time.Minute))) {
+		t.Errorf("the status does not say since when, by the zone's debt: %q", line)
+	}
+}
+
+// A roll owed for more than twice roll-retry is warned of, once an hour.
+func TestARollOwedTooLongIsWarnedOf(t *testing.T) {
+	r := newRollRig(t, "debt.warn.roll.example.")
+	s := debtStore(t, r.conf)
+	if err := s.noteRollDebt(string(r.zone), time.Now().Add(-3*rollRetryFor(r.conf.MpConfig())), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	r.conf.rollDebtTurn(string(r.zone))
+	r.conf.rollDebtTurn(string(r.zone))
+	if n := strings.Count(r.alog.String(), "has been owed for more than twice roll-retry"); n != 1 {
+		t.Errorf("%d warnings, want 1:\n%s", n, r.alog)
 	}
 }
 
@@ -1326,15 +1394,12 @@ func TestAPurgeOlderThanTheLastKEYTakesNothingBack(t *testing.T) {
 	if resp.Status != "ok" {
 		t.Fatalf("the KEY: %s: %s (%v)", resp.Status, resp.Message, resp.RejectedItems)
 	}
-	purge := func(when time.Time) {
+	purge := func(when time.Time) *CombinerSyncResponse {
 		t.Helper()
 		zu := keyPurge(ZoneName(zone), csyncLeaderA)
-		resp := CombinerProcessUpdate(&CombinerSyncRequest{SenderID: string(zu.AgentId), DeliveredBy: csyncOurAgent, Zone: zone,
+		return CombinerProcessUpdate(&CombinerSyncRequest{SenderID: string(zu.AgentId), DeliveredBy: csyncOurAgent, Zone: zone,
 			Operations: zu.Operations, Publish: zu.Publish, Removal: zu.Withdraw != nil,
 			DistributionID: nextDistributionID(), Timestamp: when}, nil, local, hdb, nil)
-		if resp.Status != "ok" {
-			t.Fatalf("the purge: %s: %s", resp.Status, resp.Message)
-		}
 	}
 	holds := func() int { return len(mpzd.MP.AgentContributions[csyncLeaderA][zone][dns.TypeKEY].RRs) }
 	stored := func() *StoredPublishInstruction {
@@ -1346,11 +1411,17 @@ func TestAPurgeOlderThanTheLastKEYTakesNothingBack(t *testing.T) {
 		return s
 	}
 
-	purge(at.Add(-time.Minute))
+	// the older drop is refused, not told as made: its agent asks again
+	// (CodeRabbit at 290cd90)
+	if resp := purge(at.Add(-time.Minute)); resp.Status == "ok" || len(resp.RejectedItems) != 1 {
+		t.Errorf("the older purge: %s: %s (%v)", resp.Status, resp.Message, resp.RejectedItems)
+	}
 	if holds() != 1 || stored() == nil {
 		t.Errorf("after an older purge: %d KEYs held, instruction %+v", holds(), stored())
 	}
-	purge(at.Add(time.Minute))
+	if resp := purge(at.Add(time.Minute)); resp.Status != "ok" {
+		t.Fatalf("the newer purge: %s: %s", resp.Status, resp.Message)
+	}
 	if holds() != 0 || stored() != nil {
 		t.Errorf("after a newer purge: %d KEYs held, instruction %+v", holds(), stored())
 	}
@@ -1385,5 +1456,93 @@ func TestAnOlderKEYWithItsInstructionDoesNotComeBack(t *testing.T) {
 	stored, err := GetPublishInstruction(hdb, zone, csyncLeaderA)
 	if err != nil || stored == nil || len(stored.KEYRRs) != 1 || stored.KEYRRs[0] != newer.String() {
 		t.Errorf("the instruction kept after an older one came: %+v, %v", stored, err)
+	}
+}
+
+// severalRig: this agent leads, holds the zone's key, which the stand-in
+// parent trusts, and the apex carries it beside a KEY no agent holds.
+func newSeveralRig(t *testing.T, zone string) *rollRig {
+	t.Helper()
+	r := newRollRig(t, zone)
+	other := testSig0Key(t, newMPTestKeyDB(t), string(r.zone))
+	r.publish(t, r.old, other)
+	return r
+}
+
+// explicitSync is the answer to an explicit sync, and whether an UPDATE went
+// out for it.
+func (r *rollRig) explicitSync(t *testing.T) (string, bool) {
+	t.Helper()
+	before := r.keyRoundRig.parent.updatesSeen()
+	resp := make(chan tdns.DelegationSyncStatus, 1)
+	r.q <- tdns.DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: string(r.zone), ZoneData: r.mpzd.ZoneData, Response: resp}
+	got, ok := recvWithin(resp, 5*time.Second)
+	if !ok {
+		t.Fatal("no answer to the sync")
+	}
+	return got.Msg + got.ErrorMsg, r.keyRoundRig.parent.updatesSeen() > before
+}
+
+func (r *rollRig) parentForgets(keyid uint16) {
+	r.parent.mu.Lock()
+	defer r.parent.mu.Unlock()
+	delete(r.parent.trusted, keyid)
+}
+
+// The project owner's rule (2026-11-05): several KEYs at the apex do not hold
+// a sync signed with this agent's one active key, which the parent trusts: the
+// parent is asked in this lead, and several KEYs are a warning.
+func TestSeveralKEYsDoNotHoldASyncSignedWithAKeyTheParentTrusts(t *testing.T) {
+	r := newSeveralRig(t, "several.signs.example.")
+	got, sent := r.explicitSync(t)
+	if !sent {
+		t.Fatalf("no UPDATE went out: %q", got)
+	}
+	if !strings.Contains(r.alog.String(), "the sync signs with this agent's key, which the parent trusts") {
+		t.Errorf("no warning of several KEYs:\n%s", r.alog)
+	}
+}
+
+// Without the parent's word in this lead, a recorded parent_state does not
+// let the sync sign: the parent is asked, and one that does not trust the key
+// holds the sync, and has its word kept.
+func TestSeveralKEYsHoldASyncTheParentDoesNotTrustTheKeyFor(t *testing.T) {
+	r := newSeveralRig(t, "several.untrusted.example.")
+	r.parentForgets(r.old.keyid)
+	got, sent := r.explicitSync(t)
+	if sent || !strings.Contains(got, "is not heard in this lead") {
+		t.Errorf("the sync went out or was held for another reason: sent %v, %q", sent, got)
+	}
+	if zk, err := readZoneKey(r.mpzd.KeyDB, r.zone); err != nil || len(zk.active) != 1 || zk.active[0].parentState == edns0.KeyStateTrusted {
+		t.Error("the parent's word that it does not trust the key is not kept")
+	}
+}
+
+// The parent's word counts in the lead that heard it only: after the lead has
+// moved and come back, an earlier word does not let the sync sign.
+func TestAWordFromAnEarlierLeadDoesNotLetSeveralKEYsSign(t *testing.T) {
+	r := newSeveralRig(t, "several.earlierlead.example.")
+	if _, sent := r.explicitSync(t); !sent {
+		t.Fatal("no UPDATE went out in the first lead")
+	}
+	self := r.conf.localAgentID()
+	r.leader(r.them)
+	r.leader(self)
+	r.parentForgets(r.old.keyid)
+	if got, sent := r.explicitSync(t); sent || !strings.Contains(got, "is not heard in this lead") {
+		t.Errorf("a word from the earlier lead let the sync sign: sent %v, %q", sent, got)
+	}
+}
+
+// Right before the send the parent is asked again: a key it no longer trusts
+// does not sign, so no BADKEY and no bootstrap of it, whatever this lead heard.
+func TestSeveralKEYsSendNothingWithAKeyTheParentNoLongerTrusts(t *testing.T) {
+	r := newSeveralRig(t, "several.nolonger.example.")
+	if _, sent := r.explicitSync(t); !sent {
+		t.Fatal("no UPDATE went out while the parent trusted the key")
+	}
+	r.parentForgets(r.old.keyid)
+	if got, sent := r.explicitSync(t); sent || !strings.Contains(got, "does not trust key") {
+		t.Errorf("a key the parent no longer trusts signed: sent %v, %q", sent, got)
 	}
 }

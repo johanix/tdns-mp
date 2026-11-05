@@ -478,6 +478,10 @@ func makeRolledKey(kdb *tdns.KeyDB, zone ZoneName, alg uint8) (oldKeyid, newKeyi
 // zone uses a key at all. An agent that loses the lead ends it (endRollHere),
 // and the new leader owes its own.
 func (conf *Config) oweRoll(zone ZoneName) {
+	// the debt first: it outlives this agent's lead and its roll
+	if err := conf.InternalMp.Instructions.noteRollDebt(string(zone), time.Now(), time.Time{}); err != nil {
+		lgAgent.Error("the roll owed could not be kept with the zone's serials", "zone", zone, "err", err)
+	}
 	kdb := conf.zoneKeyDB(zone)
 	if kdb == nil {
 		return
@@ -493,6 +497,46 @@ func (conf *Config) oweRoll(zone ZoneName) {
 		return
 	}
 	lgAgent.Info("rolling the zone's SIG(0) key", "zone", zone, "phase", rollOwed)
+}
+
+// rollDebtTurn is the zone's owed roll at this agent's turn (plan S17b; the
+// project owner, 2026-11-05): an owed roll outlives the removal and the lead
+// until it is done. Each voting member's first-hand telling of a roll owed or
+// done is kept (noteRollDebt); a leader with a roll owed and none on its disk
+// owes it itself; and a roll owed for more than twice roll-retry is warned of,
+// once an hour.
+func (conf *Config) rollDebtTurn(zone string) {
+	s := conf.InternalMp.Instructions
+	if s == nil {
+		return
+	}
+	if tm := conf.InternalMp.MPTransport; tm != nil && tm.stamps != nil {
+		voters := s.activeVoters(zone)
+		for _, st := range tm.stamps.firstHand(canonicalName(zone)) {
+			if st.RollOwed.IsZero() && st.RollDone.IsZero() || !isAmong(voters, AgentId(st.identity)) {
+				continue
+			}
+			if err := s.noteRollDebt(zone, st.RollOwed, st.RollDone); err != nil {
+				lgAgent.Error("a member's roll owed or done could not be kept", "zone", zone, "member", st.identity, "err", err)
+			}
+		}
+	}
+	owed, _ := s.rollDebt(zone)
+	if owed.IsZero() {
+		return
+	}
+	z := ZoneName(zone)
+	if lem := conf.InternalMp.LeaderElectionManager; lem != nil && lem.IsLeader(z) {
+		if kdb := conf.zoneKeyDB(z); kdb != nil {
+			if r, err := loadRoll(kdb, z); err == nil && r == nil {
+				conf.oweRoll(z)
+			}
+		}
+	}
+	if time.Since(owed) > 2*rollRetryFor(conf.MpConfig()) && conf.InternalMp.keyLogs.due("roll owed "+zone) {
+		lgAgent.Warn("the roll of the zone's SIG(0) key has been owed for more than twice roll-retry", "zone", zone,
+			"since", owed.UTC().Format(time.RFC3339))
+	}
 }
 
 // rollCause is why a pass of the zone's roll runs: a step's own while a
@@ -611,6 +655,9 @@ func (conf *Config) rollPass(ctx context.Context, zone ZoneName, cause syncCause
 			if err := deleteRoll(kdb, zone); err != nil {
 				lgAgent.Error("the roll of the zone's SIG(0) key is done but could not be forgotten", "zone", zone, "err", err)
 			}
+			if err := conf.InternalMp.Instructions.noteRollDebt(string(zone), time.Time{}, time.Now()); err != nil {
+				lgAgent.Error("the roll done could not be kept with the zone's serials", "zone", zone, "err", err)
+			}
 			lgAgent.Info("rolling the zone's SIG(0) key", "zone", zone, "phase", rollDone, "old", r.oldKeyid, "new", r.newKeyid)
 			return
 		}
@@ -672,6 +719,9 @@ func (conf *Config) rollStep(ctx context.Context, kdb *tdns.KeyDB, r *sig0Roll) 
 		tdns.UpdateParentState(kdb, string(zone), r.newKeyid, state)
 		if state != edns0.KeyStateTrusted {
 			return "", fmt.Errorf("the parent does not trust key %d yet (%s)", r.newKeyid, edns0.KeyStateToString(state))
+		}
+		if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
+			conf.noteTrustHeard(zone, r.newKeyid, lem.LeadStart(zone))
 		}
 		if err := conf.publishRolledKEY(zone, newKey); err != nil {
 			return "", err
@@ -923,13 +973,20 @@ func (conf *Config) rollLine(kdb *tdns.KeyDB, zone ZoneName) string {
 	if err != nil || r == nil {
 		return ""
 	}
+	// since when it is owed: the zone's debt, which may be older than this
+	// agent's roll (an earlier leader's)
+	since := r.started
+	if owed, _ := conf.InternalMp.Instructions.rollDebt(string(zone)); !owed.IsZero() {
+		since = owed
+	}
+	owed := "roll owed since " + removalTime(since)
 	switch {
 	case r.failures > 0 && time.Now().Before(r.nextTry):
-		return fmt.Sprintf("roll owed, next try at %s", r.nextTry.UTC().Format("15:04")+" UTC")
+		return fmt.Sprintf("%s, next try at %s", owed, r.nextTry.UTC().Format("15:04")+" UTC")
 	case len(conf.zoneFrozen(string(zone))) > 0 && conf.rollCause(zone) != syncStep:
-		return "roll owed, held until the zone's transition is done"
+		return owed + ", held until the zone's transition is done"
 	case r.phase == rollOwed:
-		return "roll owed, the new key is not made yet"
+		return owed + ", the new key is not made yet"
 	case r.phase == rollMade:
 		return fmt.Sprintf("rolling: new key %d made, not yet added at the parent", r.newKeyid)
 	case r.phase == rollActivated:
