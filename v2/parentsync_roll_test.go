@@ -1004,21 +1004,45 @@ func TestARollARemovalOwesIsMadeByItsPasses(t *testing.T) {
 }
 
 // A new key that cannot be made now is tried again, on the roll's schedule:
-// the obligation stands.
+// the obligation stands. (A key the parent's word on is not recorded for
+// waits instead, with no try counted: TestARollOwedWaitsForTheParentsWordOnTheKey.)
 func TestARollOwedThatCannotBeMadeIsTriedAgain(t *testing.T) {
 	r := newRollRig(t, "owedagain.roll.example.")
-	tdns.UpdateParentState(r.mpzd.KeyDB, string(r.zone), r.old.keyid, edns0.KeyStateUnknown)
+	extra := testSig0Key(t, r.mpzd.KeyDB, string(r.zone)) // a second active key: no new key is made
 	r.conf.oweRoll(r.zone)
 	r.pass(t, syncStep)
 	ro := r.roll(t)
 	if ro == nil || ro.phase != rollOwed || ro.failures != 1 || ro.nextTry.IsZero() {
 		t.Fatalf("the roll after a failed pass: %+v", ro)
 	}
-	trustKey(r.mpzd.KeyDB, string(r.zone), r.old.keyid)
+	if err := sig0KeyChange(r.mpzd.KeyDB, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "setstate", Keyname: dns.Fqdn(string(r.zone)), Keyid: extra.keyid, State: tdns.Sig0StateRetired}); err != nil {
+		t.Fatal(err)
+	}
 	r.due(t)
 	r.pass(t, syncStep)
 	if ro = r.roll(t); ro == nil || ro.phase == rollOwed {
 		t.Errorf("the roll once it can be made: %+v", ro)
+	}
+}
+
+// A leader whose key has no recorded word from the parent yet, such as one it
+// imported from the leader before it, waits for that word instead of failing.
+// No roll-retry is counted: its offers in this lead ask the parent, and the
+// ticker's next pass after the word makes the new key (the rig's x2l-update,
+// 2026-11-05).
+func TestARollOwedWaitsForTheParentsWordOnTheKey(t *testing.T) {
+	r := newRollRig(t, "owedwaits.roll.example.")
+	tdns.UpdateParentState(r.mpzd.KeyDB, string(r.zone), r.old.keyid, edns0.KeyStateUnknown)
+	r.conf.oweRoll(r.zone)
+	r.pass(t, syncStep)
+	ro := r.roll(t)
+	if ro == nil || ro.phase != rollOwed || ro.failures != 0 || !ro.nextTry.IsZero() {
+		t.Fatalf("the roll while the parent's word is not recorded: %+v", ro)
+	}
+	trustKey(r.mpzd.KeyDB, string(r.zone), r.old.keyid)
+	r.pass(t, syncStep)
+	if ro = r.roll(t); ro == nil || ro.phase == rollOwed || ro.newKeyid == 0 {
+		t.Errorf("the roll at the pass after the parent's word: %+v", ro)
 	}
 }
 
