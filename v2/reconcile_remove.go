@@ -231,7 +231,7 @@ func (l leaver) steps(p planView) []plannedStep {
 				},
 				start: func(conf *Config, zone string) {
 					logRemovalStep(zone, id, "2 (its NS): it leaves the key confirmers", "")
-					conf.lookAgainAtDnskeyWaits(ZoneName(zone))
+					conf.lookAgainAtDnskeyWaits(ZoneName(zone), AgentId(id))
 				},
 			})
 		}
@@ -950,12 +950,12 @@ func stillConfirmsKeys(zone ZoneName, id AgentId) bool {
 	return isAmong(identities(rolesForZone(zone).KeyConfirmers), id)
 }
 
-// lookAgainAtDnskeyWaits has the zone's DNSKEY distributions look again at who
-// they wait for: a step took a provider out of the key confirmers, and a
-// rollover paused on it resumes (design 5.2).
-func (conf *Config) lookAgainAtDnskeyWaits(zone ZoneName) {
+// lookAgainAtDnskeyWaits has the zone's DNSKEY distributions look again at the
+// provider a step took out of the key confirmers: a rollover paused on it
+// resumes (design 5.2).
+func (conf *Config) lookAgainAtDnskeyWaits(zone ZoneName, left AgentId) {
 	if tm := conf.InternalMp.MPTransport; tm != nil {
-		tm.lookAgainAtDnskeyPropagations(zone)
+		tm.lookAgainAtDnskeyPropagations(zone, left)
 	}
 }
 
