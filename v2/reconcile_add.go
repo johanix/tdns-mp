@@ -277,7 +277,10 @@ func (conf *Config) joinerActiveKeys(zone, id string) []*dns.DNSKEY {
 // of a KSK of id whose ds is set. A look is asked while the step waits, and under
 // parentsync=agent the leader's sync asked again now and then: explicit, an
 // update only where the parent differs. Under parentsync=owner the owner adds
-// the DS, and the step's test is the same.
+// the DS, and the step's test is the same. Where no server of the parent that
+// answers serves any DS of the zone, the zone is unsigned at the parent: no
+// validator looks for the joiner's DS, and the step ends at once, whatever the
+// scheme (Johan's ruling of 2026-11-05).
 func (conf *Config) joinerDSAtParent(zone, id string) bool {
 	var ksks []*dns.DNSKEY
 	conf.joinerKeys(zone, id, func(flags, _ uint16, _ string, ds *bool, key *dns.DNSKEY) {
@@ -286,7 +289,14 @@ func (conf *Config) joinerDSAtParent(zone, id string) bool {
 		}
 	})
 	seen, known := conf.InternalMp.signerAdds.parentDS(conf, zone)
-	if known && slices.ContainsFunc(ksks, seen.serves) {
+	switch {
+	case !known:
+	case seen.unsigned:
+		if conf.InternalMp.reconciles.sayOnce(canonicalName(zone), "parent unsigned "+canonicalName(id)) {
+			lg.Info("the parent serves no DS for the zone; a signer's DS step does not wait", "zone", zone, "provider", id)
+		}
+		return true
+	case slices.ContainsFunc(ksks, seen.serves):
 		return true
 	}
 	if rolesForZone(ZoneName(zone)).ParentSync == core.HsyncParentSyncAgent && conf.InternalMp.signerAdds.syncDue(conf, zone) {
@@ -314,13 +324,15 @@ func (conf *Config) joinersDSAsked(zone string) bool {
 }
 
 // parentDSSeen is what the parent serves of the zone's DS RRset: the records
-// that every server that answered holds, the largest TTL they gave it, and the
-// servers that did not answer, with the last one's error.
+// that every server that answered holds, whether none of them serves any DS of
+// the zone, the largest TTL they gave it, and the servers that did not answer,
+// with the last one's error.
 type parentDSSeen struct {
-	records map[parentDSRecord]bool
-	ttl     time.Duration
-	silent  []string
-	why     error
+	records  map[parentDSRecord]bool
+	unsigned bool
+	ttl      time.Duration
+	silent   []string
+	why      error
 }
 
 // parentDSRecord is a DS record as served. A key tag says less: 16 bits, and
@@ -389,6 +401,7 @@ func askParentDS(zone, server string) ([]dns.RR, error) {
 // hand others an older RRset. With no answer at all nothing is known.
 func dsAtEveryServer(servers []string, ask func(server string) ([]dns.RR, error)) (parentDSSeen, error) {
 	var seen parentDSSeen
+	served := false
 	for _, server := range servers {
 		rrs, err := ask(server)
 		if err != nil {
@@ -400,6 +413,7 @@ func dsAtEveryServer(servers []string, ask func(server string) ([]dns.RR, error)
 			if ds, ok := rr.(*dns.DS); ok {
 				records[parentDSRecord{ds.KeyTag, ds.Algorithm, ds.DigestType, strings.ToLower(ds.Digest)}] = true // not-a-name: a hex digest
 				seen.ttl = max(seen.ttl, time.Duration(ds.Hdr.Ttl)*time.Second)
+				served = true
 			}
 		}
 		if seen.records != nil {
@@ -408,6 +422,7 @@ func dsAtEveryServer(servers []string, ask func(server string) ([]dns.RR, error)
 		seen.records = records
 	}
 	if seen.records != nil {
+		seen.unsigned = !served
 		return seen, nil
 	}
 	if seen.why == nil {

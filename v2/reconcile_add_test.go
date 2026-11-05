@@ -26,11 +26,13 @@ import (
 // signerAddRig is the reconciliation rig with a transition that moves a provider
 // into signers=: agent a leads a zone that a and b serve and b signs. Its own
 // provider joins under signersV, by default "a,b". The parent's DS RRset and the
-// sync the leader asks are the rig's, and the agent's looks run in place.
+// sync the leader asks are the rig's, and the agent's looks run in place. Unless
+// unsigned, the parent also serves b's DS, which the rig leaves out of its records.
 type signerAddRig struct {
 	*reconcileRig
 	parent    map[uint16]bool
 	parentTTL time.Duration
+	unsigned  bool
 	syncs     int
 }
 
@@ -58,7 +60,7 @@ func newSignerAddRig(t *testing.T, zone, parentsync string) *signerAddRig {
 				}
 			}
 		}
-		return parentDSSeen{records: records, ttl: r.parentTTL}, nil
+		return parentDSSeen{records: records, unsigned: r.unsigned && len(records) == 0, ttl: r.parentTTL}, nil
 	}
 	askJoinersDS = func(*Config, string, string) { r.syncs++ }
 	t.Cleanup(func() { parentDSLook, askJoinersDS = prevLook, prevAsk })
@@ -1445,17 +1447,21 @@ func TestTheDSStepAsksEveryParentServer(t *testing.T) {
 	}
 	boom := errors.New("no answer")
 	for _, c := range []struct {
-		name    string
-		answers map[string][]dns.RR
-		fails   []string
-		want    []uint16
-		ttl     time.Duration
-		err     bool
+		name     string
+		answers  map[string][]dns.RR
+		fails    []string
+		want     []uint16
+		ttl      time.Duration
+		unsigned bool
+		err      bool
 	}{
 		{name: "both have it", answers: map[string][]dns.RR{"p1": {ds(1, 60), ds(2, 60)}, "p2": {ds(1, 90), ds(2, 90)}}, want: []uint16{1, 2}, ttl: 90 * time.Second},
 		{name: "the second lags", answers: map[string][]dns.RR{"p1": {ds(1, 60), ds(2, 60)}, "p2": {ds(1, 60)}}, want: []uint16{1}, ttl: time.Minute},
 		{name: "the first lags", answers: map[string][]dns.RR{"p1": {ds(1, 60)}, "p2": {ds(1, 60), ds(2, 60)}}, want: []uint16{1}, ttl: time.Minute},
 		{name: "one serves no DS", answers: map[string][]dns.RR{"p1": {ds(1, 60)}, "p2": {}}, ttl: time.Minute},
+		{name: "the first serves no DS", answers: map[string][]dns.RR{"p1": {}, "p2": {ds(1, 60)}}, ttl: time.Minute},
+		{name: "neither serves a DS", answers: map[string][]dns.RR{"p1": {}, "p2": {}}, unsigned: true},
+		{name: "one serves none, one does not answer", answers: map[string][]dns.RR{"p1": {}}, fails: []string{"p2"}, unsigned: true},
 		{name: "one does not answer", answers: map[string][]dns.RR{"p1": {ds(1, 60)}}, fails: []string{"p2"}, want: []uint16{1}, ttl: time.Minute},
 		{name: "none answers", fails: []string{"p1", "p2"}, err: true},
 		{name: "no server is known", err: true},
@@ -1483,6 +1489,9 @@ func TestTheDSStepAsksEveryParentServer(t *testing.T) {
 		slices.Sort(tags)
 		if !slices.Equal(tags, c.want) || seen.ttl != c.ttl {
 			t.Errorf("%s: the tags %v, TTL %s; want %v, %s", c.name, tags, seen.ttl, c.want, c.ttl)
+		}
+		if seen.unsigned != c.unsigned {
+			t.Errorf("%s: unsigned %v, want %v", c.name, seen.unsigned, c.unsigned)
 		}
 		if !c.err && !slices.Equal(seen.silent, c.fails) {
 			t.Errorf("%s: the silent %v, want %v", c.name, seen.silent, c.fails)
@@ -1566,6 +1575,51 @@ func TestAJoinersDSStepDoesNotEndOnAnotherKeysDS(t *testing.T) {
 	if !r.conf.joinerDSAtParent(r.zone, signerAddSelf) {
 		t.Error("the parent serves its DS, and the step waits")
 	}
+}
+
+// Where the parent serves no DS of the zone at all, no validator looks for the
+// joiner's DS, so its DS step ends at once, under either parentsync and whatever
+// scheme the parent offers (Johan's ruling of 2026-11-05), and the caches hold no
+// DS RRset to wait out. A parent that serves another signer's DS holds it as
+// before. A zone's first signer on a zone unsigned at the parent is done once its
+// keys are active.
+func TestADSStepEndsAtOnceWhenTheParentServesNoDS(t *testing.T) {
+	for _, parentsync := range []string{"agent", "owner"} {
+		t.Run(parentsync, func(t *testing.T) {
+			r := newSignerAddRig(t, parentsync+".unsigned.adding.example.", parentsync).thawed()
+			r.at(r.next(), signerAddAccept)
+			r.at(r.next(), signerAddMint)
+			r.keys(KeyStateActive, KeyStateActive)
+			r.at(r.next(), signerAddDS)
+			r.keys(KeyStateActive, KeyStateActive)
+			if st := r.next(); len(st.Taken) != 3 {
+				t.Fatalf("the parent serves another signer's DS, and the step went on: %+v", st)
+			}
+			r.unsigned = true
+			r.parentLooks()
+			r.next() // the look is taken on this turn's wait
+			if st := r.next(); st.Taken[len(st.Taken)-1] != lastStepKey {
+				t.Errorf("the parent serving no DS, the step is %+v, want the last: no wait at the DS step or for the caches", st)
+			}
+		})
+	}
+	t.Run("a zone's first signer", func(t *testing.T) {
+		r := newSignerAddRig(t, "first.unsigned.adding.example.", "agent")
+		knownAs(t, r.store, r.zone, r.v)
+		r.unsigned = true
+		r.keys(KeyStateActive, KeyStateActive)
+		ds := signerAddStepsOf(Provider{Label: "a", Identity: signerAddSelf}, true)[2]
+		rigs := parentDSLook
+		parentDSLook = func(*Config, string) (parentDSSeen, error) { return parentDSSeen{}, errors.New("no answer") }
+		if w := ds.wait(r.conf, r.zone, time.Now()); w == "" {
+			t.Error("no server of the parent answers, and the first signer's DS step ends")
+		}
+		parentDSLook = rigs
+		r.parentLooks()
+		if w := ds.wait(r.conf, r.zone, time.Now()); w != "" {
+			t.Errorf("the parent serves no DS, and the first signer's DS step waits for %q", w)
+		}
+	})
 }
 
 // T9 asks one parent server, so its wait can start before the last of them has
