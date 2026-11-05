@@ -48,7 +48,17 @@ func newSignerAddRig(t *testing.T, zone, parentsync string) *signerAddRig {
 	r.conf.InternalMp.signerAdds.start = func(look func()) { look() }
 	prevLook, prevAsk := parentDSLook, askJoinersDS
 	parentDSLook = func(*Config, string) (parentDSSeen, error) {
-		return parentDSSeen{tags: r.parent, ttl: r.parentTTL}, nil
+		records := map[parentDSRecord]bool{}
+		if mpzd, ok := Zones.Get(zone); ok && mpzd != nil {
+			if snap := mpzd.GetLastKeyInventory(); snap != nil {
+				for _, it := range snap.Inventory {
+					if r.parent[it.KeyTag] {
+						records[dsRecordOf(t, it.KeyRR)] = true
+					}
+				}
+			}
+		}
+		return parentDSSeen{records: records, ttl: r.parentTTL}, nil
 	}
 	askJoinersDS = func(*Config, string, string) { r.syncs++ }
 	t.Cleanup(func() { parentDSLook, askJoinersDS = prevLook, prevAsk })
@@ -57,6 +67,18 @@ func newSignerAddRig(t *testing.T, zone, parentsync string) *signerAddRig {
 	mp := r.conf.MpConfig()
 	mp.Local.Nameservers = srNameservers
 	return r
+}
+
+// dsRecordOf is the record of the DS a parent serves of the key keyRR.
+func dsRecordOf(t *testing.T, keyRR string) parentDSRecord {
+	t.Helper()
+	rr, err := dns.NewRR(keyRR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := rr.(*dns.DNSKEY)
+	ds := key.ToDS(dns.SHA256)
+	return parentDSRecord{ds.KeyTag, ds.Algorithm, ds.DigestType, strings.ToLower(ds.Digest)}
 }
 
 // thawed has the zone thawed to V, with step 0 held here and at b. This agent is
@@ -1415,8 +1437,8 @@ func TestASignersStepsArePlannedFromWhatIsInPlace(t *testing.T) {
 
 // A DS counts only once every parent server that answers holds it: a validator
 // may be handed the RRset of any of them, and one without the joiner's DS finds
-// nothing to validate its signatures with. One that does not answer hands nothing
-// to anyone. The largest TTL any of them gave is what caches may hold.
+// nothing to validate its signatures with. One that does not answer isn't counted,
+// and is named. The largest TTL any of them gave is what caches may hold.
 func TestTheDSStepAsksEveryParentServer(t *testing.T) {
 	ds := func(tag uint16, ttl uint32) dns.RR {
 		return &dns.DS{Hdr: dns.RR_Header{Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: ttl}, KeyTag: tag}
@@ -1455,13 +1477,94 @@ func TestTheDSStepAsksEveryParentServer(t *testing.T) {
 			continue
 		}
 		var tags []uint16
-		for tag := range seen.tags {
-			tags = append(tags, tag)
+		for r := range seen.records {
+			tags = append(tags, r.tag)
 		}
 		slices.Sort(tags)
 		if !slices.Equal(tags, c.want) || seen.ttl != c.ttl {
 			t.Errorf("%s: the tags %v, TTL %s; want %v, %s", c.name, tags, seen.ttl, c.want, c.ttl)
 		}
+		if !c.err && !slices.Equal(seen.silent, c.fails) {
+			t.Errorf("%s: the silent %v, want %v", c.name, seen.silent, c.fails)
+		}
+	}
+}
+
+// A key tag is 16 bits, so a DS under the joiner's tag may be another key's: the
+// DS is the joiner's only by its algorithm and digest, under any digest type.
+func TestAnotherKeysDSUnderTheSameTagIsNotAJoinersDS(t *testing.T) {
+	const zone = "same.tag.adding.example."
+	key := testDnskey(t, zone, 257)
+	real := key.ToDS(dns.SHA256)
+	variant := func(change func(*dns.DS)) dns.RR {
+		ds := *real
+		change(&ds)
+		return &ds
+	}
+	otherDigest := variant(func(ds *dns.DS) { ds.Digest = strings.Repeat("ab", 32) })
+	for _, c := range []struct {
+		name    string
+		answers map[string][]dns.RR
+		want    bool
+	}{
+		{"its DS", map[string][]dns.RR{"p1": {real}}, true},
+		{"its digest in capitals", map[string][]dns.RR{"p1": {variant(func(ds *dns.DS) { ds.Digest = strings.ToUpper(ds.Digest) })}}, true},
+		{"by another digest type", map[string][]dns.RR{"p1": {key.ToDS(dns.SHA384)}}, true},
+		{"another key's digest", map[string][]dns.RR{"p1": {otherDigest}}, false},
+		{"another key's digest beside its own", map[string][]dns.RR{"p1": {otherDigest, real}}, true},
+		{"another algorithm", map[string][]dns.RR{"p1": {variant(func(ds *dns.DS) { ds.Algorithm = dns.RSASHA256 })}}, false},
+		{"another key tag", map[string][]dns.RR{"p1": {variant(func(ds *dns.DS) { ds.KeyTag++ })}}, false},
+		{"a digest type nobody can compute", map[string][]dns.RR{"p1": {variant(func(ds *dns.DS) { ds.DigestType = 200 })}}, false},
+		{"each server a key of that tag, another each", map[string][]dns.RR{"p1": {real}, "p2": {otherDigest}}, false},
+	} {
+		var servers []string
+		for _, s := range []string{"p1", "p2"} {
+			if _, ok := c.answers[s]; ok {
+				servers = append(servers, s)
+			}
+		}
+		seen, err := dsAtEveryServer(servers, func(server string) ([]dns.RR, error) { return c.answers[server], nil })
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := seen.serves(key); got != c.want {
+			t.Errorf("%s: serves says %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// The step itself: the parent's only DS under the joiner's KSK's tag is another
+// key's, so the step waits and, under parentsync=agent, asks its sync.
+func TestAJoinersDSStepDoesNotEndOnAnotherKeysDS(t *testing.T) {
+	r := newSignerAddRig(t, "colliding.adding.example.", "agent")
+	tag := r.keys(KeyStateActive, KeyStateActive)
+	mpzd, _ := Zones.Get(r.zone)
+	own := dsRecordOf(t, mpzd.GetLastKeyInventory().Inventory[0].KeyRR)
+	if own.tag != tag {
+		t.Fatalf("the KSK's tag is %d, want %d", own.tag, tag)
+	}
+	other := own
+	other.digest = strings.Repeat("ab", 32)
+	prev := parentDSLook
+	t.Cleanup(func() { parentDSLook = prev })
+	parentDSLook = func(*Config, string) (parentDSSeen, error) {
+		return parentDSSeen{records: map[parentDSRecord]bool{other: true}}, nil
+	}
+	r.parentLooks()
+	r.conf.joinerDSAtParent(r.zone, signerAddSelf) // the look, run in place
+	if r.conf.joinerDSAtParent(r.zone, signerAddSelf) {
+		t.Error("the step ended on another key's DS under its tag")
+	}
+	if r.syncs == 0 {
+		t.Error("no sync asked, with the parent lacking its DS")
+	}
+	parentDSLook = func(*Config, string) (parentDSSeen, error) {
+		return parentDSSeen{records: map[parentDSRecord]bool{other: true, own: true}}, nil
+	}
+	r.parentLooks()
+	r.conf.joinerDSAtParent(r.zone, signerAddSelf)
+	if !r.conf.joinerDSAtParent(r.zone, signerAddSelf) {
+		t.Error("the parent serves its DS, and the step waits")
 	}
 }
 
@@ -1696,8 +1799,8 @@ func TestAParentServersAnswerWithNoDSCountsAgainstTheDS(t *testing.T) {
 		{"a refusal beside it", []string{holds, refused}, true},
 	} {
 		seen, err := dsAtEveryServer(c.servers, func(s string) ([]dns.RR, error) { return askParentDS(zone, s) })
-		if err != nil || seen.tags[7] != c.tagged {
-			t.Errorf("%s: the tags %v (%v), want the DS counted %v", c.name, seen.tags, err, c.tagged)
+		if err != nil || seen.records[parentDSRecord{7, dns.ED25519, dns.SHA256, "00"}] != c.tagged {
+			t.Errorf("%s: the records %v (%v), want the DS counted %v", c.name, seen.records, err, c.tagged)
 		}
 	}
 	if _, err := dsAtEveryServer([]string{refused}, func(s string) ([]dns.RR, error) { return askParentDS(zone, s) }); err == nil {
@@ -1816,7 +1919,11 @@ func TestAJoinersDSStepFinishesThroughALeaderWhoseKeyIsNotPublished(t *testing.T
 			adds.start = func(look func()) { look() }
 			prev := parentDSLook
 			parentDSLook = func(*Config, string) (parentDSSeen, error) {
-				return parentDSSeen{tags: map[uint16]bool{r.ksk.KeyTag: r.parent.updatesSeen() > 0}}, nil
+				seen := parentDSSeen{records: map[parentDSRecord]bool{}}
+				if r.parent.updatesSeen() > 0 {
+					seen.records[dsRecordOf(t, r.ksk.KeyRR)] = true
+				}
+				return seen, nil
 			}
 			t.Cleanup(func() { parentDSLook = prev })
 			r.inventory(r.ksk)
@@ -2268,6 +2375,142 @@ func TestAJoinersKeysStepWaitsForTheKeysThatSign(t *testing.T) {
 	}
 }
 
+// rollsZSK has a new ZSK of the joiner's active and the old one retired, by its
+// signer's inventory.
+func (w *keysWait) rollsZSK() *dns.DNSKEY {
+	w.t.Helper()
+	no := false
+	mpzd, _ := Zones.Get(w.r.zone)
+	snap := *mpzd.GetLastKeyInventory()
+	snap.Inventory = slices.Clone(snap.Inventory)
+	for i := range snap.Inventory {
+		if snap.Inventory[i].Flags&dns.SEP == 0 {
+			snap.Inventory[i].State = KeyStateRetired
+		}
+	}
+	item := invItem(w.t, w.r.zone, 256, KeyStateActive, &no)
+	snap.Inventory = append(snap.Inventory, item)
+	mpzd.SetLastKeyInventory(&snap)
+	rr, err := dns.NewRR(item.KeyRR)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return rr.(*dns.DNSKEY)
+}
+
+// The looks are of the joiner's active keys. When those change, what was seen was of
+// others: the wait starts over, a nameserver seen with the old ones has no credit for
+// them, and a look under way for them counts for nothing. The largest TTL stays, as a
+// cache may hold that RRset.
+func TestNewActiveKeysStartAJoinersKeysWaitOver(t *testing.T) {
+	const waiting = "the propagation delay"
+	t.Run("the count", func(t *testing.T) {
+		w := newKeysWait(t, "count.new.keys.adding.example.")
+		w.serves(keysNS1, 5*time.Minute, w.ksk, w.zsk)
+		w.serves(keysNS2, 5*time.Minute, w.ksk, w.zsk)
+		if got := w.look(); !strings.Contains(got, waiting) {
+			t.Fatalf("both serve its keys at 5m, it waits for %q", got)
+		}
+		zsk := w.rollsZSK()
+		w.serves(keysNS1, time.Minute, w.ksk, zsk)
+		w.serves(keysNS2, time.Minute, w.ksk, zsk)
+		w.now = w.now.Add(5 * time.Minute) // the old keys' count is over
+		if got := w.look(); !strings.Contains(got, waiting) {
+			t.Fatalf("new keys just seen, it waits for %q", got)
+		}
+		if got := w.after(4 * time.Minute); !strings.Contains(got, waiting) {
+			t.Fatalf("4m on, under the largest TTL seen, it waits for %q", got)
+		}
+		if got := w.after(time.Minute + time.Second); got != "" {
+			t.Fatalf("the largest TTL passed, it waits for %q", got)
+		}
+	})
+	t.Run("the same keys in another order", func(t *testing.T) {
+		w := newKeysWait(t, "order.new.keys.adding.example.")
+		w.serves(keysNS1, 5*time.Minute, w.ksk, w.zsk)
+		w.serves(keysNS2, 5*time.Minute, w.ksk, w.zsk)
+		if got := w.look(); !strings.Contains(got, waiting) {
+			t.Fatalf("both serve its keys at 5m, it waits for %q", got)
+		}
+		mpzd, _ := Zones.Get(w.r.zone)
+		snap := *mpzd.GetLastKeyInventory()
+		snap.Inventory = slices.Clone(snap.Inventory)
+		slices.Reverse(snap.Inventory)
+		mpzd.SetLastKeyInventory(&snap)
+		if got := w.after(5*time.Minute + time.Second); got != "" {
+			t.Fatalf("the same keys and the TTL passed, it waits for %q", got)
+		}
+	})
+	t.Run("a nameserver's history", func(t *testing.T) {
+		w := newKeysWait(t, "history.new.keys.adding.example.")
+		w.copyHasDNSKEY(time.Hour)
+		w.serves(keysNS1, 0, w.ksk, w.zsk)
+		w.serves(keysNS2, 0, w.ksk, w.zsk)
+		if got := w.look(); got != "" {
+			t.Fatalf("both serve its keys at TTL 0, it waits for %q", got)
+		}
+		zsk := w.rollsZSK()
+		w.serves(keysNS1, 0, w.ksk, zsk)
+		delete(w.answers, keysNS2)
+		if got := w.look(); !strings.Contains(got, waiting) {
+			t.Fatalf("ns2 silent, never seen with the new keys: no floor of the copy's TTL, it waits for %q", got)
+		}
+	})
+	t.Run("a look under way", func(t *testing.T) {
+		w := newKeysWait(t, "underway.new.keys.adding.example.")
+		var looks []func()
+		w.r.conf.InternalMp.signerAdds.start = func(look func()) { looks = append(looks, look) }
+		w.serves(keysNS1, 0, w.ksk, w.zsk)
+		w.serves(keysNS2, 0, w.ksk, w.zsk)
+		w.look()
+		w.rollsZSK()
+		const unknown = "not known yet"
+		if got := w.look(); !strings.Contains(got, unknown) || len(looks) != 2 {
+			t.Fatalf("new keys: %d looks, it waits for %q", len(looks), got)
+		}
+		looks[0]() // the old keys' look ends: they serve those
+		if got := w.wait(); !strings.Contains(got, unknown) {
+			t.Fatalf("a look for the old keys counted, it waits for %q", got)
+		}
+		looks[1]() // the new keys' look: they don't serve those
+		if got := w.wait(); !strings.Contains(got, keysNS1) || !strings.Contains(got, keysNS2) {
+			t.Fatalf("neither serves the new keys, it waits for %q", got)
+		}
+	})
+}
+
+// A signer can't record another's key under a tag of its own, so it serves its own
+// there, beside the joiner's other key. That isn't the joiner's key, and it holds the
+// step. So does a key of the joiner's whose record can't be read.
+func TestAnotherKeyUnderTheSameTagIsNotAJoinersKeyServed(t *testing.T) {
+	w := newKeysWait(t, "same.tag.keys.adding.example.")
+	w.serves(keysNS1, 0, w.ksk, w.zsk)
+	w.serves(keysNS2, 0, sameTagOtherKey(t, w.ksk), w.zsk)
+	if got := w.look(); !strings.Contains(got, keysNS2) {
+		t.Fatalf("another KSK under its KSK's tag at ns2, it waits for %q, want ns2", got)
+	}
+	w.serves(keysNS2, 0, w.ksk, sameTagOtherKey(t, w.zsk))
+	if got := w.look(); !strings.Contains(got, keysNS2) {
+		t.Fatalf("another ZSK under its ZSK's tag at ns2, it waits for %q, want ns2", got)
+	}
+	w.serves(keysNS2, 0, w.ksk, w.zsk)
+	if got := w.look(); got != "" {
+		t.Fatalf("both serve its keys, and it waits for %q", got)
+	}
+
+	w = newKeysWait(t, "unreadable.keys.adding.example.")
+	w.serves(keysNS1, 0, w.ksk, w.zsk)
+	w.serves(keysNS2, 0, w.ksk, w.zsk)
+	mpzd, _ := Zones.Get(w.r.zone)
+	snap := *mpzd.GetLastKeyInventory()
+	snap.Inventory = slices.Clone(snap.Inventory)
+	snap.Inventory[0].KeyRR = ""
+	mpzd.SetLastKeyInventory(&snap)
+	if got := w.look(); !strings.Contains(got, keysNS1) || !strings.Contains(got, keysNS2) {
+		t.Fatalf("a key whose record can't be read, it waits for %q, want both", got)
+	}
+}
+
 // One that answers without the keys holds the step, by NODATA, or with an RRset that
 // does not hold them, for as long as it does, and the wait starts when it serves them.
 // One that loses them holds it again, and the wait starts over.
@@ -2413,6 +2656,62 @@ func TestALookThatSaysNothingHoldsAJoinersKeysStep(t *testing.T) {
 	}
 }
 
+// After a good look as well: it holds until the next good look, which goes on with
+// the count where it was, since that look changed nothing of what was seen served.
+func TestALookThatSaysNothingAfterAGoodOneHoldsAJoinersKeysStep(t *testing.T) {
+	t.Run("no way to ask", func(t *testing.T) {
+		w := newKeysWait(t, "blind.keys.adding.example.")
+		w.serves(keysNS1, 5*time.Minute, w.ksk, w.zsk)
+		w.serves(keysNS2, 5*time.Minute, w.ksk, w.zsk)
+		if got := w.look(); got == "" || strings.Contains(got, "not known") {
+			t.Fatalf("both serve them, it waits for %q, want the TTL", got)
+		}
+		good := w.answers[keysNS1]
+		w.answers[keysNS1] = func() (*core.RRset, error) { return nil, fmt.Errorf("%s: %w", keysNS1, errIMRNotRunning) }
+		if got := w.look(); !strings.Contains(got, "not known") {
+			t.Fatalf("no IMR after a good look, it waits for %q, want what is not known", got)
+		}
+		if got := w.after(time.Hour); !strings.Contains(got, "not known") {
+			t.Fatalf("no IMR, the count long over, it waits for %q, want what is not known", got)
+		}
+		w.answers[keysNS1] = good
+		if got := w.look(); got != "" {
+			t.Errorf("the next good look, the count long over, it waits for %q: the count started again", got)
+		}
+	})
+	t.Run("a copy that names none, the count not over", func(t *testing.T) {
+		w := newKeysWait(t, "blind-copy.keys.adding.example.")
+		w.serves(keysNS1, 5*time.Minute, w.ksk, w.zsk)
+		w.serves(keysNS2, 5*time.Minute, w.ksk, w.zsk)
+		w.look()
+		setZoneNS(t, w.r.zone)
+		if got := w.look(); !strings.Contains(got, "not known") {
+			t.Fatalf("a copy that names none, it waits for %q, want what is not known", got)
+		}
+		setZoneNS(t, w.r.zone, keysNS1, keysNS2)
+		if got := w.look(); got == "" || strings.Contains(got, "not known") {
+			t.Fatalf("named again, it waits for %q, want the rest of the TTL", got)
+		}
+		if got := w.after(5*time.Minute - 2*signerAddLookEvery); got != "" {
+			t.Errorf("the TTL since the first good look has passed, and it waits for %q: the count started again", got)
+		}
+	})
+	t.Run("a nameserver going silent is not this", func(t *testing.T) {
+		w := newKeysWait(t, "blind-silent.keys.adding.example.")
+		w.serves(keysNS1, 5*time.Minute, w.ksk, w.zsk)
+		w.serves(keysNS2, 5*time.Minute, w.ksk, w.zsk)
+		w.look()
+		w.silent(keysNS1)
+		w.silent(keysNS2)
+		if got := w.look(); got == "" || strings.Contains(got, "not known") {
+			t.Fatalf("both silent after serving them, it waits for %q, want the TTL", got)
+		}
+		if got := w.after(5 * time.Minute); got != "" {
+			t.Errorf("both silent, the TTL over, it waits for %q: silence holds nothing", got)
+		}
+	})
+}
+
 // What was served before the keys came counts: a cache may hold that RRset, without
 // them, for as long as it was served with.
 func TestAnAnswerBeforeTheKeysCountsInAJoinersWait(t *testing.T) {
@@ -2478,7 +2777,7 @@ func TestTheCachesTimeWaitsForItsOwnLookAtTheParent(t *testing.T) {
 	}
 	r.parentLooks()
 	parentDSLook = func(*Config, string) (parentDSSeen, error) {
-		return parentDSSeen{tags: map[uint16]bool{1: true}, ttl: time.Hour}, nil
+		return parentDSSeen{ttl: time.Hour}, nil
 	}
 	if got := caches.wait(r.conf, r.zone, time.Now()); !strings.Contains(got, "the DS TTL") {
 		t.Errorf("the DS TTL just begun, it waits for %q", got)
