@@ -577,6 +577,16 @@ func (mpzd *MPZoneData) combinerApplyPublishInstruction(req *CombinerSyncRequest
 	zone := req.Zone
 	senderID := req.SenderID
 
+	// An instruction older than the sender's last KEY is not applied, as the
+	// replace that came with it was not: it would put an older KEY back, or
+	// take the newer one away, and be kept in the newer one's place
+	if stale, applied := staleCombinerReplace(req, zone, dns.TypeKEY); stale {
+		lgCombiner.Warn("ignored a stale publish instruction: older than the KEY applied", "zone", zone, "sender", senderID,
+			"this", req.Timestamp.UTC().Format(time.RFC3339Nano), "thisDistrib", req.DistributionID,
+			"applied", applied.Time.UTC().Format(time.RFC3339Nano), "appliedDistrib", applied.DistID)
+		return
+	}
+
 	var storedInstr *StoredPublishInstruction
 	if hdb != nil {
 		storedInstr, _ = GetPublishInstruction(hdb, zone, senderID)
@@ -1329,6 +1339,15 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 					"zone", zonename, "sender", req.SenderID, "rrtype", op.RRtype,
 					"this", req.Timestamp.UTC().Format(time.RFC3339Nano), "thisDistrib", req.DistributionID,
 					"applied", applied.Time.UTC().Format(time.RFC3339Nano), "appliedDistrib", applied.DistID)
+				// A KEY's drop skipped so has dropped nothing: it is refused,
+				// not told as done, and the agent asks again, later than the
+				// KEY that overtook it (keyPurge, plan S17a)
+				if req.Removal && rrtype == dns.TypeKEY {
+					rejectedItems = append(rejectedItems, RejectedItem{
+						Record: fmt.Sprintf("(replace %s)", op.RRtype),
+						Reason: "the drop is older than the KEY applied here: not made",
+					})
+				}
 				continue
 			}
 

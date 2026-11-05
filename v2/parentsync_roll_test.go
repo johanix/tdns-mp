@@ -1283,3 +1283,174 @@ func asKEY(rr dns.RR) *dns.KEY {
 	k, _ := rr.(*dns.KEY)
 	return k
 }
+
+// A purge older than the origin's last KEY REPLACE takes nothing back: the
+// queue can deliver it after that REPLACE, and its empty replace is refused
+// as stale, so its retraction must not take the newer KEY and its instruction
+// (an agent that lost the lead and quickly had it back). One newer than the
+// REPLACE drops both.
+func TestAPurgeOlderThanTheLastKEYTakesNothingBack(t *testing.T) {
+	mpzd, hdb := csyncCombinerZone(t, "roll.stalepurge.combiner.example.", true, true)
+	zone := mpzd.ZoneName
+	local := map[string]bool{csyncOurAgent: true}
+	key := testSig0Key(t, newMPTestKeyDB(t), zone).key
+	at := time.Now()
+	resp := CombinerProcessUpdate(&CombinerSyncRequest{SenderID: csyncLeaderA, DeliveredBy: csyncOurAgent, Zone: zone,
+		Operations:     []core.RROperation{{Operation: "replace", RRtype: "KEY", Records: []string{key.String()}}},
+		Publish:        &core.PublishInstruction{KEYRRs: []string{key.String()}, Locations: []string{"at-apex"}},
+		DistributionID: nextDistributionID(), Timestamp: at}, nil, local, hdb, nil)
+	if resp.Status != "ok" {
+		t.Fatalf("the KEY: %s: %s (%v)", resp.Status, resp.Message, resp.RejectedItems)
+	}
+	purge := func(when time.Time) *CombinerSyncResponse {
+		t.Helper()
+		zu := keyPurge(ZoneName(zone), csyncLeaderA)
+		return CombinerProcessUpdate(&CombinerSyncRequest{SenderID: string(zu.AgentId), DeliveredBy: csyncOurAgent, Zone: zone,
+			Operations: zu.Operations, Publish: zu.Publish, Removal: zu.Withdraw != nil,
+			DistributionID: nextDistributionID(), Timestamp: when}, nil, local, hdb, nil)
+	}
+	holds := func() int { return len(mpzd.MP.AgentContributions[csyncLeaderA][zone][dns.TypeKEY].RRs) }
+	stored := func() *StoredPublishInstruction {
+		t.Helper()
+		s, err := GetPublishInstruction(hdb, zone, csyncLeaderA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+
+	// the older drop is refused, not told as made: its agent asks again
+	// (CodeRabbit at 290cd90)
+	if resp := purge(at.Add(-time.Minute)); resp.Status == "ok" || len(resp.RejectedItems) != 1 {
+		t.Errorf("the older purge: %s: %s (%v)", resp.Status, resp.Message, resp.RejectedItems)
+	}
+	if holds() != 1 || stored() == nil {
+		t.Errorf("after an older purge: %d KEYs held, instruction %+v", holds(), stored())
+	}
+	if resp := purge(at.Add(time.Minute)); resp.Status != "ok" {
+		t.Fatalf("the newer purge: %s: %s", resp.Status, resp.Message)
+	}
+	if holds() != 0 || stored() != nil {
+		t.Errorf("after a newer purge: %d KEYs held, instruction %+v", holds(), stored())
+	}
+}
+
+// An older KEY that comes with its instruction after a newer one, as the
+// queue can deliver it, does not put the older KEY back: its replace is
+// refused as stale, and so is its instruction, which would otherwise apply
+// the older KEY and be kept in the newer one's place.
+func TestAnOlderKEYWithItsInstructionDoesNotComeBack(t *testing.T) {
+	mpzd, hdb := csyncCombinerZone(t, "roll.stalekey.combiner.example.", true, true)
+	zone := mpzd.ZoneName
+	local := map[string]bool{csyncOurAgent: true}
+	newer := testSig0Key(t, newMPTestKeyDB(t), zone).key
+	older := testSig0Key(t, newMPTestKeyDB(t), zone).key
+	at := time.Now()
+	send := func(key *dns.KEY, when time.Time) {
+		t.Helper()
+		resp := CombinerProcessUpdate(&CombinerSyncRequest{SenderID: csyncLeaderA, DeliveredBy: csyncOurAgent, Zone: zone,
+			Operations:     []core.RROperation{{Operation: "replace", RRtype: "KEY", Records: []string{key.String()}}},
+			Publish:        &core.PublishInstruction{KEYRRs: []string{key.String()}, Locations: []string{"at-apex"}},
+			DistributionID: nextDistributionID(), Timestamp: when}, nil, local, hdb, nil)
+		if resp.Status != "ok" {
+			t.Fatalf("the KEY: %s: %s (%v)", resp.Status, resp.Message, resp.RejectedItems)
+		}
+	}
+	send(newer, at)
+	send(older, at.Add(-time.Minute))
+	if got := mpzd.MP.AgentContributions[csyncLeaderA][zone][dns.TypeKEY].RRs; len(got) != 1 || !sameKey(asKEY(got[0]), newer) {
+		t.Errorf("the KEY held after an older one came: %v", got)
+	}
+	stored, err := GetPublishInstruction(hdb, zone, csyncLeaderA)
+	if err != nil || stored == nil || len(stored.KEYRRs) != 1 || stored.KEYRRs[0] != newer.String() {
+		t.Errorf("the instruction kept after an older one came: %+v, %v", stored, err)
+	}
+}
+
+// severalRig: this agent leads, holds the zone's key, which the stand-in
+// parent trusts, and the apex carries it beside a KEY no agent holds.
+func newSeveralRig(t *testing.T, zone string) *rollRig {
+	t.Helper()
+	r := newRollRig(t, zone)
+	other := testSig0Key(t, newMPTestKeyDB(t), string(r.zone))
+	r.publish(t, r.old, other)
+	return r
+}
+
+// explicitSync is the answer to an explicit sync, and whether an UPDATE went
+// out for it.
+func (r *rollRig) explicitSync(t *testing.T) (string, bool) {
+	t.Helper()
+	before := r.keyRoundRig.parent.updatesSeen()
+	resp := make(chan tdns.DelegationSyncStatus, 1)
+	r.q <- tdns.DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: string(r.zone), ZoneData: r.mpzd.ZoneData, Response: resp}
+	got, ok := recvWithin(resp, 5*time.Second)
+	if !ok {
+		t.Fatal("no answer to the sync")
+	}
+	return got.Msg + got.ErrorMsg, r.keyRoundRig.parent.updatesSeen() > before
+}
+
+func (r *rollRig) parentForgets(keyid uint16) {
+	r.parent.mu.Lock()
+	defer r.parent.mu.Unlock()
+	delete(r.parent.trusted, keyid)
+}
+
+// The project owner's rule (2026-11-05): several KEYs at the apex do not hold
+// a sync signed with this agent's one active key, which the parent trusts: the
+// parent is asked in this lead, and several KEYs are a warning.
+func TestSeveralKEYsDoNotHoldASyncSignedWithAKeyTheParentTrusts(t *testing.T) {
+	r := newSeveralRig(t, "several.signs.example.")
+	got, sent := r.explicitSync(t)
+	if !sent {
+		t.Fatalf("no UPDATE went out: %q", got)
+	}
+	if !strings.Contains(r.alog.String(), "the sync signs with this agent's key, which the parent trusts") {
+		t.Errorf("no warning of several KEYs:\n%s", r.alog)
+	}
+}
+
+// Without the parent's word in this lead, a recorded parent_state does not
+// let the sync sign: the parent is asked, and one that does not trust the key
+// holds the sync, and has its word kept.
+func TestSeveralKEYsHoldASyncTheParentDoesNotTrustTheKeyFor(t *testing.T) {
+	r := newSeveralRig(t, "several.untrusted.example.")
+	r.parentForgets(r.old.keyid)
+	got, sent := r.explicitSync(t)
+	if sent || !strings.Contains(got, "is not heard in this lead") {
+		t.Errorf("the sync went out or was held for another reason: sent %v, %q", sent, got)
+	}
+	if zk, err := readZoneKey(r.mpzd.KeyDB, r.zone); err != nil || len(zk.active) != 1 || zk.active[0].parentState == edns0.KeyStateTrusted {
+		t.Error("the parent's word that it does not trust the key is not kept")
+	}
+}
+
+// The parent's word counts in the lead that heard it only: after the lead has
+// moved and come back, an earlier word does not let the sync sign.
+func TestAWordFromAnEarlierLeadDoesNotLetSeveralKEYsSign(t *testing.T) {
+	r := newSeveralRig(t, "several.earlierlead.example.")
+	if _, sent := r.explicitSync(t); !sent {
+		t.Fatal("no UPDATE went out in the first lead")
+	}
+	self := r.conf.localAgentID()
+	r.leader(r.them)
+	r.leader(self)
+	r.parentForgets(r.old.keyid)
+	if got, sent := r.explicitSync(t); sent || !strings.Contains(got, "is not heard in this lead") {
+		t.Errorf("a word from the earlier lead let the sync sign: sent %v, %q", sent, got)
+	}
+}
+
+// Right before the send the parent is asked again: a key it no longer trusts
+// does not sign, so no BADKEY and no bootstrap of it, whatever this lead heard.
+func TestSeveralKEYsSendNothingWithAKeyTheParentNoLongerTrusts(t *testing.T) {
+	r := newSeveralRig(t, "several.nolonger.example.")
+	if _, sent := r.explicitSync(t); !sent {
+		t.Fatal("no UPDATE went out while the parent trusted the key")
+	}
+	r.parentForgets(r.old.keyid)
+	if got, sent := r.explicitSync(t); sent || !strings.Contains(got, "does not trust key") {
+		t.Errorf("a key the parent no longer trusts signed: sent %v, %q", sent, got)
+	}
+}

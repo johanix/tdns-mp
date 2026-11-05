@@ -667,6 +667,9 @@ func (conf *Config) rollStep(ctx context.Context, kdb *tdns.KeyDB, r *sig0Roll) 
 		if state != edns0.KeyStateTrusted {
 			return "", fmt.Errorf("the parent does not trust key %d yet (%s)", r.newKeyid, edns0.KeyStateToString(state))
 		}
+		if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
+			conf.noteTrustHeard(zone, r.newKeyid, lem.LeadStart(zone))
+		}
 		if err := conf.publishRolledKEY(zone, newKey); err != nil {
 			return "", err
 		}
