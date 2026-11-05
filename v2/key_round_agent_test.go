@@ -509,6 +509,7 @@ func TestAnUnreadableParentKeepsAskingAndMakesNoKey(t *testing.T) {
 // are named as such, not as a key not held.
 func TestTheKeyHoldLogsWhenItsReasonChanges(t *testing.T) {
 	r := newKeyRoundRig(t, "reason.hold.example.", "UPDATE")
+	r.conf.InternalMp.rollParent = newRollTestParent() // trusts no key: several KEYs hold
 	local := testSig0Key(t, r.mpzd.KeyDB, string(r.zone))
 	other := testSig0Key(t, newMPTestKeyDB(t), string(r.zone))
 	r.publish(t, other)
@@ -534,14 +535,14 @@ func TestTheKeyHoldLogsWhenItsReasonChanges(t *testing.T) {
 		t.Errorf("%d lines for one reason, want 1\n%s", n, r.alog)
 	}
 	r.publish(t, local, other)
-	if got := explicit(); !strings.Contains(got, "(the zone publishes several KEYs)") {
+	if got := explicit(); !strings.Contains(got, "(the zone publishes several KEYs") {
 		t.Errorf("the answer for several KEYs: %q", got)
 	}
 	explicit()
 	if n := lines(); n != 2 {
 		t.Errorf("%d lines after the reason changed, want 2\n%s", n, r.alog)
 	}
-	if !strings.Contains(r.alog.String(), "reason=\"the zone publishes several KEYs\"") {
+	if !strings.Contains(r.alog.String(), "reason=\"the zone publishes several KEYs") {
 		t.Errorf("no line names several KEYs:\n%s", r.alog)
 	}
 }

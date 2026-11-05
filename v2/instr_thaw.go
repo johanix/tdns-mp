@@ -583,6 +583,7 @@ func (conf *Config) thawTurn(zone string) {
 	}
 	conf.activateOnTellings(zone)
 	conf.fetchAgreed(zone)
+	conf.rollDebtTurn(zone)
 }
 
 // thaw makes the serial agreed on active, by this agent's own word: the

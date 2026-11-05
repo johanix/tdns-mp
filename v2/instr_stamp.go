@@ -1232,6 +1232,7 @@ func (s *InstructionStore) stampOf(zone string) (InstrStamp, bool) {
 		st.Thaw = &th
 	}
 	z.stampStepLocked(&st)
+	st.RollOwed, st.RollDone = z.RollOwed, z.RollDone
 	return st, true
 }
 
