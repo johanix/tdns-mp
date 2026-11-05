@@ -112,9 +112,12 @@ func (conf *Config) keepForLeader(u *SynchedDataUpdate, msgQs *MsgQs) bool {
 // leaderHolds: the kept update ku, which carries a CSYNC or a KEY, still
 // waits for the zone's leader here. One not noted as waiting for it yet,
 // kept for its serial, waits as a new one would (leaderWait), and leader
-// and until are what to note on it. One noted is released once the wait
-// has ended, once a leader is known when none was when it was noted, or
-// once the lease noted has run out.
+// and until are what to note on it. One noted waits while no leader is
+// known here, whatever lease it noted, with no time-out: judged then it
+// would be refused for that alone, and its sender may be a leader this agent
+// has not heard of yet. With a leader known it is released once the wait has
+// ended, when none was known when it was noted, or once the lease noted has
+// run out.
 func (conf *Config) leaderHolds(zone ZoneName, ku keptUpdate, now time.Time) (holds bool, leader AgentId, until time.Time) {
 	why, leader, until := conf.leaderWait(zone, ku.DeliveredBy)
 	switch {

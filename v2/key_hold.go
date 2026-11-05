@@ -39,6 +39,12 @@ import (
 // poll of the zone's key ends (keyPollEnded), when the key is retired to one,
 // and from the 30 s ticker (retestKeyHolds).
 
+// keyHoldLogged is the hold last logged for a zone: when, and its reason.
+type keyHoldLogged struct {
+	at  time.Time
+	why string
+}
+
 // keyPollBook is the per-zone state of the hold, under its own lock: a leaf,
 // taken by nothing that holds another lock of this package's.
 type keyPollBook struct {
@@ -61,8 +67,9 @@ type keyPollBook struct {
 	// lost: the zone publishes a KEY that no agent asked holds, by its key
 	// id, as the leader's last round found (step 7b); shown as LOST.
 	lost map[ZoneName]uint16
-	// logged: when the hold was last logged for the zone (once an hour).
-	logged map[ZoneName]time.Time
+	// logged: the hold last logged for the zone (once an hour, and when its
+	// reason changes).
+	logged map[ZoneName]keyHoldLogged
 	// retesting: a backstop pass runs (retestKeyHoldsInBackground).
 	retesting atomic.Bool
 	// goroutines: the polls and the backstop passes, each to its end, the
@@ -85,7 +92,7 @@ func (b *keyPollBook) init() {
 		b.unpublished = map[ZoneName]bool{}
 		b.ended = map[ZoneName]keyPollEnd{}
 		b.owed = map[ZoneName]bool{}
-		b.logged = map[ZoneName]time.Time{}
+		b.logged = map[ZoneName]keyHoldLogged{}
 		b.offered = map[ZoneName]time.Time{}
 		b.lost = map[ZoneName]uint16{}
 	}
@@ -280,6 +287,9 @@ func (conf *Config) keyHold(ctx context.Context, zone ZoneName) (uses bool, why 
 		return true, "not held"
 	}
 	zk, err := readZoneKey(kdb, zone)
+	if err == nil && zk.several() {
+		return true, "the zone publishes several KEYs"
+	}
 	if err != nil || zk.held == nil {
 		return true, "not held"
 	}
@@ -427,8 +437,8 @@ func (conf *Config) zoneKeyLine(ctx context.Context, zone ZoneName) string {
 
 // holdForZoneKey holds the leader's sync of a multi-provider zone while the
 // zone's key is not held, not the one tdns signs with, or still being
-// bootstrapped: it marks the sync owed for the key, logs why (the first time
-// and then once an hour), and reports that nothing is to be sent. The
+// bootstrapped: it marks the sync owed for the key, logs why (when the reason
+// is new, and then once an hour), and reports that nothing is to be sent. The
 // syncher calls it after the hold for the catch-up, in both arms; the
 // explicit arm answers its caller at once. Never waits.
 func (conf *Config) holdForZoneKey(ctx context.Context, ds tdns.DelegationSyncRequest) (held bool, why string) {
@@ -457,9 +467,9 @@ func (conf *Config) holdForZoneKey(ctx context.Context, ds tdns.DelegationSyncRe
 	b.init()
 	last := b.logged[canonZone(zone)]
 	now := time.Now()
-	logIt := now.Sub(last) >= time.Hour
+	logIt := last.why != why || now.Sub(last.at) >= time.Hour
 	if logIt {
-		b.logged[canonZone(zone)] = now
+		b.logged[canonZone(zone)] = keyHoldLogged{at: now, why: why}
 	}
 	b.mu.Unlock()
 	if logIt {
