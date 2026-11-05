@@ -6,7 +6,7 @@ replace github.com/johanix/tdns-mp/v2 => ../../v2
 
 require (
 	github.com/johanix/tdns-mp/v2 v2.0.0-20260526134639-0f2c99fa4d2c
-	github.com/johanix/tdns/v2 v2.0.0-20261104210356-072796b45411
+	github.com/johanix/tdns/v2 v2.0.0-20261105215110-830851b071b1
 	github.com/mattn/go-sqlite3 v1.14.52
 )
 
@@ -26,7 +26,7 @@ require (
 	github.com/johanix/tdns-transport/v2 v2.0.0-20261102131942-a67a9f96558a // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20261102143859-91b4e41c48b6 // indirect
 	github.com/johanix/tdns/v2/core v0.0.0-20261102143859-91b4e41c48b6 // indirect
-	github.com/johanix/tdns/v2/edns0 v0.0.0-20261102143859-91b4e41c48b6 // indirect
+	github.com/johanix/tdns/v2/edns0 v0.0.0-20261105215110-830851b071b1 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/miekg/dns v1.1.72 // indirect
