@@ -317,7 +317,10 @@ func (conf *Config) deleteAgentsKey(ctx context.Context, zone ZoneName) {
 			return nil
 		}
 		if zk.held == nil || zk.held.key == nil {
-			if len(zk.published) > 0 {
+			switch {
+			case zk.several():
+				tell(keyTags(zk.published), errors.New("the zone publishes several KEYs"))
+			case len(zk.published) > 0:
 				tell(keyTags(zk.published), errors.New("this agent holds no key the zone publishes"))
 			}
 			return nil
