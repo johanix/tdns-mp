@@ -203,21 +203,33 @@ type transferCheck struct {
 	ok      bool
 	at      time.Time // when the latest check ended
 	running bool
-	served  *uint32 // what the nameservers served at the step's first check (an upstream's step)
 }
 
 // stepName names a step for the book: the zone's active serial, the step's
 // key and its digest. A later transition that gives the role again, with
 // the same sets, is another step.
 func (conf *Config) stepName(zone string, step InstrStep) string {
-	if len(step.Taken) == 0 {
-		return ""
-	}
 	var serial uint32
 	if active, _ := conf.InternalMp.Instructions.activeSerial(zone); active != nil {
 		serial = active.Serial
 	}
+	return stepNameAt(serial, step)
+}
+
+func stepNameAt(serial uint32, step InstrStep) string {
+	if len(step.Taken) == 0 {
+		return ""
+	}
 	return fmt.Sprintf("%d %s %s", serial, step.Taken[len(step.Taken)-1], step.Digest)
+}
+
+// stepName is the name of the step z holds; "" with none.
+func (z *zoneSerials) stepName() string {
+	st, ok := z.stepHeldLocked()
+	if !ok || z.Active == nil {
+		return ""
+	}
+	return stepNameAt(z.Active.Serial, st.InstrStep)
 }
 
 // confirmed is whether this agent's nameservers serve the zone as step

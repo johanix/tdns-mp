@@ -313,8 +313,9 @@ var HsyncTables = map[string]string{
 	// active serial and its digest, the phase and whether the active serial
 	// is enforced, in columns of their own; and all of it, the newer
 	// serials held, the from-serial, the last thaw, an owner error, the
-	// step and its sets among them, as JSON in state. Read at the start,
-	// before the first load; written before a change is told.
+	// step, its sets and an upstream's floor among them, as JSON in state.
+	// Read at the start, before the first load; written before a change is
+	// told.
 	"MPZoneInstructions": `CREATE TABLE IF NOT EXISTS 'MPZoneInstructions' (
 		zonename  TEXT NOT NULL,
 		active    INTEGER,

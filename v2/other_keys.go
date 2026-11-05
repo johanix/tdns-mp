@@ -93,31 +93,72 @@ func upstreamHolds(conf *Config, zone string, step InstrStep) bool {
 	name := conf.stepName(zone, step)
 	b := &conf.InternalMp.transfers
 	return b.confirmed(conf, zone, step, func(ctx context.Context) (uint32, error) {
-		return b.servedAtFirstCheck(ctx, zone, name, mp.Local.Nameservers)
+		return conf.servedAtFirstCheck(ctx, zone, name, mp.Local.Nameservers)
 	})
 }
 
 // servedAtFirstCheck is the serial this agent's nameservers served at the
-// step's first check whose every nameserver answered, kept for the step. In
-// memory: after a restart the serving check asks them again, and a server
-// that has moved meanwhile passes on its upstream's signatures.
-func (b *transferBook) servedAtFirstCheck(ctx context.Context, zone, name string, nameservers []string) (uint32, error) {
-	b.mu.Lock()
-	if c := b.zones[canonicalName(zone)]; c != nil && c.step == name && c.served != nil {
-		defer b.mu.Unlock()
-		return *c.served, nil
+// step's first check whose every nameserver answered. It goes on disk before
+// a check passes against it, so a restart keeps it (the project owner,
+// 2026-11-05): asked again after one, a server that has moved meanwhile would
+// set its own floor. One that cannot be kept fails the check, and the next
+// asks again.
+func (conf *Config) servedAtFirstCheck(ctx context.Context, zone, name string, nameservers []string) (uint32, error) {
+	store := conf.InternalMp.Instructions
+	if served, ok := store.floorFor(zone, name); ok {
+		return served, nil
 	}
-	b.mu.Unlock()
 	served, err := highestServedSerial(ctx, zone, nameservers)
 	if err != nil {
 		return 0, err
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if c := b.zones[canonicalName(zone)]; c != nil && c.step == name {
-		c.served = &served
+	if err := store.keepFloor(zone, name, served); err != nil {
+		return 0, err
 	}
 	return served, nil
+}
+
+// stepFloor is what a step's check goes by, as the store keeps it with the
+// step: the serial, and the step's name (stepName). update drops it when the
+// zone's step is no longer the one named.
+type stepFloor struct {
+	Step   string `json:"step"`
+	Serial uint32 `json:"serial"`
+}
+
+// floorFor is the serial kept for the step named; false with none.
+func (s *InstructionStore) floorFor(zone, name string) (uint32, bool) {
+	if s == nil {
+		return 0, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, z := s.zoneLocked(zone)
+	if z == nil || z.StepFloor == nil || z.StepFloor.Step != name {
+		return 0, false
+	}
+	return z.StepFloor.Serial, true
+}
+
+// keepFloor keeps serial for the step named, refused when the zone's step is
+// another by now.
+func (s *InstructionStore) keepFloor(zone, name string, serial uint32) error {
+	if s == nil {
+		return fmt.Errorf("zone %s: no serials kept", zone)
+	}
+	s.mu.Lock()
+	stored, _ := s.zoneLocked(zone)
+	s.mu.Unlock()
+	if stored == "" {
+		return fmt.Errorf("zone %s: no serials kept", zone)
+	}
+	return s.update(stored, func(z *zoneSerials) error {
+		if z.stepName() != name {
+			return fmt.Errorf("zone %s: the step %q is not the one held", zone, name)
+		}
+		z.StepFloor = &stepFloor{Step: name, Serial: serial}
+		return nil
+	})
 }
 
 // upstreamStatus is what an upstream's step waits for, at every agent while

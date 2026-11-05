@@ -5,6 +5,7 @@ package tdnsmp
 
 import (
 	"context"
+	"crypto"
 	"fmt"
 	"slices"
 	"strings"
@@ -26,6 +27,26 @@ const (
 
 func upstreamStep(id string) InstrStep {
 	return InstrStep{Number: 1, Of: 2, Digest: "d1", Taken: []string{upstreamKey + id}}
+}
+
+// holdingUpstreamStep gives the rig's agent a store, on no disk, with the zone
+// active and the upstream's step of its own provider held: what the
+// nameservers served at the first check goes with that step.
+func (r *servingRig) holdingUpstreamStep(t *testing.T) InstrStep {
+	t.Helper()
+	in := instructionsFor(ZoneName(r.zone))
+	store := loadStore(t, nil)
+	knownAs(t, store, r.zone, in)
+	raw, digest, err := stepDigest(rolesFor(in, in, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := InstrStep{Number: 1, Of: 2, Sets: raw, Digest: digest, Taken: []string{upstreamKey + srNewcomer}}
+	if err := store.setStep(r.zone, sd(in), step, nil); err != nil {
+		t.Fatal(err)
+	}
+	r.conf.InternalMp.Instructions = store
+	return step
 }
 
 // An upstream (design 5.6): the judge agrees it, and its step, a role
@@ -61,7 +82,7 @@ func TestAnUpstreamChangeIsAStepThatWaitsForTheServers(t *testing.T) {
 	}
 
 	r := newServingRig(t, "move.upstream.example.", srNewcomer)
-	step := upstreamStep(srNewcomer)
+	step := r.holdingUpstreamStep(t)
 	recheck := func() { r.conf.InternalMp.transfers.zones[canonicalName(r.zone)].at = time.Now().Add(-transferRecheck) }
 
 	// no answer: nothing is known of what they served
@@ -96,7 +117,7 @@ func TestAnUpstreamChangeIsAStepThatWaitsForTheServers(t *testing.T) {
 
 	other := newServingRig(t, "other.upstream.example.", "b.role.example.")
 	serving(t, nil, nil)
-	if !upstreamHolds(other.conf, other.zone, step) {
+	if !upstreamHolds(other.conf, other.zone, upstreamStep(srNewcomer)) {
 		t.Error("another agent's part of the step waits for the provider's nameservers")
 	}
 }
@@ -108,6 +129,45 @@ func TestAnUpstreamChangeIsAStepThatWaitsForTheServers(t *testing.T) {
 // upstream's, the turn takes the last step.
 func TestAnUpstreamsStepHoldsTheTransitionUntilItsServersServe(t *testing.T) {
 	const zone = "turn.upstream.example."
+	u := newUpstreamMove(t, zone)
+	r, st := u.reconcileRig, u.step
+	key, priv := u.key, u.priv
+	old, oldPriv := signingKey(t, zone)
+	serving(t, soa(t, zone, 9, old, oldPriv), nil)
+
+	everyMemberHolds := u.everyMemberHolds
+	everyMemberHolds()
+	r.turn(time.Now())
+	if got, _ := r.step(); got.Number != st.Number {
+		t.Fatalf("the transition moved on to %+v while the nameservers serve the old upstream's copy", got)
+	}
+	if r.own().StepHeld {
+		t.Error("the stamp tells the step held while the nameservers serve the old upstream's copy")
+	}
+
+	r.conf.InternalMp.transfers.zones[canonicalName(zone)].at = time.Now().Add(-transferRecheck)
+	serving(t, soa(t, zone, 9, key, priv), nil)
+	if !r.own().StepHeld {
+		t.Error("the stamp does not tell the step held once the nameservers serve the new upstream's copy")
+	}
+	r.turn(time.Now())
+	got, ok := r.step()
+	if !ok || got.Number != st.Number+1 || got.Taken[len(got.Taken)-1] != lastStepKey {
+		t.Errorf("the last step was not taken: number %d of %d, taken %v", got.Number, got.Of, got.Taken)
+	}
+}
+
+// upstreamMove is the rig of a transition that moves a's upstream from b to
+// n, with a leading: thawed, n's key known here, and the upstream's step taken.
+type upstreamMove struct {
+	*reconcileRig
+	key  *dns.DNSKEY // the new upstream's
+	priv crypto.Signer
+	step InstrStep
+}
+
+func newUpstreamMove(t *testing.T, zone string) *upstreamMove {
+	t.Helper()
 	r := newReconcileRig(t, zone, roleA)
 	records := func(upstream string) []string {
 		return []string{`3600 IN HSYNC3 ON a ` + roleA + ` ` + upstream, `3600 IN HSYNC3 ON b ` + roleB + ` .`, `3600 IN HSYNC3 ON n ` + roleN + ` .`}
@@ -135,40 +195,234 @@ func TestAnUpstreamsStepHoldsTheTransitionUntilItsServersServe(t *testing.T) {
 	}
 	zdr.Repo.Set(ZoneName(zone), ar)
 	r.conf.InternalMp.ZoneDataRepo = zdr
-	old, oldPriv := signingKey(t, zone)
-	serving(t, soa(t, zone, 9, old, oldPriv), nil)
 
-	everyMemberHolds := func() {
-		r.partsTake()
-		r.holdsToo(roleB)
-		r.holdsToo(roleN)
-	}
-	everyMemberHolds()
+	u := &upstreamMove{reconcileRig: r, key: key, priv: priv}
+	u.everyMemberHolds()
 	r.turn(time.Now())
 	st, ok := r.step()
 	if !ok || !slices.Equal(st.Taken, []string{upstreamKey + roleA}) {
 		t.Fatalf("the upstream's step was not taken: %+v", st)
 	}
+	u.step = st
+	return u
+}
 
-	everyMemberHolds()
-	r.turn(time.Now())
-	if got, _ := r.step(); got.Number != st.Number {
-		t.Fatalf("the transition moved on to %+v while the nameservers serve the old upstream's copy", got)
+func (u *upstreamMove) everyMemberHolds() {
+	u.partsTake()
+	u.holdsToo(roleB)
+	u.holdsToo(roleN)
+}
+
+// check is the provider's next check of its nameservers, and whether the
+// step is held after it.
+func (u *upstreamMove) check() bool {
+	if c := u.conf.InternalMp.transfers.zones[canonicalName(u.zone)]; c != nil {
+		c.at = time.Now().Add(-transferRecheck)
 	}
-	if r.own().StepHeld {
-		t.Error("the stamp tells the step held while the nameservers serve the old upstream's copy")
+	return upstreamHolds(u.conf, u.zone, u.step)
+}
+
+// floorOnDisk is the floor a store read from disk now holds for the step.
+func (u *upstreamMove) floorOnDisk() (uint32, bool) {
+	u.t.Helper()
+	return loadStore(u.t, u.hdb).floorFor(u.zone, u.conf.stepName(u.zone, u.step))
+}
+
+// The project owner's ruling on reading 1 (2026-11-05, CodeRabbit on #365):
+// what the nameservers served at the step's first check outlives a restart.
+// Asked again after one, a server that has moved meanwhile sets its own floor.
+func TestARestartBetweenTheFirstCheckAndTheServingCheckRefusesALowerSerial(t *testing.T) {
+	const zone = "floor.upstream.example."
+	u := newUpstreamMove(t, zone)
+	old, oldPriv := signingKey(t, zone)
+	serving(t, soa(t, zone, 9, old, oldPriv), nil)
+	if u.check() {
+		t.Fatal("held while the nameservers serve the old upstream's copy")
+	}
+	if got, ok := u.floorOnDisk(); !ok || got != 9 {
+		t.Fatalf("the floor on disk: %d %v, want 9", got, ok)
 	}
 
-	r.conf.InternalMp.transfers.zones[canonicalName(zone)].at = time.Now().Add(-transferRecheck)
-	serving(t, soa(t, zone, 9, key, priv), nil)
-	if !r.own().StepHeld {
-		t.Error("the stamp does not tell the step held once the nameservers serve the new upstream's copy")
+	u.restart()
+	serving(t, soa(t, zone, 8, u.key, u.priv), nil)
+	if u.check() {
+		t.Error("held at serial 8 after a restart, below the 9 the nameservers served")
 	}
-	r.turn(time.Now())
-	got, ok := r.step()
-	if !ok || got.Number != st.Number+1 || got.Taken[len(got.Taken)-1] != lastStepKey {
-		t.Errorf("the last step was not taken: number %d of %d, taken %v", got.Number, got.Of, got.Taken)
+	serving(t, soa(t, zone, 9, u.key, u.priv), nil)
+	if !u.check() {
+		t.Error("not held at the serial they served, on the new upstream's signatures")
 	}
+}
+
+// A restart with no floor kept yet: nothing is known of what they served, so
+// the first answer sets it, and that one outlives the next restart too. A
+// check with a nameserver that does not answer sets none.
+func TestARestartBeforeAnyFirstCheckTakesTheFirstAnswerAsTheFloor(t *testing.T) {
+	const zone = "first.upstream.example."
+	u := newUpstreamMove(t, zone)
+	if got, ok := u.floorOnDisk(); ok {
+		t.Fatalf("a floor before any check: %d", got)
+	}
+
+	u.restart()
+	serving(t, nil, nil)
+	if u.check() {
+		t.Fatal("held while the nameservers do not answer")
+	}
+	if got, ok := u.floorOnDisk(); ok {
+		t.Fatalf("a floor from no answer: %d", got)
+	}
+	old, oldPriv := signingKey(t, zone)
+	serving(t, soa(t, zone, 7, old, oldPriv), nil)
+	if u.check() {
+		t.Fatal("held while the nameservers serve the old upstream's copy")
+	}
+	if got, ok := u.floorOnDisk(); !ok || got != 7 {
+		t.Fatalf("the floor on disk: %d %v, want the first answer, 7", got, ok)
+	}
+
+	u.restart()
+	serving(t, soa(t, zone, 6, u.key, u.priv), nil)
+	if u.check() {
+		t.Error("held at serial 6, below the first answer's 7")
+	}
+	serving(t, soa(t, zone, 7, u.key, u.priv), nil)
+	if !u.check() {
+		t.Error("not held at the first answer's serial")
+	}
+}
+
+// The floor goes when its step ends, on disk too, and no later step reads it:
+// not the same step told again, which keeps it, but the transition's next
+// step, its end, and a next transition at an agent that missed that end. A
+// later transition that moves the same provider again has the same key and
+// the same sets, and starts over: its first answer may be lower.
+func TestANewStepDoesNotReadAnOldStepsFloor(t *testing.T) {
+	floorAt9 := func(t *testing.T, zone string) *upstreamMove {
+		t.Helper()
+		u := newUpstreamMove(t, zone)
+		old, oldPriv := signingKey(t, zone)
+		serving(t, soa(t, zone, 9, old, oldPriv), nil)
+		if u.check() {
+			t.Fatal("held while the nameservers serve the old upstream's copy")
+		}
+		if got, ok := u.floorOnDisk(); !ok || got != 9 {
+			t.Fatalf("the floor on disk: %d %v, want 9", got, ok)
+		}
+		return u
+	}
+	active := func(u *upstreamMove) SerialDigest { return sd(u.v) }
+
+	t.Run("the same step told again keeps it", func(t *testing.T) {
+		u := floorAt9(t, "again.floor.upstream.example.")
+		if err := u.store.setStep(u.zone, active(u), u.step, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := u.floorOnDisk(); !ok || got != 9 {
+			t.Errorf("the floor on disk: %d %v, want 9", got, ok)
+		}
+	})
+	ends := map[string]func(t *testing.T, u *upstreamMove){
+		"the next step": func(t *testing.T, u *upstreamMove) {
+			next := u.step
+			next.Number, next.Taken = next.Number+1, append(slices.Clone(next.Taken), lastStepKey)
+			if err := u.store.setStep(u.zone, active(u), next, nil); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"the transition's end": func(t *testing.T, u *upstreamMove) {
+			if err := u.store.Done(u.zone); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, end := range ends {
+		t.Run(name, func(t *testing.T) {
+			u := floorAt9(t, "end.floor.upstream.example.")
+			end(t, u)
+			if got, ok := u.floorOnDisk(); ok {
+				t.Errorf("the floor outlived the step: %d", got)
+			}
+			if st := loadStore(t, u.hdb).zones[u.zone]; st.StepFloor != nil {
+				t.Errorf("the record on disk keeps %+v", st.StepFloor)
+			}
+		})
+	}
+	t.Run("a later move of the same provider", func(t *testing.T) {
+		for name, ended := range map[string]bool{"after the end": true, "at an agent that missed the end": false} {
+			t.Run(name, func(t *testing.T) {
+				u := floorAt9(t, "later.floor.upstream.example.")
+				if ended {
+					if err := u.store.Done(u.zone); err != nil {
+						t.Fatal(err)
+					}
+				}
+				next := jAt(t, 43, `servers="a,b,n" signers="b,n"`, `3600 IN HSYNC3 ON a `+roleA+` n`, `3600 IN HSYNC3 ON b `+roleB+` .`, `3600 IN HSYNC3 ON n `+roleN+` .`)
+				u.store.Note(u.zone, next, nil)
+				if err := u.store.Activate(u.zone, Thaw{From: sd(u.v), To: sd(next)}); err != nil {
+					t.Fatal(err)
+				}
+				if f := loadStore(t, u.hdb).zones[u.zone].StepFloor; f != nil {
+					t.Fatalf("the next transition keeps the floor: %+v", f)
+				}
+				if err := u.store.setStep(u.zone, sd(next), u.step, nil); err != nil {
+					t.Fatal(err)
+				}
+				serving(t, soa(t, u.zone, 5, u.key, u.priv), nil)
+				if !u.check() {
+					t.Error("not held at the new step's first answer: it read the old step's floor")
+				}
+				if got, ok := u.floorOnDisk(); !ok || got != 5 {
+					t.Errorf("the floor on disk: %d %v, want 5", got, ok)
+				}
+			})
+		}
+	})
+}
+
+// A floor that cannot go on disk fails the check, though the nameservers serve
+// as they should: a pass against it would not outlive a restart. A check for a
+// step the store no longer holds keeps nothing and passes nothing, nor does it
+// read the floor of the step it does hold.
+func TestAFloorThatCannotBeKeptFailsTheCheck(t *testing.T) {
+	t.Run("the disk fails", func(t *testing.T) {
+		u := newUpstreamMove(t, "disk.floor.upstream.example.")
+		serving(t, soa(t, u.zone, 9, u.key, u.priv), nil)
+		u.hdb.DB.Close()
+		if u.check() {
+			t.Error("held on a floor that did not go on disk")
+		}
+	})
+	stale := func(u *upstreamMove) InstrStep {
+		st := u.step
+		st.Digest = "moved-on"
+		return st
+	}
+	t.Run("the step moved on, with no floor", func(t *testing.T) {
+		u := newUpstreamMove(t, "stale.floor.upstream.example.")
+		serving(t, soa(t, u.zone, 9, u.key, u.priv), nil)
+		if upstreamHolds(u.conf, u.zone, stale(u)) {
+			t.Error("held for a step the store does not hold")
+		}
+		if got, ok := u.floorOnDisk(); ok {
+			t.Errorf("a stale check kept a floor: %d", got)
+		}
+	})
+	t.Run("the step moved on, with the step's floor kept", func(t *testing.T) {
+		u := newUpstreamMove(t, "stale2.floor.upstream.example.")
+		old, oldPriv := signingKey(t, u.zone)
+		serving(t, soa(t, u.zone, 9, old, oldPriv), nil)
+		if u.check() {
+			t.Fatal("held while the nameservers serve the old upstream's copy")
+		}
+		serving(t, soa(t, u.zone, 10, u.key, u.priv), nil)
+		if upstreamHolds(u.conf, u.zone, stale(u)) {
+			t.Error("held for a step the store does not hold, by the floor of the one it does")
+		}
+		if got, ok := u.floorOnDisk(); !ok || got != 9 {
+			t.Errorf("the floor on disk: %d %v, want 9", got, ok)
+		}
+	})
 }
 
 // The status: every agent says whose nameservers the step waits for; the
@@ -176,7 +430,7 @@ func TestAnUpstreamsStepHoldsTheTransitionUntilItsServersServe(t *testing.T) {
 // nothing moves until it does; nothing once held.
 func TestTheStatusSaysWhatTheOperatorMustPointForAnUpstream(t *testing.T) {
 	r := newServingRig(t, "status.upstream.example.", srNewcomer)
-	step := upstreamStep(srNewcomer)
+	step := r.holdingUpstreamStep(t)
 	want := "waiting for n.role.example.'s nameservers to serve the zone from its new upstream"
 	point := "; its operator must point ns1.n.example., ns2.n.example. at a.role.example. for the zone's transfer"
 	now := time.Now()
