@@ -48,7 +48,17 @@ func newSignerAddRig(t *testing.T, zone, parentsync string) *signerAddRig {
 	r.conf.InternalMp.signerAdds.start = func(look func()) { look() }
 	prevLook, prevAsk := parentDSLook, askJoinersDS
 	parentDSLook = func(*Config, string) (parentDSSeen, error) {
-		return parentDSSeen{tags: r.parent, ttl: r.parentTTL}, nil
+		records := map[parentDSRecord]bool{}
+		if mpzd, ok := Zones.Get(zone); ok && mpzd != nil {
+			if snap := mpzd.GetLastKeyInventory(); snap != nil {
+				for _, it := range snap.Inventory {
+					if r.parent[it.KeyTag] {
+						records[dsRecordOf(t, it.KeyRR)] = true
+					}
+				}
+			}
+		}
+		return parentDSSeen{records: records, ttl: r.parentTTL}, nil
 	}
 	askJoinersDS = func(*Config, string, string) { r.syncs++ }
 	t.Cleanup(func() { parentDSLook, askJoinersDS = prevLook, prevAsk })
@@ -57,6 +67,18 @@ func newSignerAddRig(t *testing.T, zone, parentsync string) *signerAddRig {
 	mp := r.conf.MpConfig()
 	mp.Local.Nameservers = srNameservers
 	return r
+}
+
+// dsRecordOf is the record of the DS a parent serves of the key keyRR.
+func dsRecordOf(t *testing.T, keyRR string) parentDSRecord {
+	t.Helper()
+	rr, err := dns.NewRR(keyRR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := rr.(*dns.DNSKEY)
+	ds := key.ToDS(dns.SHA256)
+	return parentDSRecord{ds.KeyTag, ds.Algorithm, ds.DigestType, strings.ToLower(ds.Digest)}
 }
 
 // thawed has the zone thawed to V, with step 0 held here and at b. This agent is
@@ -1415,8 +1437,8 @@ func TestASignersStepsArePlannedFromWhatIsInPlace(t *testing.T) {
 
 // A DS counts only once every parent server that answers holds it: a validator
 // may be handed the RRset of any of them, and one without the joiner's DS finds
-// nothing to validate its signatures with. One that does not answer hands nothing
-// to anyone. The largest TTL any of them gave is what caches may hold.
+// nothing to validate its signatures with. One that does not answer isn't counted,
+// and is named. The largest TTL any of them gave is what caches may hold.
 func TestTheDSStepAsksEveryParentServer(t *testing.T) {
 	ds := func(tag uint16, ttl uint32) dns.RR {
 		return &dns.DS{Hdr: dns.RR_Header{Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: ttl}, KeyTag: tag}
@@ -1455,13 +1477,94 @@ func TestTheDSStepAsksEveryParentServer(t *testing.T) {
 			continue
 		}
 		var tags []uint16
-		for tag := range seen.tags {
-			tags = append(tags, tag)
+		for r := range seen.records {
+			tags = append(tags, r.tag)
 		}
 		slices.Sort(tags)
 		if !slices.Equal(tags, c.want) || seen.ttl != c.ttl {
 			t.Errorf("%s: the tags %v, TTL %s; want %v, %s", c.name, tags, seen.ttl, c.want, c.ttl)
 		}
+		if !c.err && !slices.Equal(seen.silent, c.fails) {
+			t.Errorf("%s: the silent %v, want %v", c.name, seen.silent, c.fails)
+		}
+	}
+}
+
+// A key tag is 16 bits, so a DS under the joiner's tag may be another key's: the
+// DS is the joiner's only by its algorithm and digest, under any digest type.
+func TestAnotherKeysDSUnderTheSameTagIsNotAJoinersDS(t *testing.T) {
+	const zone = "same.tag.adding.example."
+	key := testDnskey(t, zone, 257)
+	real := key.ToDS(dns.SHA256)
+	variant := func(change func(*dns.DS)) dns.RR {
+		ds := *real
+		change(&ds)
+		return &ds
+	}
+	otherDigest := variant(func(ds *dns.DS) { ds.Digest = strings.Repeat("ab", 32) })
+	for _, c := range []struct {
+		name    string
+		answers map[string][]dns.RR
+		want    bool
+	}{
+		{"its DS", map[string][]dns.RR{"p1": {real}}, true},
+		{"its digest in capitals", map[string][]dns.RR{"p1": {variant(func(ds *dns.DS) { ds.Digest = strings.ToUpper(ds.Digest) })}}, true},
+		{"by another digest type", map[string][]dns.RR{"p1": {key.ToDS(dns.SHA384)}}, true},
+		{"another key's digest", map[string][]dns.RR{"p1": {otherDigest}}, false},
+		{"another key's digest beside its own", map[string][]dns.RR{"p1": {otherDigest, real}}, true},
+		{"another algorithm", map[string][]dns.RR{"p1": {variant(func(ds *dns.DS) { ds.Algorithm = dns.RSASHA256 })}}, false},
+		{"another key tag", map[string][]dns.RR{"p1": {variant(func(ds *dns.DS) { ds.KeyTag++ })}}, false},
+		{"a digest type nobody can compute", map[string][]dns.RR{"p1": {variant(func(ds *dns.DS) { ds.DigestType = 200 })}}, false},
+		{"each server a key of that tag, another each", map[string][]dns.RR{"p1": {real}, "p2": {otherDigest}}, false},
+	} {
+		var servers []string
+		for _, s := range []string{"p1", "p2"} {
+			if _, ok := c.answers[s]; ok {
+				servers = append(servers, s)
+			}
+		}
+		seen, err := dsAtEveryServer(servers, func(server string) ([]dns.RR, error) { return c.answers[server], nil })
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := seen.serves(key); got != c.want {
+			t.Errorf("%s: serves says %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// The step itself: the parent's only DS under the joiner's KSK's tag is another
+// key's, so the step waits and, under parentsync=agent, asks its sync.
+func TestAJoinersDSStepDoesNotEndOnAnotherKeysDS(t *testing.T) {
+	r := newSignerAddRig(t, "colliding.adding.example.", "agent")
+	tag := r.keys(KeyStateActive, KeyStateActive)
+	mpzd, _ := Zones.Get(r.zone)
+	own := dsRecordOf(t, mpzd.GetLastKeyInventory().Inventory[0].KeyRR)
+	if own.tag != tag {
+		t.Fatalf("the KSK's tag is %d, want %d", own.tag, tag)
+	}
+	other := own
+	other.digest = strings.Repeat("ab", 32)
+	prev := parentDSLook
+	t.Cleanup(func() { parentDSLook = prev })
+	parentDSLook = func(*Config, string) (parentDSSeen, error) {
+		return parentDSSeen{records: map[parentDSRecord]bool{other: true}}, nil
+	}
+	r.parentLooks()
+	r.conf.joinerDSAtParent(r.zone, signerAddSelf) // the look, run in place
+	if r.conf.joinerDSAtParent(r.zone, signerAddSelf) {
+		t.Error("the step ended on another key's DS under its tag")
+	}
+	if r.syncs == 0 {
+		t.Error("no sync asked, with the parent lacking its DS")
+	}
+	parentDSLook = func(*Config, string) (parentDSSeen, error) {
+		return parentDSSeen{records: map[parentDSRecord]bool{other: true, own: true}}, nil
+	}
+	r.parentLooks()
+	r.conf.joinerDSAtParent(r.zone, signerAddSelf)
+	if !r.conf.joinerDSAtParent(r.zone, signerAddSelf) {
+		t.Error("the parent serves its DS, and the step waits")
 	}
 }
 
@@ -1696,8 +1799,8 @@ func TestAParentServersAnswerWithNoDSCountsAgainstTheDS(t *testing.T) {
 		{"a refusal beside it", []string{holds, refused}, true},
 	} {
 		seen, err := dsAtEveryServer(c.servers, func(s string) ([]dns.RR, error) { return askParentDS(zone, s) })
-		if err != nil || seen.tags[7] != c.tagged {
-			t.Errorf("%s: the tags %v (%v), want the DS counted %v", c.name, seen.tags, err, c.tagged)
+		if err != nil || seen.records[parentDSRecord{7, dns.ED25519, dns.SHA256, "00"}] != c.tagged {
+			t.Errorf("%s: the records %v (%v), want the DS counted %v", c.name, seen.records, err, c.tagged)
 		}
 	}
 	if _, err := dsAtEveryServer([]string{refused}, func(s string) ([]dns.RR, error) { return askParentDS(zone, s) }); err == nil {
@@ -1816,7 +1919,11 @@ func TestAJoinersDSStepFinishesThroughALeaderWhoseKeyIsNotPublished(t *testing.T
 			adds.start = func(look func()) { look() }
 			prev := parentDSLook
 			parentDSLook = func(*Config, string) (parentDSSeen, error) {
-				return parentDSSeen{tags: map[uint16]bool{r.ksk.KeyTag: r.parent.updatesSeen() > 0}}, nil
+				seen := parentDSSeen{records: map[parentDSRecord]bool{}}
+				if r.parent.updatesSeen() > 0 {
+					seen.records[dsRecordOf(t, r.ksk.KeyRR)] = true
+				}
+				return seen, nil
 			}
 			t.Cleanup(func() { parentDSLook = prev })
 			r.inventory(r.ksk)
@@ -2534,7 +2641,7 @@ func TestTheCachesTimeWaitsForItsOwnLookAtTheParent(t *testing.T) {
 	}
 	r.parentLooks()
 	parentDSLook = func(*Config, string) (parentDSSeen, error) {
-		return parentDSSeen{tags: map[uint16]bool{1: true}, ttl: time.Hour}, nil
+		return parentDSSeen{ttl: time.Hour}, nil
 	}
 	if got := caches.wait(r.conf, r.zone, time.Now()); !strings.Contains(got, "the DS TTL") {
 		t.Errorf("the DS TTL just begun, it waits for %q", got)

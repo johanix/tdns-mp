@@ -222,20 +222,23 @@ func (conf *Config) joinerKeysIn(zone, id string, states ...string) bool {
 			zsk = true
 		}
 	}
-	conf.joinerKeys(zone, id, func(flags uint16, _ uint16, state string, _ *bool) { note(flags, state) })
+	conf.joinerKeys(zone, id, func(flags uint16, _ uint16, state string, _ *bool, _ *dns.DNSKEY) { note(flags, state) })
 	return ksk && zsk
 }
 
 // joinerKeys calls each with what this agent knows of each of id's keys: its
-// flags, its key tag, its state and its ds.
-func (conf *Config) joinerKeys(zone, id string, each func(flags, keytag uint16, state string, ds *bool)) {
+// flags, its key tag, its state, its ds and the key, nil if its record can't be
+// read.
+func (conf *Config) joinerKeys(zone, id string, each func(flags, keytag uint16, state string, ds *bool, key *dns.DNSKEY)) {
 	zone = dns.Fqdn(zone)
 	if mp := conf.MpConfig(); mp != nil && core.EqualNames(id, mp.Identity) {
 		if mpzd, ok := Zones.Get(zone); ok && mpzd != nil {
 			if snap := mpzd.GetLastKeyInventory(); snap != nil {
 				for _, it := range snap.Inventory {
 					if it.State != DnskeyStateForeign {
-						each(it.Flags, it.KeyTag, it.State, it.DS)
+						rr, _ := dns.NewRR(it.KeyRR)
+						key, _ := rr.(*dns.DNSKEY)
+						each(it.Flags, it.KeyTag, it.State, it.DS, key)
 					}
 				}
 			}
@@ -252,7 +255,7 @@ func (conf *Config) joinerKeys(zone, id string, each func(flags, keytag uint16, 
 		}
 		for _, st := range share.states {
 			if i := slices.IndexFunc(share.dnskeys, func(dk *dns.DNSKEY) bool { return dk.KeyTag() == st.KeyTag }); i >= 0 {
-				each(share.dnskeys[i].Flags, st.KeyTag, st.State, st.DS)
+				each(share.dnskeys[i].Flags, st.KeyTag, st.State, st.DS, share.dnskeys[i])
 			}
 		}
 	}
@@ -261,7 +264,7 @@ func (conf *Config) joinerKeys(zone, id string, each func(flags, keytag uint16, 
 // joinerActiveTags are the key tags of id's active keys, as this agent knows them.
 func (conf *Config) joinerActiveTags(zone, id string) []uint16 {
 	var tags []uint16
-	conf.joinerKeys(zone, id, func(_, keytag uint16, state string, _ *bool) {
+	conf.joinerKeys(zone, id, func(_, keytag uint16, state string, _ *bool, _ *dns.DNSKEY) {
 		if state == KeyStateActive {
 			tags = append(tags, keytag)
 		}
@@ -275,14 +278,14 @@ func (conf *Config) joinerActiveTags(zone, id string) []uint16 {
 // update only where the parent differs. Under parentsync=owner the owner adds
 // the DS, and the step's test is the same.
 func (conf *Config) joinerDSAtParent(zone, id string) bool {
-	var tags []uint16
-	conf.joinerKeys(zone, id, func(flags, keytag uint16, _ string, ds *bool) {
-		if flags&dns.SEP != 0 && ds != nil && *ds {
-			tags = append(tags, keytag)
+	var ksks []*dns.DNSKEY
+	conf.joinerKeys(zone, id, func(flags, _ uint16, _ string, ds *bool, key *dns.DNSKEY) {
+		if flags&dns.SEP != 0 && ds != nil && *ds && key != nil {
+			ksks = append(ksks, key)
 		}
 	})
 	seen, known := conf.InternalMp.signerAdds.parentDS(conf, zone)
-	if known && slices.ContainsFunc(tags, func(t uint16) bool { return seen.tags[t] }) {
+	if known && slices.ContainsFunc(ksks, seen.serves) {
 		return true
 	}
 	if rolesForZone(ZoneName(zone)).ParentSync == core.HsyncParentSyncAgent && conf.InternalMp.signerAdds.syncDue(conf, zone) {
@@ -309,11 +312,35 @@ func (conf *Config) joinersDSAsked(zone string) bool {
 	return add && part == signerAddDS && rolesForZone(ZoneName(zone)).ParentSync == core.HsyncParentSyncAgent
 }
 
-// parentDSSeen is what the parent serves of the zone's DS RRset: the key tags
-// that every server that answered holds, and the largest TTL they gave it.
+// parentDSSeen is what the parent serves of the zone's DS RRset: the records
+// that every server that answered holds, the largest TTL they gave it, and the
+// servers that did not answer, with the last one's error.
 type parentDSSeen struct {
-	tags map[uint16]bool
-	ttl  time.Duration
+	records map[parentDSRecord]bool
+	ttl     time.Duration
+	silent  []string
+	why     error
+}
+
+// parentDSRecord is a DS record as served. A key tag says less: 16 bits, and
+// another key's DS can have the same.
+type parentDSRecord struct {
+	tag                   uint16
+	algorithm, digestType uint8
+	digest                string
+}
+
+// serves: the parent serves a DS of key, by whichever digest.
+func (s parentDSSeen) serves(key *dns.DNSKEY) bool {
+	for r := range s.records {
+		if r.tag != key.KeyTag() || r.algorithm != key.Algorithm {
+			continue
+		}
+		if ds := key.ToDS(r.digestType); ds != nil && strings.ToLower(ds.Digest) == r.digest {
+			return true
+		}
+	}
+	return false
 }
 
 // parentDSLook asks the parent's servers for the zone's DS RRset. A test stands
@@ -355,37 +382,37 @@ func askParentDS(zone, server string) ([]dns.RR, error) {
 
 // dsAtEveryServer is parentDSSeen from asking each of servers. A validator may
 // be handed the DS RRset of any of them, and one without the joiner's DS finds
-// nothing to validate its signatures with, so a tag counts only if every server
-// that answers holds it. One that does not answer hands nothing to anyone; with
-// no answer at all nothing is known.
+// nothing to validate its signatures with, so a record counts only if every
+// server that answers holds it. One that does not answer is not counted, and is
+// named: down, it hands nothing to anyone, but silent to this agent alone it may
+// hand others an older RRset. With no answer at all nothing is known.
 func dsAtEveryServer(servers []string, ask func(server string) ([]dns.RR, error)) (parentDSSeen, error) {
 	var seen parentDSSeen
-	var last error
 	for _, server := range servers {
 		rrs, err := ask(server)
 		if err != nil {
-			last = err
+			seen.silent, seen.why = append(seen.silent, server), err
 			continue
 		}
-		tags := map[uint16]bool{}
+		records := map[parentDSRecord]bool{}
 		for _, rr := range rrs {
 			if ds, ok := rr.(*dns.DS); ok {
-				tags[ds.KeyTag] = true
+				records[parentDSRecord{ds.KeyTag, ds.Algorithm, ds.DigestType, strings.ToLower(ds.Digest)}] = true
 				seen.ttl = max(seen.ttl, time.Duration(ds.Hdr.Ttl)*time.Second)
 			}
 		}
-		if seen.tags != nil {
-			maps.DeleteFunc(tags, func(tag uint16, _ bool) bool { return !seen.tags[tag] })
+		if seen.records != nil {
+			maps.DeleteFunc(records, func(r parentDSRecord, _ bool) bool { return !seen.records[r] })
 		}
-		seen.tags = tags
+		seen.records = records
 	}
-	if seen.tags != nil {
+	if seen.records != nil {
 		return seen, nil
 	}
-	if last == nil {
-		last = errors.New("no parent server is known")
+	if seen.why == nil {
+		seen.why = errors.New("no parent server is known")
 	}
-	return parentDSSeen{}, last
+	return parentDSSeen{}, seen.why
 }
 
 // --- This provider's part ---
@@ -644,6 +671,9 @@ func (b *signerAddBook) parentDS(conf *Config, zone string) (parentDSSeen, bool)
 					lg.Warn("what the parent serves for the zone could not be read; a signer's DS step waits", "zone", zone, "err", err)
 				}
 				return
+			}
+			if len(seen.silent) > 0 && conf.InternalMp.reconciles.sayOnce(canonicalName(zone), "parent silent "+strings.Join(seen.silent, " ")) {
+				lg.Warn("a server of the parent does not answer; a signer's DS step does not wait for it", "zone", zone, "servers", seen.silent, "err", seen.why)
 			}
 			conf.askThaw(zone)
 		})
