@@ -261,15 +261,16 @@ func (conf *Config) joinerKeys(zone, id string, each func(flags, keytag uint16, 
 	}
 }
 
-// joinerActiveTags are the key tags of id's active keys, as this agent knows them.
-func (conf *Config) joinerActiveTags(zone, id string) []uint16 {
-	var tags []uint16
-	conf.joinerKeys(zone, id, func(_, keytag uint16, state string, _ *bool, _ *dns.DNSKEY) {
+// joinerActiveKeys are id's active keys, as this agent knows them, with nil for
+// one whose record can't be read.
+func (conf *Config) joinerActiveKeys(zone, id string) []*dns.DNSKEY {
+	var keys []*dns.DNSKEY
+	conf.joinerKeys(zone, id, func(_, _ uint16, state string, _ *bool, key *dns.DNSKEY) {
 		if state == KeyStateActive {
-			tags = append(tags, keytag)
+			keys = append(keys, key)
 		}
 	})
-	return tags
+	return keys
 }
 
 // joinerDSAtParent: the parent, as last looked at, serves at every server the DS
@@ -593,8 +594,8 @@ func (b *signerAddBook) keysPropagated(conf *Config, zone, id string) string {
 	}
 	b.mu.Unlock()
 	if due {
-		tags := conf.joinerActiveTags(zone, id)
-		b.run(func() { b.lookForKeys(conf, zone, id, k, tags) })
+		keys := conf.joinerActiveKeys(zone, id)
+		b.run(func() { b.lookForKeys(conf, zone, id, k, keys) })
 	}
 	delay, _ := conf.delegationNotifyWaitAnnounced(zone)
 	b.mu.Lock()
@@ -608,10 +609,10 @@ func (b *signerAddBook) keysPropagated(conf *Config, zone, id string) string {
 
 // lookForKeys runs one look at what the zone's nameservers serve of tags, the keys
 // of the joiner id, and notes it in k.
-func (b *signerAddBook) lookForKeys(conf *Config, zone, id string, k *joinerKeysLooks, tags []uint16) {
+func (b *signerAddBook) lookForKeys(conf *Config, zone, id string, k *joinerKeysLooks, keys []*dns.DNSKEY) {
 	seen, err := joinerKeysServed{}, errors.New("the zone is not here")
 	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil {
-		seen, err = lookForJoinerKeys(mpzd, tags)
+		seen, err = lookForJoinerKeys(mpzd, keys)
 	}
 	b.mu.Lock()
 	k.running, k.at = false, b.clock()

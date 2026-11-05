@@ -327,10 +327,10 @@ type joinerKeysServed struct {
 }
 
 // lookForJoinerKeys asks each of the zone's nameservers, by the NS RRset of its
-// copy, for its DNSKEY RRset, under a bound of its own, and looks for the keys tags.
+// copy, for its DNSKEY RRset, under a bound of its own, and looks for keys in it.
 // An error says the look says nothing of them: the copy names none, or nothing can
 // be asked.
-func lookForJoinerKeys(mpzd *MPZoneData, tags []uint16) (joinerKeysServed, error) {
+func lookForJoinerKeys(mpzd *MPZoneData, keys []*dns.DNSKEY) (joinerKeysServed, error) {
 	names, err := copyNameservers(mpzd)
 	if err != nil {
 		return joinerKeysServed{}, err
@@ -341,7 +341,7 @@ func lookForJoinerKeys(mpzd *MPZoneData, tags []uint16) (joinerKeysServed, error
 	seen := joinerKeysServed{copyTTL: copyDnskeyTTL(mpzd)}
 	for _, ns := range names {
 		ctx, cancel := lookCtx()
-		keys, err := servingKeysLookup(ctx, mpzd.ZoneName, ns)
+		rrset, err := servingKeysLookup(ctx, mpzd.ZoneName, ns)
 		cancel()
 		switch {
 		case errors.Is(err, errIMRNotRunning):
@@ -350,9 +350,9 @@ func lookForJoinerKeys(mpzd *MPZoneData, tags []uint16) (joinerKeysServed, error
 			seen.silent, seen.why = append(seen.silent, ns), fmt.Errorf("%s: %w", ns, err)
 			continue
 		}
-		ttl, _ := dnskeyTTLOf(keys)
+		ttl, _ := dnskeyTTLOf(rrset)
 		seen.ttl = max(seen.ttl, ttl)
-		if servesKeyTags(keys, tags) {
+		if servesKeys(rrset, keys) {
 			seen.with = append(seen.with, ns)
 		} else {
 			seen.without = append(seen.without, ns)
@@ -361,16 +361,16 @@ func lookForJoinerKeys(mpzd *MPZoneData, tags []uint16) (joinerKeysServed, error
 	return seen, nil
 }
 
-// servesKeyTags: rrset holds a DNSKEY of each of tags.
-func servesKeyTags(rrset *core.RRset, tags []uint16) bool {
+// servesKeys: rrset holds each of keys, the key and not just its tag. A signer
+// can't record another's key under a tag of its own (syncForeignDNSKEYs), so it
+// goes on serving its own there, and that isn't the joiner's. A nil key, one whose
+// record can't be read, is held by no RRset.
+func servesKeys(rrset *core.RRset, keys []*dns.DNSKEY) bool {
 	if rrset == nil {
 		return false
 	}
-	for _, tag := range tags {
-		if !slices.ContainsFunc(rrset.RRs, func(rr dns.RR) bool {
-			dk, ok := rr.(*dns.DNSKEY)
-			return ok && dk.KeyTag() == tag
-		}) {
+	for _, key := range keys {
+		if key == nil || !slices.ContainsFunc(rrset.RRs, func(rr dns.RR) bool { return dns.IsDuplicate(key, rr) }) {
 			return false
 		}
 	}

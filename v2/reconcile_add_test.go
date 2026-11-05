@@ -2375,6 +2375,38 @@ func TestAJoinersKeysStepWaitsForTheKeysThatSign(t *testing.T) {
 	}
 }
 
+// A signer can't record another's key under a tag of its own, so it serves its own
+// there, beside the joiner's other key. That isn't the joiner's key, and it holds the
+// step. So does a key of the joiner's whose record can't be read.
+func TestAnotherKeyUnderTheSameTagIsNotAJoinersKeyServed(t *testing.T) {
+	w := newKeysWait(t, "same.tag.keys.adding.example.")
+	w.serves(keysNS1, 0, w.ksk, w.zsk)
+	w.serves(keysNS2, 0, sameTagOtherKey(t, w.ksk), w.zsk)
+	if got := w.look(); !strings.Contains(got, keysNS2) {
+		t.Fatalf("another KSK under its KSK's tag at ns2, it waits for %q, want ns2", got)
+	}
+	w.serves(keysNS2, 0, w.ksk, sameTagOtherKey(t, w.zsk))
+	if got := w.look(); !strings.Contains(got, keysNS2) {
+		t.Fatalf("another ZSK under its ZSK's tag at ns2, it waits for %q, want ns2", got)
+	}
+	w.serves(keysNS2, 0, w.ksk, w.zsk)
+	if got := w.look(); got != "" {
+		t.Fatalf("both serve its keys, and it waits for %q", got)
+	}
+
+	w = newKeysWait(t, "unreadable.keys.adding.example.")
+	w.serves(keysNS1, 0, w.ksk, w.zsk)
+	w.serves(keysNS2, 0, w.ksk, w.zsk)
+	mpzd, _ := Zones.Get(w.r.zone)
+	snap := *mpzd.GetLastKeyInventory()
+	snap.Inventory = slices.Clone(snap.Inventory)
+	snap.Inventory[0].KeyRR = ""
+	mpzd.SetLastKeyInventory(&snap)
+	if got := w.look(); !strings.Contains(got, keysNS1) || !strings.Contains(got, keysNS2) {
+		t.Fatalf("a key whose record can't be read, it waits for %q, want both", got)
+	}
+}
+
 // One that answers without the keys holds the step, by NODATA, or with an RRset that
 // does not hold them, for as long as it does, and the wait starts when it serves them.
 // One that loses them holds it again, and the wait starts over.
