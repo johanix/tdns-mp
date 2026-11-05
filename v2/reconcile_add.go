@@ -553,6 +553,18 @@ func (k *joinerKeysLooks) waitTTL() time.Duration {
 	return k.ttl
 }
 
+// end is when the wait runs out, given the propagation delay.
+func (k *joinerKeysLooks) end(delay time.Duration) time.Time {
+	return k.since.Add(delay + k.waitTTL())
+}
+
+// owesLook: the wait has run out on what the looks that reported before then found.
+// It ends only on one that reports since, which may find a nameserver without the
+// keys, or nothing.
+func (k *joinerKeysLooks) owesLook(delay time.Duration, now time.Time) bool {
+	return k.looked && !k.blind && len(k.without) == 0 && !now.Before(k.end(delay)) && k.at.Before(k.end(delay))
+}
+
 // waitsFor is what the keys' step waits for at the nameservers, of the joiner id
 // ("" for nothing), given the propagation delay.
 func (k *joinerKeysLooks) waitsFor(id string, delay time.Duration, now time.Time) string {
@@ -561,8 +573,10 @@ func (k *joinerKeysLooks) waitsFor(id string, delay time.Duration, now time.Time
 		return "the zone's nameservers (what they serve of " + id + "'s keys, not known yet)"
 	case len(k.without) > 0:
 		return strings.Join(k.without, ", ") + " (" + id + "'s keys)"
-	case now.Before(k.since.Add(delay + k.waitTTL())):
+	case now.Before(k.end(delay)):
 		return "the propagation delay and the DNSKEY TTL, since the zone's nameservers serve " + id + "'s keys"
+	case k.owesLook(delay, now):
+		return "a look at the zone's nameservers that reports after the propagation delay and the DNSKEY TTL (" + id + "'s keys)"
 	}
 	return ""
 }
@@ -605,12 +619,14 @@ func (b *signerAddBook) clock() time.Time {
 // nameservers ("" for nothing): each serves its active keys, by the NS RRset of the
 // zone's copy, and the DNSKEY RRset has had the propagation delay of the slowest of
 // the zone's serving providers and the largest TTL seen since. A look is asked once
-// the last is older than signerAddLookEvery. Kept in memory: a new leader looks again
+// the last is older than signerAddLookEvery, and at once when the wait runs out: it
+// ends only on a look that reports since. Kept in memory: a new leader looks again
 // and counts from its own look.
 func (b *signerAddBook) keysPropagated(conf *Config, zone, id string) string {
 	key := canonicalName(id)
 	keys := conf.joinerActiveKeys(zone, id)
 	of := activeKeysOf(keys)
+	delay, _ := conf.delegationNotifyWaitAnnounced(zone)
 	b.mu.Lock()
 	l := b.looksLocked(conf, zone)
 	if l.keys == nil {
@@ -628,7 +644,8 @@ func (b *signerAddBook) keysPropagated(conf *Config, zone, id string) string {
 		k = &joinerKeysLooks{of: of, ttl: k.ttl}
 		l.keys[key] = k
 	}
-	due := !k.running && b.clock().Sub(k.at) >= signerAddLookEvery
+	now := b.clock()
+	due := !k.running && (now.Sub(k.at) >= signerAddLookEvery || k.owesLook(delay, now))
 	if due {
 		k.running = true
 	}
@@ -636,7 +653,6 @@ func (b *signerAddBook) keysPropagated(conf *Config, zone, id string) string {
 	if due {
 		b.run(func() { b.lookForKeys(conf, zone, id, k, keys) })
 	}
-	delay, _ := conf.delegationNotifyWaitAnnounced(zone)
 	b.mu.Lock()
 	wait, ttl := k.waitsFor(id, delay, b.clock()), k.waitTTL()
 	b.mu.Unlock()
