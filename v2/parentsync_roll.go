@@ -879,7 +879,8 @@ func (conf *Config) rollLine(kdb *tdns.KeyDB, zone ZoneName) string {
 // name, and the KEY leaves this agent's data once it has: until then the data
 // is the record of what is owed, and the tick asks again (retryKEYPurges).
 // After a restart the combiner's own read gives such a KEY back, so nothing
-// else is kept on disk. On the engine's goroutine, which owns the repo.
+// else is kept on disk. This agent's own name is dropOwnKEY's. On the engine's
+// goroutine, which owns the repo.
 func (conf *Config) dropOtherKEYs(zdr *ZoneDataRepo, zone ZoneName, leader AgentId) {
 	tm := conf.InternalMp.MPTransport
 	if zdr == nil || tm == nil {
@@ -890,13 +891,19 @@ func (conf *Config) dropOtherKEYs(zdr *ZoneDataRepo, zone ZoneName, leader Agent
 		return
 	}
 	// only once the leader's own KEY is here
-	if od, ok := ar.Data.Get(leader); !ok || od == nil || od.RRtypes == nil || len(od.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs) == 0 {
+	theirs, ok := ar.Data.Get(leader)
+	if !ok || theirs == nil || theirs.RRtypes == nil || len(theirs.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs) == 0 {
 		return
 	}
 	every := rollRetryFor(conf.MpConfig())
+	self := conf.localAgentID()
+	conf.dropOwnKEY(zdr, zone, self, leader, theirs.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs, every)
 	for _, id := range ar.Data.Keys() {
 		if sameName(string(id), string(leader)) {
 			tm.keyPurges.forget(zone, id)
+			continue
+		}
+		if sameName(string(id), string(self)) {
 			continue
 		}
 		od, ok := ar.Data.Get(id)
@@ -926,6 +933,53 @@ func (conf *Config) dropOtherKEYs(zdr *ZoneDataRepo, zone ZoneName, leader Agent
 	}
 }
 
+// dropOwnKEY is dropOtherKEYs for the KEY under this agent's own name, from
+// when it led. That KEY went straight to the combiner (sendZoneKEY), so the
+// data need not hold it, and the apex says what is owed: the zone publishes
+// the leader's KEY and another. Until the new leader rolls, the zone publishes
+// the one KEY, and this agent's name may be all that holds it, so nothing is
+// asked. A combiner that publishes no KEY shows nothing to drop here.
+func (conf *Config) dropOwnKEY(zdr *ZoneDataRepo, zone ZoneName, self, leader AgentId, leaderKEY []dns.RR, every time.Duration) {
+	tm := conf.InternalMp.MPTransport
+	if self == "" {
+		return
+	}
+	if sameName(string(self), string(leader)) || !publishesBeside(zone, leaderKEY) {
+		tm.keyPurges.forget(zone, self)
+		return
+	}
+	if tm.keyPurges.taken(zone, self) {
+		if ar, ok := zdr.Repo.Get(zone); ok && ar != nil {
+			if od, ok := ar.Data.Get(self); ok && od != nil && od.RRtypes != nil {
+				od.RRtypes.Delete(dns.TypeKEY)
+				zdr.removeTracking(zone, self, dns.TypeKEY)
+			}
+		}
+		return
+	}
+	distID, due := tm.keyPurges.due(zone, self, every)
+	if !due {
+		return
+	}
+	if err := sendKEYPurge(tm, zone, self, distID); err != nil {
+		lgEngine.Warn("the combiner could not be asked to drop this agent's own KEY, trying again", "zone", zone, "in", every, "err", err)
+		return
+	}
+	lgEngine.Info("the zone publishes the leader's KEY and another: the combiner is asked to drop this agent's own KEY", "zone", zone, "origin", self, "leader", leader)
+}
+
+// publishesBeside: the apex of this agent's copy of the zone publishes one of
+// keys and another KEY.
+func publishesBeside(zone ZoneName, keys []dns.RR) bool {
+	published := publishedKeys(zone)
+	return len(published) > 1 && slices.ContainsFunc(published, func(k *dns.KEY) bool {
+		return slices.ContainsFunc(keys, func(rr dns.RR) bool {
+			held, ok := rr.(*dns.KEY)
+			return ok && sameKey(held, k)
+		})
+	})
+}
+
 // retryKEYPurges: the tick's word on the KEYs held under another name than
 // the zone's leader's: those the combiner has dropped go from the data, and
 // the others are asked for again when due. On the engine's goroutine.
@@ -945,7 +999,9 @@ func (conf *Config) retryKEYPurges(zdr *ZoneDataRepo) {
 				holders++
 			}
 		}
-		if holders < 2 {
+		// the leader's alone is enough: this agent's own may be at its
+		// combiner and not here (dropOwnKEY)
+		if holders == 0 {
 			continue
 		}
 		if leader, ok := lem.ZoneLeader(zone); ok {
@@ -957,9 +1013,12 @@ func (conf *Config) retryKEYPurges(zdr *ZoneDataRepo) {
 // keyPurge is the drop of origin's KEY at this agent's combiner: an empty
 // replace of KEY in origin's name with the withdrawal's flag, a removal the
 // combiner takes from its own agent only, whether or not origin votes
-// (combinerTakesRemoval, S16).
+// (combinerTakesRemoval, S16). An instruction with no location takes origin's
+// instruction back with it: stored, it would publish the KEY again at a reapply.
 func keyPurge(zone ZoneName, origin AgentId) *ZoneUpdate {
-	return (&Withdraw{Provider: string(origin), RRtype: "KEY"}).update(zone)
+	zu := (&Withdraw{Provider: string(origin), RRtype: "KEY"}).update(zone)
+	zu.Publish = &core.PublishInstruction{}
+	return zu
 }
 
 // sendKEYPurge sends the combiner the drop of origin's KEY under distID; a
