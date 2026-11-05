@@ -477,6 +477,7 @@ type signerAddLooks struct {
 // joinerKeysLooks is what this agent has seen the zone's nameservers serve of a
 // joiner's keys.
 type joinerKeysLooks struct {
+	of      string          // the active keys these looks are of (activeKeysOf)
 	with    map[string]bool // those seen with them, folded: one gone quiet has served what it served
 	without []string        // those that answered the last look without them
 	silent  []string        // those that have answered no look, or answered without them and went quiet
@@ -487,6 +488,21 @@ type joinerKeysLooks struct {
 	blind   bool            // the latest look found nothing out
 	running bool
 	at      time.Time
+}
+
+// activeKeysOf says which keys these are, whatever their order and TTLs. A nil key,
+// one whose record can't be read, says only that.
+func activeKeysOf(keys []*dns.DNSKEY) string {
+	ids := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if key == nil {
+			ids = append(ids, "?")
+			continue
+		}
+		ids = append(ids, fmt.Sprintf("%d %d %d %s", key.Flags, key.Protocol, key.Algorithm, key.PublicKey))
+	}
+	slices.Sort(ids)
+	return strings.Join(ids, ",")
 }
 
 // note takes one look's finding, as of now.
@@ -578,14 +594,23 @@ func (b *signerAddBook) clock() time.Time {
 // and counts from its own look.
 func (b *signerAddBook) keysPropagated(conf *Config, zone, id string) string {
 	key := canonicalName(id)
+	keys := conf.joinerActiveKeys(zone, id)
+	of := activeKeysOf(keys)
 	b.mu.Lock()
 	l := b.looksLocked(conf, zone)
 	if l.keys == nil {
 		l.keys = map[string]*joinerKeysLooks{}
 	}
 	k := l.keys[key]
-	if k == nil {
-		k = &joinerKeysLooks{}
+	switch {
+	case k == nil:
+		k = &joinerKeysLooks{of: of}
+		l.keys[key] = k
+	case k.of != of:
+		// Other active keys: nothing seen was of these, and the wait starts over.
+		// A look under way notes in the old k, which is gone. The largest TTL
+		// stays, since a cache may hold that RRset.
+		k = &joinerKeysLooks{of: of, ttl: k.ttl}
 		l.keys[key] = k
 	}
 	due := !k.running && b.clock().Sub(k.at) >= signerAddLookEvery
@@ -594,7 +619,6 @@ func (b *signerAddBook) keysPropagated(conf *Config, zone, id string) string {
 	}
 	b.mu.Unlock()
 	if due {
-		keys := conf.joinerActiveKeys(zone, id)
 		b.run(func() { b.lookForKeys(conf, zone, id, k, keys) })
 	}
 	delay, _ := conf.delegationNotifyWaitAnnounced(zone)
@@ -607,8 +631,8 @@ func (b *signerAddBook) keysPropagated(conf *Config, zone, id string) string {
 	return wait
 }
 
-// lookForKeys runs one look at what the zone's nameservers serve of tags, the keys
-// of the joiner id, and notes it in k.
+// lookForKeys runs one look at what the zone's nameservers serve of keys, those of
+// the joiner id, and notes it in k.
 func (b *signerAddBook) lookForKeys(conf *Config, zone, id string, k *joinerKeysLooks, keys []*dns.DNSKEY) {
 	seen, err := joinerKeysServed{}, errors.New("the zone is not here")
 	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil {

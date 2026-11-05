@@ -2375,6 +2375,110 @@ func TestAJoinersKeysStepWaitsForTheKeysThatSign(t *testing.T) {
 	}
 }
 
+// rollsZSK has a new ZSK of the joiner's active and the old one retired, by its
+// signer's inventory.
+func (w *keysWait) rollsZSK() *dns.DNSKEY {
+	w.t.Helper()
+	no := false
+	mpzd, _ := Zones.Get(w.r.zone)
+	snap := *mpzd.GetLastKeyInventory()
+	snap.Inventory = slices.Clone(snap.Inventory)
+	for i := range snap.Inventory {
+		if snap.Inventory[i].Flags&dns.SEP == 0 {
+			snap.Inventory[i].State = KeyStateRetired
+		}
+	}
+	item := invItem(w.t, w.r.zone, 256, KeyStateActive, &no)
+	snap.Inventory = append(snap.Inventory, item)
+	mpzd.SetLastKeyInventory(&snap)
+	rr, err := dns.NewRR(item.KeyRR)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	return rr.(*dns.DNSKEY)
+}
+
+// The looks are of the joiner's active keys. When those change, what was seen was of
+// others: the wait starts over, a nameserver seen with the old ones has no credit for
+// them, and a look under way for them counts for nothing. The largest TTL stays, as a
+// cache may hold that RRset.
+func TestNewActiveKeysStartAJoinersKeysWaitOver(t *testing.T) {
+	const waiting = "the propagation delay"
+	t.Run("the count", func(t *testing.T) {
+		w := newKeysWait(t, "count.new.keys.adding.example.")
+		w.serves(keysNS1, 5*time.Minute, w.ksk, w.zsk)
+		w.serves(keysNS2, 5*time.Minute, w.ksk, w.zsk)
+		if got := w.look(); !strings.Contains(got, waiting) {
+			t.Fatalf("both serve its keys at 5m, it waits for %q", got)
+		}
+		zsk := w.rollsZSK()
+		w.serves(keysNS1, time.Minute, w.ksk, zsk)
+		w.serves(keysNS2, time.Minute, w.ksk, zsk)
+		w.now = w.now.Add(5 * time.Minute) // the old keys' count is over
+		if got := w.look(); !strings.Contains(got, waiting) {
+			t.Fatalf("new keys just seen, it waits for %q", got)
+		}
+		if got := w.after(4 * time.Minute); !strings.Contains(got, waiting) {
+			t.Fatalf("4m on, under the largest TTL seen, it waits for %q", got)
+		}
+		if got := w.after(time.Minute + time.Second); got != "" {
+			t.Fatalf("the largest TTL passed, it waits for %q", got)
+		}
+	})
+	t.Run("the same keys in another order", func(t *testing.T) {
+		w := newKeysWait(t, "order.new.keys.adding.example.")
+		w.serves(keysNS1, 5*time.Minute, w.ksk, w.zsk)
+		w.serves(keysNS2, 5*time.Minute, w.ksk, w.zsk)
+		if got := w.look(); !strings.Contains(got, waiting) {
+			t.Fatalf("both serve its keys at 5m, it waits for %q", got)
+		}
+		mpzd, _ := Zones.Get(w.r.zone)
+		snap := *mpzd.GetLastKeyInventory()
+		snap.Inventory = slices.Clone(snap.Inventory)
+		slices.Reverse(snap.Inventory)
+		mpzd.SetLastKeyInventory(&snap)
+		if got := w.after(5*time.Minute + time.Second); got != "" {
+			t.Fatalf("the same keys and the TTL passed, it waits for %q", got)
+		}
+	})
+	t.Run("a nameserver's history", func(t *testing.T) {
+		w := newKeysWait(t, "history.new.keys.adding.example.")
+		w.copyHasDNSKEY(time.Hour)
+		w.serves(keysNS1, 0, w.ksk, w.zsk)
+		w.serves(keysNS2, 0, w.ksk, w.zsk)
+		if got := w.look(); got != "" {
+			t.Fatalf("both serve its keys at TTL 0, it waits for %q", got)
+		}
+		zsk := w.rollsZSK()
+		w.serves(keysNS1, 0, w.ksk, zsk)
+		delete(w.answers, keysNS2)
+		if got := w.look(); !strings.Contains(got, waiting) {
+			t.Fatalf("ns2 silent, never seen with the new keys: no floor of the copy's TTL, it waits for %q", got)
+		}
+	})
+	t.Run("a look under way", func(t *testing.T) {
+		w := newKeysWait(t, "underway.new.keys.adding.example.")
+		var looks []func()
+		w.r.conf.InternalMp.signerAdds.start = func(look func()) { looks = append(looks, look) }
+		w.serves(keysNS1, 0, w.ksk, w.zsk)
+		w.serves(keysNS2, 0, w.ksk, w.zsk)
+		w.look()
+		w.rollsZSK()
+		const unknown = "not known yet"
+		if got := w.look(); !strings.Contains(got, unknown) || len(looks) != 2 {
+			t.Fatalf("new keys: %d looks, it waits for %q", len(looks), got)
+		}
+		looks[0]() // the old keys' look ends: they serve those
+		if got := w.wait(); !strings.Contains(got, unknown) {
+			t.Fatalf("a look for the old keys counted, it waits for %q", got)
+		}
+		looks[1]() // the new keys' look: they don't serve those
+		if got := w.wait(); !strings.Contains(got, keysNS1) || !strings.Contains(got, keysNS2) {
+			t.Fatalf("neither serves the new keys, it waits for %q", got)
+		}
+	})
+}
+
 // A signer can't record another's key under a tag of its own, so it serves its own
 // there, beside the joiner's other key. That isn't the joiner's key, and it holds the
 // step. So does a key of the joiner's whose record can't be read.
