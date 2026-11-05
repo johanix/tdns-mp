@@ -140,9 +140,19 @@ var purgeAtCombiner = func(tm *MPTransportBridge, zone ZoneName, origin AgentId,
 	if tm == nil {
 		return errors.New("the transport is not available")
 	}
-	purge := (&Withdraw{Provider: string(origin), RRtype: dns.TypeToString[rrtype]}).update(zone)
-	_, err := tm.EnqueueForCombiner(zone, purge, "")
+	_, err := tm.EnqueueForCombiner(zone, sweepPurge(zone, origin, rrtype), "")
 	return err
+}
+
+// sweepPurge is the update that drops origin's contributions of rrtype. A
+// KEY's takes origin's stored publish instruction back with it (keyPurge):
+// kept, the instruction puts the KEY back at a reapply, to be served beside
+// the zone's key at a later take-up (plan S20).
+func sweepPurge(zone ZoneName, origin AgentId, rrtype uint16) *ZoneUpdate {
+	if rrtype == dns.TypeKEY {
+		return keyPurge(zone, origin)
+	}
+	return (&Withdraw{Provider: string(origin), RRtype: dns.TypeToString[rrtype]}).update(zone)
 }
 
 // askSweep has the data engine sweep the zone by the instructions in, and
