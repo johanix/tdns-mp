@@ -636,6 +636,12 @@ func (conf *Config) rollStep(ctx context.Context, kdb *tdns.KeyDB, r *sig0Roll) 
 			lgAgent.Info("the zone has no SIG(0) key to roll: its parent takes no UPDATE", "zone", zone)
 			return rollDone, nil
 		}
+		// A leader whose key has no recorded word from the parent yet (one it
+		// imported, say) waits for it, with no try counted: its offers in this
+		// lead ask the parent, and the ticker passes the roll again (rollsDue)
+		if conf.keyPending(ctx, zone) {
+			return "", nil
+		}
 		oldKeyid, newKeyid, err := makeRolledKey(kdb, zone, parentSyncKeygenAlgorithm())
 		if err != nil {
 			return "", err
