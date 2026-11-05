@@ -336,7 +336,7 @@ func (s parentDSSeen) serves(key *dns.DNSKEY) bool {
 		if r.tag != key.KeyTag() || r.algorithm != key.Algorithm {
 			continue
 		}
-		if ds := key.ToDS(r.digestType); ds != nil && strings.ToLower(ds.Digest) == r.digest {
+		if ds := key.ToDS(r.digestType); ds != nil && strings.ToLower(ds.Digest) == r.digest { // not-a-name: a hex digest
 			return true
 		}
 	}
@@ -397,7 +397,7 @@ func dsAtEveryServer(servers []string, ask func(server string) ([]dns.RR, error)
 		records := map[parentDSRecord]bool{}
 		for _, rr := range rrs {
 			if ds, ok := rr.(*dns.DS); ok {
-				records[parentDSRecord{ds.KeyTag, ds.Algorithm, ds.DigestType, strings.ToLower(ds.Digest)}] = true
+				records[parentDSRecord{ds.KeyTag, ds.Algorithm, ds.DigestType, strings.ToLower(ds.Digest)}] = true // not-a-name: a hex digest
 				seen.ttl = max(seen.ttl, time.Duration(ds.Hdr.Ttl)*time.Second)
 			}
 		}
