@@ -1313,3 +1313,91 @@ func TestAnOlderKEYWithItsInstructionDoesNotComeBack(t *testing.T) {
 		t.Errorf("the instruction kept after an older one came: %+v, %v", stored, err)
 	}
 }
+
+// severalRig: this agent leads, holds the zone's key, which the stand-in
+// parent trusts, and the apex carries it beside a KEY no agent holds.
+func newSeveralRig(t *testing.T, zone string) *rollRig {
+	t.Helper()
+	r := newRollRig(t, zone)
+	other := testSig0Key(t, newMPTestKeyDB(t), string(r.zone))
+	r.publish(t, r.old, other)
+	return r
+}
+
+// explicitSync is the answer to an explicit sync, and whether an UPDATE went
+// out for it.
+func (r *rollRig) explicitSync(t *testing.T) (string, bool) {
+	t.Helper()
+	before := r.keyRoundRig.parent.updatesSeen()
+	resp := make(chan tdns.DelegationSyncStatus, 1)
+	r.q <- tdns.DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: string(r.zone), ZoneData: r.mpzd.ZoneData, Response: resp}
+	got, ok := recvWithin(resp, 5*time.Second)
+	if !ok {
+		t.Fatal("no answer to the sync")
+	}
+	return got.Msg + got.ErrorMsg, r.keyRoundRig.parent.updatesSeen() > before
+}
+
+func (r *rollRig) parentForgets(keyid uint16) {
+	r.parent.mu.Lock()
+	defer r.parent.mu.Unlock()
+	delete(r.parent.trusted, keyid)
+}
+
+// The project owner's rule (2026-11-05): several KEYs at the apex do not hold
+// a sync signed with this agent's one active key, which the parent trusts: the
+// parent is asked in this lead, and several KEYs are a warning.
+func TestSeveralKEYsDoNotHoldASyncSignedWithAKeyTheParentTrusts(t *testing.T) {
+	r := newSeveralRig(t, "several.signs.example.")
+	got, sent := r.explicitSync(t)
+	if !sent {
+		t.Fatalf("no UPDATE went out: %q", got)
+	}
+	if !strings.Contains(r.alog.String(), "the sync signs with this agent's key, which the parent trusts") {
+		t.Errorf("no warning of several KEYs:\n%s", r.alog)
+	}
+}
+
+// Without the parent's word in this lead, a recorded parent_state does not
+// let the sync sign: the parent is asked, and one that does not trust the key
+// holds the sync, and has its word kept.
+func TestSeveralKEYsHoldASyncTheParentDoesNotTrustTheKeyFor(t *testing.T) {
+	r := newSeveralRig(t, "several.untrusted.example.")
+	r.parentForgets(r.old.keyid)
+	got, sent := r.explicitSync(t)
+	if sent || !strings.Contains(got, "is not heard in this lead") {
+		t.Errorf("the sync went out or was held for another reason: sent %v, %q", sent, got)
+	}
+	if zk, err := readZoneKey(r.mpzd.KeyDB, r.zone); err != nil || len(zk.active) != 1 || zk.active[0].parentState == edns0.KeyStateTrusted {
+		t.Error("the parent's word that it does not trust the key is not kept")
+	}
+}
+
+// The parent's word counts in the lead that heard it only: after the lead has
+// moved and come back, an earlier word does not let the sync sign.
+func TestAWordFromAnEarlierLeadDoesNotLetSeveralKEYsSign(t *testing.T) {
+	r := newSeveralRig(t, "several.earlierlead.example.")
+	if _, sent := r.explicitSync(t); !sent {
+		t.Fatal("no UPDATE went out in the first lead")
+	}
+	self := r.conf.localAgentID()
+	r.leader(r.them)
+	r.leader(self)
+	r.parentForgets(r.old.keyid)
+	if got, sent := r.explicitSync(t); sent || !strings.Contains(got, "is not heard in this lead") {
+		t.Errorf("a word from the earlier lead let the sync sign: sent %v, %q", sent, got)
+	}
+}
+
+// Right before the send the parent is asked again: a key it no longer trusts
+// does not sign, so no BADKEY and no bootstrap of it, whatever this lead heard.
+func TestSeveralKEYsSendNothingWithAKeyTheParentNoLongerTrusts(t *testing.T) {
+	r := newSeveralRig(t, "several.nolonger.example.")
+	if _, sent := r.explicitSync(t); !sent {
+		t.Fatal("no UPDATE went out while the parent trusted the key")
+	}
+	r.parentForgets(r.old.keyid)
+	if got, sent := r.explicitSync(t); sent || !strings.Contains(got, "does not trust key") {
+		t.Errorf("a key the parent no longer trusts signed: sent %v, %q", sent, got)
+	}
+}
