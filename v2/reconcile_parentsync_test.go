@@ -384,6 +384,26 @@ func TestParentsyncToOwnerDeletesTheAgentsKeyAtTheParent(t *testing.T) {
 		}
 	})
 
+	t.Run("several KEYs at the apex", func(t *testing.T) {
+		logs := captureLog(t)
+		r := newKeyRoundRig(t, "several.parentsync.example.", "UPDATE")
+		k := testSig0Key(t, r.mpzd.KeyDB, string(r.zone))
+		r.publish(t, k, testSig0Key(t, newMPTestKeyDB(t), string(r.zone)))
+		p := newRollTestParent(k.keyid)
+		r.conf.InternalMp.rollParent = p
+		r.conf.deleteAgentsKey(r.ctx, r.zone)
+		if u := p.updates(); len(u) != 0 {
+			t.Errorf("the parent got %+v", u)
+		}
+		line := r.conf.InternalMp.parentSyncs.ownerTold(string(r.zone))
+		if !strings.Contains(line, "the zone's owner has to delete it") || !strings.Contains(line, fmt.Sprint(k.keyid)) {
+			t.Errorf("the owner is told: %q", line)
+		}
+		if !strings.Contains(logs.String(), "the zone publishes several KEYs") {
+			t.Errorf("the log does not say why: %s", logs)
+		}
+	})
+
 	t.Run("a key the parent no longer trusts", func(t *testing.T) {
 		r := newRollRig(t, "gone.parentsync.example.")
 		delete(r.parent.trusted, r.old.keyid)
