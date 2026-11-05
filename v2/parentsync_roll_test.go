@@ -748,7 +748,7 @@ func TestAFailedAddLeavesTheOldKeyInUse(t *testing.T) {
 	if ro == nil || ro.phase != rollMade || ro.failures != 1 || ro.newKeyid != k2 {
 		t.Fatalf("the roll after a failed add: %+v", ro)
 	}
-	if line := r.conf.zoneKeyLine(r.ctx, r.zone); !strings.HasPrefix(line, "roll owed, next try at ") {
+	if line := r.conf.zoneKeyLine(r.ctx, r.zone); !strings.HasPrefix(line, "roll owed since ") || !strings.Contains(line, ", next try at ") {
 		t.Errorf("the status after a failed add: %q", line)
 	}
 	if !strings.Contains(r.alog.String(), "the roll of the zone's SIG(0) key failed, trying again") {
@@ -862,7 +862,7 @@ func TestARollIsHeldWhileTheZoneIsAgreeing(t *testing.T) {
 	if u := r.parent.updates(); len(u) != 0 {
 		t.Fatalf("the parent got %+v during the freeze", u)
 	}
-	if line := r.conf.zoneKeyLine(r.ctx, r.zone); line != "roll owed, held until the zone's transition is done" {
+	if line := r.conf.zoneKeyLine(r.ctx, r.zone); !strings.HasPrefix(line, "roll owed since ") || !strings.HasSuffix(line, ", held until the zone's transition is done") {
 		t.Errorf("the status during the freeze: %q", line)
 	}
 	r.pass(t, syncStep)
@@ -994,7 +994,7 @@ func TestARollARemovalOwesIsMadeByItsPasses(t *testing.T) {
 	if ro == nil || ro.phase != rollOwed || ro.newKeyid != 0 {
 		t.Fatalf("the roll owed: %+v", ro)
 	}
-	if line := r.conf.rollLine(r.mpzd.KeyDB, r.zone); line != "roll owed, the new key is not made yet" {
+	if line := r.conf.rollLine(r.mpzd.KeyDB, r.zone); !strings.HasPrefix(line, "roll owed since ") || !strings.HasSuffix(line, ", the new key is not made yet") {
 		t.Errorf("the status: %q", line)
 	}
 	r.conf.oweRoll(r.zone) // a new leader's turn, or a restart's: no second
@@ -1045,6 +1045,74 @@ func TestARollOwedWaitsForTheParentsWordOnTheKey(t *testing.T) {
 	r.pass(t, syncStep)
 	if ro = r.roll(t); ro == nil || ro.phase == rollOwed || ro.newKeyid == 0 {
 		t.Errorf("the roll at the pass after the parent's word: %+v", ro)
+	}
+}
+
+// debtStore gives the rig an instruction store of its own, which keeps the
+// roll owed.
+func debtStore(t *testing.T, conf *Config) *InstructionStore {
+	t.Helper()
+	_, hdb := keptDB(t)
+	s := loadStore(t, hdb)
+	conf.InternalMp.Instructions = s
+	return s
+}
+
+// The roll owed is kept with the zone's serials, told in this agent's stamp,
+// and ended when the roll is done (here: a zone with no key to roll), whatever
+// its phase; the roll done is told too (plan S17b; the project owner,
+// 2026-11-05).
+func TestARollOwedIsKeptAndToldUntilItIsDone(t *testing.T) {
+	r := newKeyRoundRig(t, "debt.nokey.roll.example.", "NOTIFY")
+	t.Cleanup(r.conf.InternalMp.sig0Rolls.wait)
+	r.caughtUp()
+	s := debtStore(t, r.conf)
+	r.conf.oweRoll(r.zone)
+	owed, _ := s.rollDebt(string(r.zone))
+	if owed.IsZero() {
+		t.Fatal("the roll owed is not kept with the zone's serials")
+	}
+	if st, ok := s.stampOf(string(r.zone)); !ok || !st.RollOwed.Equal(owed) {
+		t.Errorf("the stamp does not tell the roll owed: %+v", st)
+	}
+	waitUntil(t, "a pass of the roll still runs", func() bool { return r.conf.rollOnce(r.ctx, r.zone, syncStep) })
+	owed, done := s.rollDebt(string(r.zone))
+	if !owed.IsZero() || done.IsZero() {
+		t.Errorf("after the roll is done: owed %v, done %v", owed, done)
+	}
+	if st, _ := s.stampOf(string(r.zone)); !st.RollOwed.IsZero() || st.RollDone.IsZero() {
+		t.Errorf("the stamp after the roll is done: owed %v, done %v", st.RollOwed, st.RollDone)
+	}
+}
+
+// A leader with a roll owed and none on its disk owes it itself: the debt it
+// heard while a member, or kept from an earlier lead, outlives that lead.
+func TestALeaderOwesTheRollOwedThatItHolds(t *testing.T) {
+	r := newRollRig(t, "debt.leader.roll.example.")
+	s := debtStore(t, r.conf)
+	if err := s.noteRollDebt(string(r.zone), time.Now().Add(-time.Minute), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	r.conf.rollDebtTurn(string(r.zone))
+	if ro := r.roll(t); ro == nil || ro.phase != rollOwed {
+		t.Fatalf("the leader did not owe the roll it held: %+v", ro)
+	}
+	if line := r.conf.rollLine(r.mpzd.KeyDB, r.zone); !strings.Contains(line, "roll owed since "+removalTime(time.Now().Add(-time.Minute))) {
+		t.Errorf("the status does not say since when, by the zone's debt: %q", line)
+	}
+}
+
+// A roll owed for more than twice roll-retry is warned of, once an hour.
+func TestARollOwedTooLongIsWarnedOf(t *testing.T) {
+	r := newRollRig(t, "debt.warn.roll.example.")
+	s := debtStore(t, r.conf)
+	if err := s.noteRollDebt(string(r.zone), time.Now().Add(-3*rollRetryFor(r.conf.MpConfig())), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	r.conf.rollDebtTurn(string(r.zone))
+	r.conf.rollDebtTurn(string(r.zone))
+	if n := strings.Count(r.alog.String(), "has been owed for more than twice roll-retry"); n != 1 {
+		t.Errorf("%d warnings, want 1:\n%s", n, r.alog)
 	}
 }
 

@@ -1144,3 +1144,38 @@ func TestAHeardMemberThatTellsNothingOfTheZoneIsNotNotHeard(t *testing.T) {
 		t.Errorf("b telling agreement: %q", v.waits)
 	}
 }
+
+// A voting member's telling of a roll owed is kept here, so that this agent,
+// leading later, owes it; a telling of a roll done ends it, and an older
+// telling of the roll owed does not raise it again (plan S17b; the project
+// owner, 2026-11-05).
+func TestARollOwedToldByAMemberIsKeptUntilARollDoneIsTold(t *testing.T) {
+	r := newThawRig(t, "debt.told.thaw.example.", roleB)
+	s := r.store
+	owedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	st := tells(r.n, r.n)
+	st.RollOwed = owedAt
+	r.hear(roleB, st, true)
+	r.conf.rollDebtTurn(r.zone)
+	if owed, _ := s.rollDebt(r.zone); !owed.Equal(owedAt) {
+		t.Fatalf("the member's roll owed is not kept: %v", owed)
+	}
+	st.RollOwed, st.RollDone = time.Time{}, owedAt.Add(time.Minute)
+	r.hear(roleB, st, true)
+	r.conf.rollDebtTurn(r.zone)
+	if owed, done := s.rollDebt(r.zone); !owed.IsZero() || !done.Equal(owedAt.Add(time.Minute)) {
+		t.Fatalf("a roll done told does not end the roll owed: owed %v, done %v", owed, done)
+	}
+	st.RollOwed, st.RollDone = owedAt, time.Time{}
+	r.hear(roleB, st, true)
+	r.conf.rollDebtTurn(r.zone)
+	if owed, _ := s.rollDebt(r.zone); !owed.IsZero() {
+		t.Errorf("an older telling raised the roll done again: %v", owed)
+	}
+	st.RollOwed = owedAt.Add(2 * time.Minute)
+	r.hear(roleB, st, true)
+	r.conf.rollDebtTurn(r.zone)
+	if owed, _ := s.rollDebt(r.zone); !owed.Equal(owedAt.Add(2 * time.Minute)) {
+		t.Errorf("a roll owed after the last done is not kept: %v", owed)
+	}
+}
