@@ -41,6 +41,7 @@ func (r *thawRig) restart() {
 	r.stamps.rollover = r.conf.InternalMp.MPTransport.rolloverAt
 	r.conf.InternalMp.MPTransport.stamps = r.stamps
 	r.conf.InternalMp.thaws = thawBook{}
+	r.conf.InternalMp.transfers = transferBook{start: r.conf.InternalMp.transfers.start}
 }
 
 // leadGroup has the election records name leader as the leader of the

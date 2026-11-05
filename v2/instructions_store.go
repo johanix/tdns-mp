@@ -98,6 +98,9 @@ type zoneSerials struct {
 	StepWhat string          `json:"step_what,omitempty"`
 	Taken    []string        `json:"taken,omitempty"`
 	StepAt   time.Time       `json:"step_at,omitzero"`
+	// StepFloor is what the nameservers served at the first check of this
+	// agent's own upstream's step (other_keys.go): nil from that step's end.
+	StepFloor *stepFloor `json:"step_floor,omitempty"`
 	// Pending: a transition to the active serial may be under way, and this
 	// agent holds no step's sets. It moved straight to the active serial
 	// (S7) or knew it by another's word (S9): it hands its parts nothing
@@ -420,6 +423,9 @@ func (s *InstructionStore) update(zone string, f func(z *zoneSerials) error) err
 			activeMoved = wasActive != nil
 		}
 		return err
+	}
+	if z.StepFloor != nil && z.StepFloor.Step != z.stepName() {
+		z.StepFloor = nil
 	}
 	if old != nil {
 		z.Since = old.Since
