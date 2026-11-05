@@ -1660,6 +1660,46 @@ func TestALateAnswerFromAMemberWithNoVoteEndsTheCsyncsWaitForIt(t *testing.T) {
 	}
 }
 
+// A provider leaves the key confirmers: a distribution that waits only for it
+// goes on at once. The look does not end the wait for anyone else: an auditor
+// or a member with no role has up to the distribution's own time-out, however
+// long it has run (CodeRabbit at e33810c).
+func TestLeavingTheKeyConfirmersEndsTheWaitForTheLeaverAlone(t *testing.T) {
+	r := newReconcileRig(t, "leftconfirmers.reconcile.example.", roleA)
+	activeAs(t, r.store, r.zone, freezeAt(t, 42, "v", "a", "n")) // b with no role, n an auditor
+	tm := r.conf.InternalMp.MPTransport
+	tm.noRoleTimeout = time.Hour // the test ends the waits itself
+	zone := ZoneName(r.zone)
+	pending := func(id string) bool {
+		tm.dnskeyPropMu.Lock()
+		defer tm.dnskeyPropMu.Unlock()
+		_, ok := tm.pendingDnskeyPropagations[id]
+		return ok
+	}
+
+	tm.TrackDnskeyPropagation(t.Context(), zone, "d1", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.ProcessDnskeyConfirmation("d1", roleN, transport.ConfirmSuccess.String(), nil, nil)
+	tm.TrackDnskeyPropagation(t.Context(), zone, "d2", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.lookAgainAtDnskeyPropagations(zone, roleB)
+	if pending("d1") {
+		t.Error("the distribution that waited only for the leaver still waits")
+	}
+	if !pending("d2") {
+		t.Fatal("the distribution went on without the auditor, before its time-out")
+	}
+	tm.dnskeyPropMu.Lock()
+	answered := tm.pendingDnskeyPropagations["d2"].ExpectedAgents
+	leaver, auditor := answered[roleB], answered[roleN]
+	tm.dnskeyPropMu.Unlock()
+	if !leaver || auditor {
+		t.Errorf("after the look: the leaver counted %v, the auditor %v", leaver, auditor)
+	}
+	tm.dnskeyNoRoleTimedOut(t.Context(), "d2")
+	if pending("d2") {
+		t.Error("the distribution's own time-out did not end the wait for the auditor")
+	}
+}
+
 // A member that votes when a DNSKEY distribution starts and has no role
 // after a thaw while the distribution waits is not waited for past a
 // time-out: the look at the time-out is made, and made again.

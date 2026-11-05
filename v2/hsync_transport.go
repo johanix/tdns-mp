@@ -2729,7 +2729,7 @@ func (tm *MPTransportBridge) noRoleWait() time.Duration {
 func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(ctx context.Context, distID string) {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
-	distID, ok := tm.dnskeyNoRoleLookLocked(distID)
+	distID, ok := tm.dnskeyNoRoleLookLocked(distID, "")
 	if !ok {
 		return
 	}
@@ -2738,10 +2738,11 @@ func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(ctx context.Context, distID st
 	}
 }
 
-// dnskeyNoRoleLookLocked is the look itself, with dnskeyPropMu held. Reported
-// is the distribution looked at, a resend that took distID over; false for
-// none.
-func (tm *MPTransportBridge) dnskeyNoRoleLookLocked(distID string) (string, bool) {
+// dnskeyNoRoleLookLocked is the look itself, with dnskeyPropMu held, at every
+// member that has run out its time, or at only that one member, when named.
+// Reported is the distribution looked at, a resend that took distID over; false
+// for none.
+func (tm *MPTransportBridge) dnskeyNoRoleLookLocked(distID string, only AgentId) (string, bool) {
 	prop, ok := tm.pendingDnskeyPropagations[distID]
 	if !ok {
 		// folded into a resend (foldIntoResend), which a signer sends sooner
@@ -2759,6 +2760,9 @@ func (tm *MPTransportBridge) dnskeyNoRoleLookLocked(distID string) (string, bool
 		if prop.ExpectedAgents[a] || canHoldAKey(prop.Zone, a) {
 			continue
 		}
+		if only != "" && !sameName(string(a), string(only)) {
+			continue
+		}
 		lgTransport.Warn("a member with no vote did not confirm in time, going on", "zone", prop.Zone, "member", a, "what", "the DNSKEY distribution "+distID)
 		for _, kt := range prop.KeyTags {
 			prop.setResultLocked(a, kt, "timed out", nil) // no answer, so no stamp
@@ -2769,9 +2773,10 @@ func (tm *MPTransportBridge) dnskeyNoRoleLookLocked(distID string) (string, bool
 }
 
 // lookAgainAtDnskeyPropagations has every DNSKEY distribution of the zone
-// look again at who it waits for (S17b): a provider left the key confirmers,
-// and each that waits only for it goes on now.
-func (tm *MPTransportBridge) lookAgainAtDnskeyPropagations(zone ZoneName) {
+// look again at the provider that left the key confirmers (S17b): each that
+// waits only for it goes on now. A distribution's other members wait out its
+// own time-out, however long it has run.
+func (tm *MPTransportBridge) lookAgainAtDnskeyPropagations(zone ZoneName, left AgentId) {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
 	var ids []string
@@ -2781,7 +2786,7 @@ func (tm *MPTransportBridge) lookAgainAtDnskeyPropagations(zone ZoneName) {
 		}
 	}
 	for _, id := range ids {
-		tm.dnskeyNoRoleLookLocked(id)
+		tm.dnskeyNoRoleLookLocked(id, left)
 	}
 }
 

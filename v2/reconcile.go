@@ -422,13 +422,6 @@ func nonVotingMember(zone ZoneName, id AgentId) bool {
 	return ok
 }
 
-// stillConfirmsKeys: id is among the zone's KeyConfirmers at its step: a
-// leaving provider until its NS TTL has passed. Resolvers sent to it need
-// another signer's new DNSKEY (design 5.2).
-func stillConfirmsKeys(zone ZoneName, id AgentId) bool {
-	return isAmong(identities(rolesForZone(zone).KeyConfirmers), id)
-}
-
 // canHoldAKey: a DNSKEY distribution waits for id with no time-out, and what
 // id rejects rejects the key: a voting member, or a leaving provider for as
 // long as it still confirms keys, as it may still be delegated to (design 4,

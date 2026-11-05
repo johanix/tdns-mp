@@ -228,7 +228,7 @@ func (l leaver) steps(p planView) []plannedStep {
 				},
 				start: func(conf *Config, zone string) {
 					logRemovalStep(zone, id, "2 (its NS): it leaves the key confirmers", "")
-					conf.lookAgainAtDnskeyWaits(ZoneName(zone))
+					conf.lookAgainAtDnskeyWaits(ZoneName(zone), AgentId(id))
 				},
 			})
 		}
@@ -239,6 +239,9 @@ func (l leaver) steps(p planView) []plannedStep {
 			sets: func(held Roles) Roles {
 				held.DSSigners = withoutProvider(held.DSSigners, label)
 				return held
+			},
+			ready: func(conf *Config, zone string) string {
+				return conf.removalDSLook(zone, removalKey(label, "ds"))
 			},
 			start: func(conf *Config, zone string) {
 				askWithdrawal(conf, zone, Withdraw{Provider: id, RRtype: "CDS"})
@@ -379,8 +382,8 @@ type parentSeen struct {
 	ds       []uint16     // the key tags of its DS RRset
 	dsRRs    []*dns.DS    // the same RRset, whole
 	dsTTL    uint32       // the largest, as last served
-	noNS     bool         // of one server: its NS query failed, so it tells nothing of them
-	noDS     bool         // of one server: it tells nothing of its DS (parentAtEveryServer)
+	noNS     bool         // of one server: its NS query failed, so it tells nothing of them; of a look: no server told them
+	noDS     bool         // of one server: it tells nothing of its DS (parentAtEveryServer); of a look: no server told it
 	dsTold   bool         // every server asked told of its DS, in this look
 	dsEver   []*dns.DS    // every DS this agent has seen served, whole (after)
 	each     []parentSeen // what each server that answered serves
@@ -416,6 +419,16 @@ func heldTo(held, at time.Time, ttl, lastTTL uint32) time.Time {
 	return held
 }
 
+// keepUntold has what no server told in this look stay as the last look told it.
+func (seen *parentSeen) keepUntold(last parentSeen) {
+	if seen.noNS {
+		seen.ns, seen.nsTTL, seen.nsServer = last.ns, last.nsTTL, last.nsServer
+	}
+	if seen.noDS {
+		seen.ds, seen.dsRRs, seen.dsTTL = last.ds, last.dsRRs, last.dsTTL
+	}
+}
+
 func (one parentSeen) toldNS() bool { return !one.noNS }
 func (one parentSeen) toldDS() bool { return !one.noDS }
 
@@ -437,7 +450,7 @@ var parentLook = func(conf *Config, zone string) (parentSeen, error) {
 		return tdns.AuthQuery(zd.ZoneName, server, rrtype)
 	})
 	if err != nil {
-		return parentSeen{}, fmt.Errorf("zone %s: %w", zd.ZoneName, err)
+		return seen, fmt.Errorf("zone %s: %w", zd.ZoneName, err)
 	}
 	return seen, nil
 }
@@ -447,8 +460,8 @@ var parentLook = func(conf *Config, zone string) (parentSeen, error) {
 // tells its NS RRset, and one whose NS query fails still tells a DS RRset it
 // serves, though not that it serves none, as only an NS RRset shows it holds the
 // zone. One with no NS RRset for the zone tells nothing of it. With no server
-// telling the NS RRset, or none telling the DS, that is not known, and the look
-// has found nothing out: the last one stands.
+// telling the NS RRset, or none telling the DS, that one is not known: the look
+// comes back with its error and what it did tell (parentNow).
 func parentAtEveryServer(servers []string, ask func(server string, rrtype uint16) ([]dns.RR, error)) (parentSeen, error) {
 	var seen parentSeen
 	var last error
@@ -470,14 +483,15 @@ func parentAtEveryServer(servers []string, ask func(server string, rrtype uint16
 			seen.add(one)
 		}
 	}
-	if slices.ContainsFunc(seen.each, parentSeen.toldNS) && slices.ContainsFunc(seen.each, parentSeen.toldDS) {
+	seen.noNS, seen.noDS = !slices.ContainsFunc(seen.each, parentSeen.toldNS), !slices.ContainsFunc(seen.each, parentSeen.toldDS)
+	if !seen.noNS && !seen.noDS {
 		seen.dsTold = len(seen.each) == len(servers) && !slices.ContainsFunc(seen.each, func(one parentSeen) bool { return one.noDS })
 		return seen, nil
 	}
 	if last == nil {
 		last = errors.New("no parent server gave an NS RRset")
 	}
-	return parentSeen{}, last
+	return seen, last
 }
 
 // serverSeen is what one server of the parent answered.
@@ -555,7 +569,9 @@ var parentLookGo = func(look func()) { go look() }
 
 // parentNow is what the parent last served for the zone, false when no look
 // has found out yet. A look is asked when the last is older than
-// parentLookEvery; its answer brings a turn.
+// parentLookEvery; its answer brings a turn. A look that tells only one RRset
+// moves that one on from a look that told both; before any such look it has found
+// nothing out, as an RRset not told would read as empty.
 func (conf *Config) parentNow(zone string) (parentSeen, bool) {
 	rb := &conf.InternalMp.reconciles
 	key := canonicalName(zone)
@@ -574,7 +590,9 @@ func (conf *Config) parentNow(zone string) (parentSeen, bool) {
 			zr := rb.zone(key)
 			zr.looking = false
 			lowered := false
-			if err == nil {
+			read := err == nil || (len(got.each) > 0 && !zr.parent.at.IsZero())
+			if read {
+				got.keepUntold(zr.parent)
 				got.at = time.Now()
 				got.after(zr.parent)
 				lowered = !got.nsHeldTo.Equal(zr.parent.nsHeldTo) || !got.dsHeldTo.Equal(zr.parent.dsHeldTo)
@@ -585,13 +603,12 @@ func (conf *Config) parentNow(zone string) (parentSeen, bool) {
 				lg.Info("the parent lowered a TTL of the zone; a removal's wait counts the longer one until what it gave has run out", "zone", zone,
 					"parent_ns_ttl", got.nsTTL, "ns_held_to", got.nsHeldTo.UTC().Format(time.RFC3339), "parent_ds_ttl", got.dsTTL, "ds_held_to", got.dsHeldTo.UTC().Format(time.RFC3339))
 			}
-			if err != nil {
-				if rb.sayOnce(key, "parent look "+err.Error()) {
-					lg.Warn("what the parent serves for the zone could not be read; a removal's step waits", "zone", zone, "err", err)
-				}
-				return
+			if err != nil && rb.sayOnce(key, "parent look "+err.Error()) {
+				lg.Warn("what the parent serves for the zone could not be read; a removal's step waits", "zone", zone, "err", err)
 			}
-			conf.askThaw(zone)
+			if read {
+				conf.askThaw(zone)
+			}
 		})
 	}
 	rb.mu.Lock()
@@ -783,6 +800,18 @@ func (conf *Config) removalNSWait(zone, label, id string, agentNS bool) string {
 		return removalWaitSaid(conf, zone, id, "2 (its NS)", "for the NS TTL until "+removalTime(until))
 	}
 	return ""
+}
+
+// removalDSLook holds the DS step until the parent has been read. Its CDS goes
+// with the step, and a parent can drop its DS at once: unread until then, that DS
+// would read as never there. A signer that serves nothing has no step before this
+// one that reads the parent. The leader's operator's word goes on past it.
+func (conf *Config) removalDSLook(zone, step string) string {
+	if _, ok := conf.parentNow(zone); ok || conf.InternalMp.Instructions.parentWord(zone, step) {
+		return ""
+	}
+	conf.InternalMp.reconciles.watches(canonicalName(zone), step)
+	return "until the parent's DS RRset is known"
 }
 
 // removalDSWait is what the leaving provider's DS step waits for: its CDS
@@ -1091,12 +1120,20 @@ func (conf *Config) safeToRemoveSaid(zone string) string {
 
 // --- Other readers ---
 
-// lookAgainAtDnskeyWaits has the zone's DNSKEY distributions look again at who
-// they wait for: a step took a provider out of the key confirmers, and a
-// rollover paused on it resumes (design 5.2).
-func (conf *Config) lookAgainAtDnskeyWaits(zone ZoneName) {
+// stillConfirmsKeys: id is among the zone's KeyConfirmers at its step: a
+// leaving provider until its NS TTL has passed. Resolvers sent to it need
+// another signer's new DNSKEY, so that distribution has no time-out for it
+// (design 5.2).
+func stillConfirmsKeys(zone ZoneName, id AgentId) bool {
+	return isAmong(identities(rolesForZone(zone).KeyConfirmers), id)
+}
+
+// lookAgainAtDnskeyWaits has the zone's DNSKEY distributions look again at the
+// provider a step took out of the key confirmers: a rollover paused on it
+// resumes (design 5.2).
+func (conf *Config) lookAgainAtDnskeyWaits(zone ZoneName, left AgentId) {
 	if tm := conf.InternalMp.MPTransport; tm != nil {
-		tm.lookAgainAtDnskeyPropagations(zone)
+		tm.lookAgainAtDnskeyPropagations(zone, left)
 	}
 }
 
