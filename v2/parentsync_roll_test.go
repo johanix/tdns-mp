@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
@@ -279,6 +280,29 @@ func TestTheNewKEYIsPublishedOnlyAfterTheParentHasTakenIt(t *testing.T) {
 	}
 }
 
+// The roll's KEY publishes the zone's key: the hold of a publication that did
+// not go out ends there, since no set-up runs during the roll, and the sync it
+// kept waiting is asked for at the next tick.
+func TestTheRollsKEYEndsTheHoldForAKEYNotPublished(t *testing.T) {
+	r := newRollRig(t, "roll.unpublished.example.")
+	r.conf.InternalMp.keyPolls.begin(r.zone).end(true)
+	r.conf.InternalMp.CatchUp.oweForKey(r.zone)
+	if why := r.conf.keyHoldReason(r.ctx, r.zone); why != "not published" {
+		t.Fatalf("the rig's hold: %q", why)
+	}
+	r.start(t)
+	if ro := r.roll(t); ro == nil || ro.phase != rollPublished {
+		t.Fatalf("the roll: %+v", ro)
+	}
+	if why := r.conf.keyHoldReason(r.ctx, r.zone); why != "" {
+		t.Errorf("the sync is still held once the roll's KEY is sent: %s", why)
+	}
+	r.conf.retestKeyHolds(r.ctx)
+	if r.conf.InternalMp.CatchUp.releaseKeyOwed(r.zone) {
+		t.Error("the sync that waited is still owed after the tick")
+	}
+}
+
 // From when the roll's KEY is sent, the leader's zone key is the new key,
 // though its own copy still serves the old KEY: what it hands over is the
 // new key, and its set-up does not publish the old KEY over the new one.
@@ -295,6 +319,60 @@ func TestTheLeaderNamesTheNewKeyOnceItsKEYIsSent(t *testing.T) {
 	}
 	if strings.Contains(r.alog.String(), "publishing KEY to combiner") {
 		t.Errorf("the set-up published a KEY during the roll:\n%s", r.alog)
+	}
+}
+
+// underAnotherSerial notes distID as sent to the combiner under a serial this
+// agent no longer wants, as the gate does: a word on it other than a success
+// is not final, and the update goes again (plan S10). The func returned has
+// the combiner hold the serial wanted, and the update go again.
+func underAnotherSerial(tm *MPTransportBridge, zone ZoneName, distID string) func() {
+	handed, wanted := &ActingHandover{Serial: 1}, &ActingHandover{Serial: 2}
+	tr := newHandoverTracker("", func(ZoneName, *ZoneUpdate, string) (string, error) { return "", nil })
+	z := &zoneHandover{want: wanted, held: handed}
+	tr.zones[handoverKey(string(zone))] = z
+	tr.sent[distID] = &sentUpdate{zone: zone, update: &ZoneUpdate{}, under: handed, at: time.Now()}
+	tm.handover = tr
+	return func() {
+		tr.mu.Lock()
+		z.held = wanted
+		tr.mu.Unlock()
+		tr.drain(string(zone))
+	}
+}
+
+// The combiner's IGNORED on a KEY sent under another serial is no final word:
+// the KEY goes again, and the old key is not retired or deleted on it.
+func TestAWordNotFinalDoesNotEndTheRoll(t *testing.T) {
+	r := newRollRig(t, "roll.notfinal.example.")
+	k2 := r.start(t)
+	tm := r.conf.InternalMp.MPTransport
+	st, _ := tm.rollKEYs.state(r.zone)
+	sentAgain := underAnotherSerial(tm, r.zone, st.distID)
+	word := func(status transport.ConfirmStatus) {
+		tm.ChunkHandler.OnConfirmationReceived(confirmIn(st.distID, rigCombiner, status, string(r.zone), nil, nil, nil, nil, false, ""))
+	}
+	for _, rcpt := range st.expected {
+		if rcpt != canonicalName(rigCombiner) {
+			tm.rollKEYs.heard(st.distID, rcpt, "SUCCESS", "", false)
+		}
+	}
+	word(transport.ConfirmIgnored)
+	r.pass(t, syncOther)
+	if ro := r.roll(t); ro == nil || ro.phase != rollPublished || ro.failures != 0 {
+		t.Fatalf("the roll after a word not final: %+v", ro)
+	}
+	if got := r.parent.trusts(); !slices.Contains(got, r.old.keyid) {
+		t.Fatalf("the parent trusts %v, without the old key %d", got, r.old.keyid)
+	}
+	sentAgain()
+	word(transport.ConfirmSuccess)
+	r.pass(t, syncOther)
+	if ro := r.roll(t); ro != nil {
+		t.Errorf("the roll did not end on the final word: %+v", ro)
+	}
+	if got := r.parent.trusts(); !slices.Equal(got, []uint16{k2}) {
+		t.Errorf("the parent trusts %v, want %d alone", got, k2)
 	}
 }
 
@@ -541,6 +619,95 @@ func TestAKEYPurgeIsAskedForAgainUntilTheCombinerHasMadeIt(t *testing.T) {
 	r.conf.retryKEYPurges(r.zdr)
 	if len(r.sends) != 4 {
 		t.Errorf("asked again once dropped: %d sends", len(r.sends))
+	}
+}
+
+// The combiner's IGNORED on a drop sent under another serial is no final word:
+// the KEY stays in the member's data until the word on the drop sent again.
+func TestAWordNotFinalDoesNotDropTheKEY(t *testing.T) {
+	r := newKeyPurgeRig(t, "roll.purgenotfinal.example.")
+	r.conf.dropOtherKEYs(r.zdr, r.zone, r.them)
+	if len(r.sends) != 1 {
+		t.Fatalf("the combiner was asked %d times", len(r.sends))
+	}
+	tm := r.conf.InternalMp.MPTransport
+	sentAgain := underAnotherSerial(tm, r.zone, r.sends[0])
+	word := func(status transport.ConfirmStatus) {
+		tm.ChunkHandler.OnConfirmationReceived(confirmIn(r.sends[0], rigCombiner, status, string(r.zone), nil, nil, nil, nil, false, ""))
+	}
+	word(transport.ConfirmIgnored)
+	r.conf.retryKEYPurges(r.zdr)
+	if !r.holds(earlierLeader) {
+		t.Fatal("a word not final dropped the KEY")
+	}
+	sentAgain()
+	word(transport.ConfirmSuccess)
+	r.conf.retryKEYPurges(r.zdr)
+	if r.holds(earlierLeader) {
+		t.Error("the KEY is kept after the combiner's final word")
+	}
+}
+
+// A drop of a KEY is the combiner's word alone: a peer answering under the
+// drop's distribution ID changes nothing, whatever it says.
+func TestOnlyTheCombinerAnswersAKEYPurge(t *testing.T) {
+	r := newKeyPurgeRig(t, "roll.purgeword.example.")
+	word := func(from string, status transport.ConfirmStatus) {
+		r.conf.InternalMp.MPTransport.ChunkHandler.OnConfirmationReceived(confirmIn(r.sends[0], from, status, string(r.zone), nil, nil, nil, nil, false, ""))
+	}
+	r.conf.dropOtherKEYs(r.zdr, r.zone, r.them)
+	if len(r.sends) != 1 {
+		t.Fatalf("the combiner was asked %d times", len(r.sends))
+	}
+	word(string(r.them), transport.ConfirmSuccess)
+	r.conf.retryKEYPurges(r.zdr)
+	if !r.holds(earlierLeader) {
+		t.Fatal("a peer's word dropped the KEY")
+	}
+	word(string(r.them), transport.ConfirmRejected)
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 1 {
+		t.Errorf("a peer's refusal had the drop asked for again: %d sends", len(r.sends))
+	}
+	word(rigCombiner, transport.ConfirmSuccess)
+	r.conf.retryKEYPurges(r.zdr)
+	if r.holds(earlierLeader) {
+		t.Error("the KEY is kept after the combiner dropped it")
+	}
+}
+
+// A stored roll that cannot be read is no proof that none runs: no new roll
+// starts over it, and nothing reads which key is the zone's without it.
+func TestARollThatCannotBeReadIsNotOverwritten(t *testing.T) {
+	r := newRollRig(t, "roll.unreadable.example.")
+	r.parent.holdTrust = true
+	k2 := r.start(t)
+	kdb := r.mpzd.KeyDB
+	setNextTry := func(v any) {
+		t.Helper()
+		if _, err := kdb.DB.Exec(`UPDATE MPSig0Rolls SET nexttry = ?`, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setNextTry("not a time")
+	if _, err := loadRoll(kdb, r.zone); err == nil {
+		t.Fatal("the rig's roll can still be read")
+	}
+
+	_, err := r.conf.startSig0Roll(r.ctx, r.zone, dns.ED25519)
+	r.conf.InternalMp.sig0Rolls.wait()
+	if err == nil || !strings.Contains(err.Error(), "the roll of the SIG(0) key") {
+		t.Errorf("a roll started over one that cannot be read: %v", err)
+	}
+	if _, err := readZoneKey(kdb, r.zone); err == nil {
+		t.Error("the zone's key was read without its roll")
+	}
+	if published, err := sig0Rows(kdb, r.zone, tdns.Sig0StatePublished); err != nil || len(published) != 1 {
+		t.Errorf("published keys: %d, %v", len(published), err)
+	}
+	setNextTry(0)
+	if ro := r.roll(t); ro == nil || ro.newKeyid != k2 {
+		t.Errorf("the roll of key %d was overwritten: %+v", k2, ro)
 	}
 }
 
@@ -866,4 +1033,251 @@ func TestARollOwedInAZoneWithNoKeyEnds(t *testing.T) {
 	if ro, err := loadRoll(r.mpzd.KeyDB, r.zone); err != nil || ro != nil {
 		t.Errorf("the roll: %+v, %v", ro, err)
 	}
+}
+
+// formerLeaderRig: this agent led the zone and sent its KEY straight to its
+// combiner (sendZoneKEY), so its data holds no KEY of its own. The other
+// provider leads now. The drops asked of the combiner are noted by origin.
+type formerLeaderRig struct {
+	*rollRig
+	zdr   *ZoneDataRepo
+	ar    *AgentRepo
+	sends []AgentId
+	dists []string
+}
+
+func newFormerLeaderRig(t *testing.T, zone string) *formerLeaderRig {
+	t.Helper()
+	r := &formerLeaderRig{rollRig: newRollRig(t, zone)}
+	r.leader(r.them)
+	r.zdr, _ = NewZoneDataRepo()
+	r.ar, _ = NewAgentRepo()
+	r.zdr.Repo.Set(r.zone, r.ar)
+	saved := sendKEYPurge
+	sendKEYPurge = func(_ *MPTransportBridge, _ ZoneName, origin AgentId, distID string) error {
+		r.sends = append(r.sends, origin)
+		r.dists = append(r.dists, distID)
+		return nil
+	}
+	t.Cleanup(func() { sendKEYPurge = saved })
+	return r
+}
+
+// holdsKEY puts key in this agent's data under origin's name.
+func (r *formerLeaderRig) holdsKEY(origin AgentId, key *dns.KEY) {
+	od := tdns.NewOwnerData(string(r.zone))
+	od.RRtypes.Set(dns.TypeKEY, core.RRset{RRs: []dns.RR{key}})
+	r.ar.Set(origin, od)
+}
+
+// The lead moves to a provider and the former leader stays. The new leader's
+// roll replaces its own KEY only, so the zone publishes the former's beside
+// the new one (the rig's x2l-update, where that held every sync of the
+// leader). The former leader's combiner is asked to drop the KEY in its own
+// name once the zone publishes the two, and not before: the new KEY might
+// not be there yet, and the zone would have none. It is asked again if the
+// KEY comes back (the combiner's own read).
+func TestAFormerLeaderThatStaysDropsItsOwnKEYAfterTheNewLeadersRoll(t *testing.T) {
+	r := newFormerLeaderRig(t, "roll.formerstays.example.")
+	self := r.conf.localAgentID()
+	if self == "" || sameName(string(self), string(r.them)) {
+		t.Fatalf("the rig's identities: %q, %q", self, r.them)
+	}
+	book := &r.conf.InternalMp.MPTransport.keyPurges
+	rolled := testSig0Key(t, newMPTestKeyDB(t), string(r.zone))
+	r.holdsKEY(r.them, rolled.key)
+
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 0 {
+		t.Fatalf("with the new KEY not published yet the combiner was asked for %v", r.sends)
+	}
+
+	r.publish(t, r.old, rolled)
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 1 || r.sends[0] != self {
+		t.Fatalf("with the zone publishing both KEYs the combiner was asked for %v, want %s's", r.sends, self)
+	}
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 1 {
+		t.Errorf("the tick asked again within roll-retry: %v", r.sends)
+	}
+	book.heard(r.dists[0], "SUCCESS", "", false)
+	r.conf.dropOtherKEYs(r.zdr, r.zone, r.them)
+	if len(r.sends) != 1 {
+		t.Errorf("asked again after the combiner's word, with the zone not refreshed yet: %v", r.sends)
+	}
+
+	r.publish(t, rolled)
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 1 {
+		t.Errorf("asked again with the zone publishing the leader's KEY alone: %v", r.sends)
+	}
+	r.publish(t, r.old, rolled)
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 2 || r.sends[1] != self {
+		t.Errorf("the KEY came back, and the combiner was asked for %v", r.sends)
+	}
+}
+
+// After a restart the combiner's own read can put the former leader's KEY in
+// its data. It goes by the same rule, and leaves the data once dropped.
+func TestAFormerLeadersOwnKEYInItsDataGoesOnceTheCombinerHasDroppedIt(t *testing.T) {
+	r := newFormerLeaderRig(t, "roll.formerdata.example.")
+	self := r.conf.localAgentID()
+	rolled := testSig0Key(t, newMPTestKeyDB(t), string(r.zone))
+	r.holdsKEY(r.them, rolled.key)
+	r.holdsKEY(self, r.old.key)
+	r.publish(t, r.old, rolled)
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 1 || r.sends[0] != self {
+		t.Fatalf("the combiner was asked for %v", r.sends)
+	}
+	held := func() int {
+		od, ok := r.ar.Get(self)
+		if !ok || od == nil {
+			return 0
+		}
+		return len(od.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs)
+	}
+	r.conf.retryKEYPurges(r.zdr)
+	if held() != 1 {
+		t.Error("the KEY left the data before the combiner's word")
+	}
+	r.conf.InternalMp.MPTransport.keyPurges.heard(r.dists[0], "SUCCESS", "", false)
+	r.conf.retryKEYPurges(r.zdr)
+	if held() != 0 {
+		t.Error("the KEY stayed in the data after the combiner dropped it")
+	}
+	if len(r.sends) != 1 {
+		t.Errorf("the combiner was asked for %v", r.sends)
+	}
+}
+
+// A leader has no earlier KEY of its own to drop, whatever the zone publishes:
+// another KEY beside its own is not one its own name holds.
+func TestALeaderDropsNoKEYOfItsOwnName(t *testing.T) {
+	r := newFormerLeaderRig(t, "roll.leaderkeeps.example.")
+	self := r.conf.localAgentID()
+	r.leader(self)
+	other := testSig0Key(t, newMPTestKeyDB(t), string(r.zone))
+	r.holdsKEY(self, r.old.key)
+	r.publish(t, r.old, other)
+	r.conf.dropOtherKEYs(r.zdr, r.zone, self)
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 0 {
+		t.Errorf("the leader asked for the drop of %v", r.sends)
+	}
+}
+
+// Several KEYs that do not include the leader's are the operator's to sort
+// out (decision 98): this agent's own name is not asked to drop anything.
+func TestSeveralKEYsWithoutTheLeadersDropNothingOfThisAgents(t *testing.T) {
+	r := newFormerLeaderRig(t, "roll.notleaders.example.")
+	other := testSig0Key(t, newMPTestKeyDB(t), string(r.zone))
+	third := testSig0Key(t, newMPTestKeyDB(t), string(r.zone))
+	r.holdsKEY(r.them, third.key)
+	r.publish(t, r.old, other)
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 0 {
+		t.Errorf("the combiner was asked for %v", r.sends)
+	}
+}
+
+// A lead move with no roll: the new leader publishes the key the former one
+// did, and the zone publishes that one KEY. Nothing is owed, and a leader's
+// KEY that reached the combiner without its instruction is there under the
+// former's name alone (see the next test), so dropping that name could leave
+// the zone with none. It stays, also when the combiner's own read has put it
+// in this agent's data after a restart.
+func TestALeadMoveWithNoRollKeepsTheOnlyKEYItHas(t *testing.T) {
+	r := newFormerLeaderRig(t, "roll.moveonly.example.")
+	self := r.conf.localAgentID()
+	r.holdsKEY(r.them, r.old.key)
+	r.conf.dropOtherKEYs(r.zdr, r.zone, r.them)
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 0 {
+		t.Errorf("with its own KEY not in its data the combiner was asked for %v", r.sends)
+	}
+	r.holdsKEY(self, r.old.key)
+	r.conf.dropOtherKEYs(r.zdr, r.zone, r.them)
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 0 {
+		t.Errorf("with its own KEY in its data the combiner was asked for %v", r.sends)
+	}
+	if od, ok := r.ar.Get(self); !ok || od == nil || len(od.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs) != 1 {
+		t.Error("this agent's data lost the KEY")
+	}
+}
+
+// The same, at a real combiner. A leader's KEY that the combiner's own agent
+// has published too stays under the local name alone, until the instruction
+// that comes with it files it under the leader's as well. The next leader's
+// roll replaces the leader's name only, so the two stand side by side, which
+// is what the agent then sees at the apex. The drop the former leader's agent
+// asks for takes its KEY and its instruction, and leaves the leader's.
+func TestTheCombinerHoldsAFormerLeadersKEYBesideTheRolledOneUntilItIsDropped(t *testing.T) {
+	mpzd, hdb := csyncCombinerZone(t, "roll.formerkey.combiner.example.", true, true)
+	zone := mpzd.ZoneName
+	local := map[string]bool{csyncOurAgent: true}
+	update := func(sender string, key *dns.KEY, instr *core.PublishInstruction) {
+		t.Helper()
+		resp := CombinerProcessUpdate(&CombinerSyncRequest{SenderID: sender, DeliveredBy: csyncOurAgent, Zone: zone,
+			Operations:     []core.RROperation{{Operation: "replace", RRtype: "KEY", Records: []string{key.String()}}},
+			Publish:        instr,
+			DistributionID: nextDistributionID(), Timestamp: time.Now()}, nil, local, hdb, nil)
+		if resp.Status != "ok" {
+			t.Fatalf("%s's KEY: %s: %s (%v)", sender, resp.Status, resp.Message, resp.RejectedItems)
+		}
+	}
+	instruction := func(key *dns.KEY) *core.PublishInstruction {
+		return &core.PublishInstruction{KEYRRs: []string{key.String()}, Locations: []string{"at-apex"}}
+	}
+	holds := func(sender string) []dns.RR {
+		return mpzd.MP.AgentContributions[sender][zone][dns.TypeKEY].RRs
+	}
+	first := testSig0Key(t, newMPTestKeyDB(t), zone)
+	rolled := testSig0Key(t, newMPTestKeyDB(t), zone)
+
+	update(csyncOurAgent, first.key, instruction(first.key))
+	update(csyncLeaderA, first.key, nil)
+	if len(holds(csyncOurAgent)) != 1 || len(holds(csyncLeaderA)) != 0 {
+		t.Fatalf("the same key with no instruction: %v under the local name, %v under the leader's", holds(csyncOurAgent), holds(csyncLeaderA))
+	}
+	update(csyncLeaderA, first.key, instruction(first.key))
+	if len(holds(csyncOurAgent)) != 1 || len(holds(csyncLeaderA)) != 1 {
+		t.Fatalf("the same key with its instruction: %v under the local name, %v under the leader's", holds(csyncOurAgent), holds(csyncLeaderA))
+	}
+
+	update(csyncLeaderA, rolled.key, instruction(rolled.key))
+	if got := holds(csyncOurAgent); len(got) != 1 || !sameKey(asKEY(got[0]), first.key) {
+		t.Fatalf("the local name after the roll: %v", got)
+	}
+	if got := holds(csyncLeaderA); len(got) != 1 || !sameKey(asKEY(got[0]), rolled.key) {
+		t.Fatalf("the leader's name after the roll: %v", got)
+	}
+
+	zu := keyPurge(ZoneName(zone), csyncOurAgent)
+	resp := CombinerProcessUpdate(&CombinerSyncRequest{SenderID: string(zu.AgentId), DeliveredBy: csyncOurAgent, Zone: zone,
+		Operations: zu.Operations, Publish: zu.Publish, Removal: zu.Withdraw != nil,
+		DistributionID: nextDistributionID(), Timestamp: time.Now()}, nil, local, hdb, nil)
+	if resp.Status != "ok" {
+		t.Fatalf("the drop: %s: %s", resp.Status, resp.Message)
+	}
+	if got := holds(csyncOurAgent); len(got) != 0 {
+		t.Errorf("the former leader's KEY after the drop: %v", got)
+	}
+	if got := holds(csyncLeaderA); len(got) != 1 || !sameKey(asKEY(got[0]), rolled.key) {
+		t.Errorf("the leader's KEY after the drop: %v", got)
+	}
+	if stored, err := GetPublishInstruction(hdb, zone, csyncOurAgent); err != nil || stored != nil {
+		t.Errorf("the former leader's instruction after the drop: %+v, %v", stored, err)
+	}
+	if stored, err := GetPublishInstruction(hdb, zone, csyncLeaderA); err != nil || stored == nil {
+		t.Errorf("the leader's instruction after the drop: %+v, %v", stored, err)
+	}
+}
+
+func asKEY(rr dns.RR) *dns.KEY {
+	k, _ := rr.(*dns.KEY)
+	return k
 }
