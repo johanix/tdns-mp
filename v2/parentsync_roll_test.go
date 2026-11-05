@@ -1331,3 +1331,35 @@ func TestAPurgeOlderThanTheLastKEYTakesNothingBack(t *testing.T) {
 		t.Errorf("after a newer purge: %d KEYs held, instruction %+v", holds(), stored())
 	}
 }
+
+// An older KEY that comes with its instruction after a newer one, as the
+// queue can deliver it, does not put the older KEY back: its replace is
+// refused as stale, and so is its instruction, which would otherwise apply
+// the older KEY and be kept in the newer one's place.
+func TestAnOlderKEYWithItsInstructionDoesNotComeBack(t *testing.T) {
+	mpzd, hdb := csyncCombinerZone(t, "roll.stalekey.combiner.example.", true, true)
+	zone := mpzd.ZoneName
+	local := map[string]bool{csyncOurAgent: true}
+	newer := testSig0Key(t, newMPTestKeyDB(t), zone).key
+	older := testSig0Key(t, newMPTestKeyDB(t), zone).key
+	at := time.Now()
+	send := func(key *dns.KEY, when time.Time) {
+		t.Helper()
+		resp := CombinerProcessUpdate(&CombinerSyncRequest{SenderID: csyncLeaderA, DeliveredBy: csyncOurAgent, Zone: zone,
+			Operations:     []core.RROperation{{Operation: "replace", RRtype: "KEY", Records: []string{key.String()}}},
+			Publish:        &core.PublishInstruction{KEYRRs: []string{key.String()}, Locations: []string{"at-apex"}},
+			DistributionID: nextDistributionID(), Timestamp: when}, nil, local, hdb, nil)
+		if resp.Status != "ok" {
+			t.Fatalf("the KEY: %s: %s (%v)", resp.Status, resp.Message, resp.RejectedItems)
+		}
+	}
+	send(newer, at)
+	send(older, at.Add(-time.Minute))
+	if got := mpzd.MP.AgentContributions[csyncLeaderA][zone][dns.TypeKEY].RRs; len(got) != 1 || !sameKey(asKEY(got[0]), newer) {
+		t.Errorf("the KEY held after an older one came: %v", got)
+	}
+	stored, err := GetPublishInstruction(hdb, zone, csyncLeaderA)
+	if err != nil || stored == nil || len(stored.KEYRRs) != 1 || stored.KEYRRs[0] != newer.String() {
+		t.Errorf("the instruction kept after an older one came: %+v, %v", stored, err)
+	}
+}
