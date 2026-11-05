@@ -368,6 +368,71 @@ func TestPubkeyOnPublishesTheKEYAtTheSignalNames(t *testing.T) {
 	noKey.wantNoKeySent("with no key published")
 }
 
+// A KEY the queue does not take, for the combiner or for an agent, goes again:
+// the step that gives pubkey is not left until it has gone, whatever else
+// holds the step, and the status says what it waits for. It is tried every
+// keySendRetry.
+func TestThePubkeyStepWaitsUntilItsKEYIsQueued(t *testing.T) {
+	const n, v = `servers="a,b" nsmgmt="agent" suffix="n"`, `servers="a,b" nsmgmt="agent" pubkey suffix="v"`
+	for _, tc := range []struct {
+		name   string
+		filled bool // the queue takes nothing; else the combiner's and no more
+	}{
+		{"its combiner", true},
+		{"an agent", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := signalLeader(t, "pubkey.unqueued.example.", n, v, true)
+			tm := r.conf.InternalMp.MPTransport
+			full := transport.NewReliableMessageQueue(&transport.ReliableMessageQueueConfig{MaxQueueSize: 1})
+			if tc.filled {
+				if err := full.Enqueue(&transport.OutgoingMessage{DistributionID: "x", RecipientID: roleB, Zone: r.zone, Payload: &ZoneUpdate{}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tm.ReliableQueue = full
+			st := r.takeNextStep()
+			if !slices.Equal(st.Taken, []string{pubkeyStepKey}) {
+				t.Fatalf("the step: %+v", st)
+			}
+			if got := full.GetPendingMessages(); len(got) != 1 {
+				t.Fatalf("what the queue took: %+v", got)
+			} else if !tc.filled && got[0].RecipientID != string(freezeCombiner) {
+				t.Fatalf("what the queue took first: %+v", got[0])
+			}
+
+			wantWaiting := func(when string, at time.Time) {
+				t.Helper()
+				r.partsTake()
+				r.holdsToo(roleB)
+				r.turn(at)
+				if got, _ := r.step(); got.Number != st.Number {
+					t.Fatalf("%s: the step was left: %+v", when, got)
+				}
+				if line := r.conf.reconcileLine(r.zone, at); !strings.Contains(line, "the zone's KEY to go to the _signal names") {
+					t.Errorf("%s: the status: %s", when, line)
+				}
+			}
+			wantWaiting("the send failed", time.Now())
+			wantWaiting("it failed again", time.Now().Add(keySendRetry))
+
+			tm.ReliableQueue = r.queue
+			wantWaiting("the queue takes it, before its time", time.Now())
+			r.wantNoKeySent("before its time")
+
+			r.partsTake()
+			r.holdsToo(roleB)
+			r.turn(time.Now().Add(keySendRetry))
+			if sent := r.keySent(); !slices.Contains(sent.Locations, "at-ns") {
+				t.Errorf("the KEY sent again: %+v, want at-ns", sent)
+			}
+			if got, _ := r.step(); got.Number != st.Number+1 || got.Taken[len(got.Taken)-1] != lastStepKey {
+				t.Errorf("the step once the KEY has gone: %+v", got)
+			}
+		})
+	}
+}
+
 // pubkey off: the step takes the flag out of the sets, and nothing is sent:
 // handed the sets, the combiner withdraws the KEY from the _signal names at
 // once, though its copy still says pubkey.

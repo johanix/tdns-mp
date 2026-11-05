@@ -19,6 +19,7 @@ package tdnsmp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -34,6 +35,8 @@ const (
 	// pubkeyStepKey and pubcdsStepKey are the keys of the flags' steps.
 	pubkeyStepKey = "signal pubkey"
 	pubcdsStepKey = "signal pubcds"
+	// keySendRetry paces the leader's tries of a KEY the queue did not take.
+	keySendRetry = time.Minute
 )
 
 func init() {
@@ -142,15 +145,17 @@ func upstreamStatus(conf *Config, zone string, step heldStep, _ time.Time) strin
 
 // signalSteps is a step for each of pubkey and pubcds that V says otherwise
 // than the sets held. Each changes its flag in the sets, and every agent's
-// combiner acts by it.
+// combiner acts by it. pubkey's stays planned once taken: the step held has
+// its wait.
 func signalSteps(p planView) []plannedStep {
 	to := p.to
 	var steps []plannedStep
-	if p.held.Pubkey != to.Pubkey {
+	if p.held.Pubkey != to.Pubkey || slices.Contains(p.taken, pubkeyStepKey) {
 		st := plannedStep{key: pubkeyStepKey, what: "the zone's KEY at the _signal names " + publishedOrWithdrawn(to.Pubkey),
 			sets: func(h Roles) Roles { h.Pubkey = to.Pubkey; return h }}
 		if to.Pubkey {
 			st.start = (*Config).sendKeyForSignalNames
+			st.wait = (*Config).keyNotQueued
 		}
 		steps = append(steps, st)
 	}
@@ -175,22 +180,71 @@ func publishedOrWithdrawn(on bool) string {
 // under a distribution of its own: the roll waits for the one it booked. A key
 // not published yet goes with its take-up when the transition is done, or with
 // the roll's own send, by the same sets.
+//
+// A send that fails is kept: the step waits for it (keyNotQueued), and the
+// leader's turn tries again (sendOwedKey). Nothing else would: a lead whose
+// poll of the key has ended publishes nothing at the take-up. In memory: after
+// a restart or under a new lead, the take-up publishes the key by the sets.
 func (conf *Config) sendKeyForSignalNames(zone string) {
+	err := conf.queueKeyForSignalNames(zone)
+	if err != nil {
+		lgAgent.Error("the zone's KEY could not be sent for the _signal names; tried again every minute", "zone", zone, "err", err)
+	}
+	var failed time.Time
+	if err != nil {
+		failed = time.Now()
+	}
+	conf.InternalMp.reconciles.setKeyUnsent(canonicalName(zone), failed)
+}
+
+// queueKeyForSignalNames is the send: an error for one the combiner or any of
+// the agents did not get on the queue.
+func (conf *Config) queueKeyForSignalNames(zone string) error {
 	z := ZoneName(zone)
 	kdb := conf.zoneKeyDB(z)
 	if kdb == nil || conf.InternalMp.MPTransport == nil {
-		return
+		return nil
 	}
 	zk, err := readZoneKey(kdb, z)
 	if err != nil {
-		lgAgent.Error("the zone's KEY could not be read for the _signal names", "zone", zone, "err", err)
-		return
+		return fmt.Errorf("reading it: %w", err)
 	}
 	if zk.held == nil || zk.held.key == nil || (!zk.rolling && (len(zk.published) != 1 || !sameKey(zk.published[0], zk.held.key))) {
 		lgAgent.Info("the zone's KEY is not published yet: it goes to the _signal names when it is", "zone", zone)
-		return
+		return nil
 	}
-	if _, _, _, err := sendZoneKEY(conf.InternalMp.MPTransport, z, zk.held.key, ""); err != nil {
-		lgAgent.Error("the zone's KEY could not be sent for the _signal names", "zone", zone, "err", err)
+	_, _, agentsErr, err := sendZoneKEY(conf.InternalMp.MPTransport, z, zk.held.key, "")
+	return errors.Join(err, agentsErr)
+}
+
+// sendOwedKey is the leader's turn at a KEY whose send failed: it goes again,
+// to all of them, every keySendRetry. One that already has it replaces it with
+// itself.
+func (conf *Config) sendOwedKey(zone string, now time.Time) {
+	if failed := conf.InternalMp.reconciles.keyUnsent(canonicalName(zone)); !failed.IsZero() && now.Sub(failed) >= keySendRetry {
+		conf.sendKeyForSignalNames(zone)
 	}
+}
+
+// keyNotQueued is what the step that gives pubkey waits for at the leader: the
+// send that failed. "" once it has gone, as for a key not published yet.
+func (conf *Config) keyNotQueued(zone string, _ time.Time) string {
+	if conf.InternalMp.reconciles.keyUnsent(canonicalName(zone)).IsZero() {
+		return ""
+	}
+	return "the zone's KEY to go to the _signal names"
+}
+
+// keyUnsent is when the step's send of the zone's KEY last failed; zero with
+// none owed.
+func (b *reconcileBook) keyUnsent(zone string) time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.zone(zone).keyUnsent
+}
+
+func (b *reconcileBook) setKeyUnsent(zone string, failed time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.zone(zone).keyUnsent = failed
 }

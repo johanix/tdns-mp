@@ -427,7 +427,7 @@ func (t *handoverTracker) holds(zone string, sd SerialDigest, step int) bool {
 
 // reconcileBook is what the agent and the auditor keep of their zones'
 // reconciliations in memory: per zone, since when each leaving member has
-// owed a step's confirmation, and the lines logged once.
+// owed a step's confirmation, the lines logged once, and a KEY owed (S21).
 type reconcileBook struct {
 	mu    sync.Mutex
 	zones map[string]*zoneReconcile // by zone, folded
@@ -436,6 +436,8 @@ type reconcileBook struct {
 type zoneReconcile struct {
 	owing map[string]time.Time // by member, folded: when the first step it has not confirmed was taken
 	said  map[string]bool
+	// keyUnsent is when the step's send of the zone's KEY last failed (S21)
+	keyUnsent time.Time
 }
 
 func (b *reconcileBook) zone(zone string) *zoneReconcile {
@@ -493,6 +495,7 @@ func (conf *Config) reconcileTurn(zone string, now time.Time) {
 		conf.followStep(in, told)
 		return
 	}
+	conf.sendOwedKey(in.name, now)
 	v := conf.reconcileView(in, told, now)
 	if v.adopt != nil {
 		conf.takeFrom(in, v.adopt, "the furthest step a voting member holds")
