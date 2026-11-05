@@ -150,7 +150,10 @@ func readZoneKey(kdb *tdns.KeyDB, zone ZoneName) (*zoneKey, error) {
 	// key, not active yet (plan S17a): from when its KEY is sent, whatever
 	// the leader's own copy still serves, and while the copy serves it
 	// before the phase is written
-	r, sent := rollingKey(kdb, zone)
+	r, sent, err := rollingKey(kdb, zone)
+	if err != nil {
+		return nil, err
+	}
 	switch {
 	case z.several():
 	case r != nil && (sent || len(z.published) == 1 && sameKey(r.key, z.published[0])):
