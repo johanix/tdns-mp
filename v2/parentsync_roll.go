@@ -527,15 +527,40 @@ func (conf *Config) rollDebtTurn(zone string) {
 	}
 	z := ZoneName(zone)
 	if lem := conf.InternalMp.LeaderElectionManager; lem != nil && lem.IsLeader(z) {
-		if kdb := conf.zoneKeyDB(z); kdb != nil {
-			if r, err := loadRoll(kdb, z); err == nil && r == nil {
-				conf.oweRoll(z)
-			}
-		}
+		conf.resumeOwedRoll(z)
 	}
 	if time.Since(owed) > 2*rollRetryFor(conf.MpConfig()) && conf.InternalMp.keyLogs.due("roll owed "+zone) {
 		lgAgent.Warn("the roll of the zone's SIG(0) key has been owed for more than twice roll-retry", "zone", zone,
 			"since", owed.UTC().Format(time.RFC3339))
+	}
+}
+
+// resumeOwedRoll has a leader owe the roll that the zone's debt holds, with
+// none on its disk. It looks under the zone's key setup, where a pass that
+// ends the roll notes it done and forgets it (rollPass): a roll ended as the
+// turn looks is not owed again.
+func (conf *Config) resumeOwedRoll(zone ZoneName) {
+	kdb := conf.zoneKeyDB(zone)
+	if kdb == nil {
+		return
+	}
+	owes := false
+	err := conf.keySetupLocked(zone, func() error {
+		if owed, _ := conf.InternalMp.Instructions.rollDebt(string(zone)); owed.IsZero() {
+			return nil
+		}
+		if r, err := loadRoll(kdb, zone); err != nil || r != nil {
+			return err
+		}
+		owes = true
+		return saveRoll(kdb, &sig0Roll{zone: zone, phase: rollOwed, started: time.Now()})
+	})
+	if err != nil {
+		lgAgent.Error("the roll owed could not be kept", "zone", zone, "err", err)
+		return
+	}
+	if owes {
+		lgAgent.Info("rolling the zone's SIG(0) key", "zone", zone, "phase", rollOwed)
 	}
 }
 
@@ -652,11 +677,19 @@ func (conf *Config) rollPass(ctx context.Context, zone ZoneName, cause syncCause
 		case "":
 			return // waiting
 		case rollDone:
-			if err := deleteRoll(kdb, zone); err != nil {
-				lgAgent.Error("the roll of the zone's SIG(0) key is done but could not be forgotten", "zone", zone, "err", err)
+			// under the zone's key setup, as resumeOwedRoll looks: it finds
+			// the roll on disk or the debt ended
+			var nerr, derr error
+			_ = conf.keySetupLocked(zone, func() error {
+				nerr = conf.InternalMp.Instructions.noteRollDebt(string(zone), time.Time{}, time.Now())
+				derr = deleteRoll(kdb, zone)
+				return nil
+			})
+			if derr != nil {
+				lgAgent.Error("the roll of the zone's SIG(0) key is done but could not be forgotten", "zone", zone, "err", derr)
 			}
-			if err := conf.InternalMp.Instructions.noteRollDebt(string(zone), time.Time{}, time.Now()); err != nil {
-				lgAgent.Error("the roll done could not be kept with the zone's serials", "zone", zone, "err", err)
+			if nerr != nil {
+				lgAgent.Error("the roll done could not be kept with the zone's serials", "zone", zone, "err", nerr)
 			}
 			lgAgent.Info("rolling the zone's SIG(0) key", "zone", zone, "phase", rollDone, "old", r.oldKeyid, "new", r.newKeyid)
 			return
