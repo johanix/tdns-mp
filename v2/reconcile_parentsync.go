@@ -465,7 +465,96 @@ func (conf *Config) offerTakenUpKey(zone string) bool {
 	if err != nil || zk.held == nil || zk.held.key == nil {
 		return false
 	}
+	// The take-up's new key is made active, and the old one retired, once
+	// this agent's copy of the zone serves its KEY: a member's copy of the
+	// old key is never taken again (importSig0KeyFromPeer). In the
+	// background, under the key-setup lock, which a wait does not block on
+	if zk.rolling {
+		if len(zk.published) == 1 && sameKey(zk.published[0], zk.held.key) {
+			conf.InternalMp.parentSyncs.try(zone, func() {
+				conf.activateTakeUpKey(z)
+				conf.askThaw(zone)
+			})
+		}
+		return false
+	}
 	conf.InternalMp.parentSyncs.with(zone, func(z *parentSyncZone) { z.keyConfirmed = true })
 	conf.launchKeyPoll(conf.turnCtx(), nil, z, zone, zk.held.keyid, zk.held.key.Algorithm)
 	return true
+}
+
+// takeUpKey is the key the take-up publishes and offers: a new one, made
+// here, not the key the agents held before (the project owner's ruling of
+// 2026-11-06). The hand-over deleted that one at the parent, which may refuse
+// it from then on. The new key is kept published, not active, under a roll
+// record of its own (rollTakeUp), which makes it the zone's key here
+// (readZoneKey) until it is made active: no member's copy of the old key is
+// taken back meanwhile. A key the take-up made already is published again,
+// after a restart too, and so is a key made for this lead (made), the zone's
+// first. A roll under way ends first. Under the zone's key-setup lock.
+func (conf *Config) takeUpKey(kdb *tdns.KeyDB, zone ZoneName, zk *zoneKey, made bool) (*sig0Row, error) {
+	if made {
+		return zk.held, nil
+	}
+	r, err := loadRoll(kdb, zone)
+	if err != nil {
+		return nil, fmt.Errorf("the roll of the SIG(0) key of %s cannot be read: %w", zone, err)
+	}
+	if r != nil && r.phase == rollTakeUp {
+		for _, state := range []string{tdns.Sig0StatePublished, tdns.Sig0StateActive} {
+			if k := sig0RowByID(kdb, zone, state, r.newKeyid); k != nil && k.key != nil {
+				return k, nil
+			}
+		}
+		return nil, fmt.Errorf("the keystore holds the take-up's key %d of %s no more", r.newKeyid, zone)
+	}
+	if r != nil {
+		err := endRollLocked(kdb, r)
+		conf.rollEnded(r, "the agents take the parent sync up with a new key", err)
+		if err != nil {
+			return nil, err
+		}
+		if zk, err = readZoneKey(kdb, zone); err != nil || zk.held == nil || zk.held.key == nil {
+			return nil, fmt.Errorf("the zone's SIG(0) key of %s is not held after the roll ended (%v)", zone, err)
+		}
+	}
+	newKeyid, err := makePublishedKey(kdb, zone, parentSyncKeygenAlgorithm(), "parentsync-take-up")
+	if err != nil {
+		return nil, err
+	}
+	if err := saveRoll(kdb, &sig0Roll{zone: zone, phase: rollTakeUp, oldKeyid: zk.held.keyid, newKeyid: newKeyid, started: time.Now()}); err != nil {
+		return nil, fmt.Errorf("the take-up's new SIG(0) key of %s could not be kept: %w", zone, err)
+	}
+	lg.Info("the agents take the parent sync up with a new SIG(0) key", "zone", zone, "old", zk.held.keyid, "new", newKeyid)
+	k := sig0RowByID(kdb, zone, tdns.Sig0StatePublished, newKeyid)
+	if k == nil || k.key == nil {
+		return nil, fmt.Errorf("the take-up's new SIG(0) key %d of %s cannot be read", newKeyid, zone)
+	}
+	return k, nil
+}
+
+// activateTakeUpKey makes the take-up's new key active and retires the old
+// one, as a roll's step 5 does. An old key no longer active is left as it is.
+func (conf *Config) activateTakeUpKey(zone ZoneName) {
+	kdb := conf.zoneKeyDB(zone)
+	if kdb == nil {
+		return
+	}
+	_ = conf.keySetupLocked(zone, func() error {
+		r, err := loadRoll(kdb, zone)
+		if err != nil || r == nil || r.phase != rollTakeUp || sig0RowByID(kdb, zone, tdns.Sig0StatePublished, r.newKeyid) == nil {
+			return nil
+		}
+		if sig0RowByID(kdb, zone, tdns.Sig0StateActive, r.oldKeyid) != nil {
+			err = activateRolledKey(kdb, zone, r.newKeyid, r.oldKeyid)
+		} else {
+			err = sig0KeyChange(kdb, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "setstate", Keyname: dns.Fqdn(string(zone)), Keyid: r.newKeyid, State: tdns.Sig0StateActive})
+		}
+		if err != nil {
+			lg.Warn("the take-up's new SIG(0) key could not be made active, the step tries again", "zone", zone, "keyid", r.newKeyid, "err", err)
+			return nil
+		}
+		lg.Info("the take-up's new SIG(0) key is in use", "zone", zone, "keyid", r.newKeyid, "retired", r.oldKeyid)
+		return nil
+	})
 }
