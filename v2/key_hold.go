@@ -6,6 +6,7 @@ package tdnsmp
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -86,6 +87,10 @@ type keyPollBook struct {
 	trustHeard map[ZoneName]trustWord
 	// trustAsked: when keyHold last asked the parent's KeyState itself.
 	trustAsked map[ZoneName]time.Time
+	// sent: where the zone's KEY last went with its publish instruction,
+	// and the lead it went in (noteKeySent). A location the zone has now that
+	// it did not name sends the KEY again (sendKeyToNewLocations).
+	sent map[ZoneName]keySent
 	// retesting: a backstop pass runs (retestKeyHoldsInBackground).
 	retesting atomic.Bool
 	// goroutines: the polls and the backstop passes, each to its end, the
@@ -102,6 +107,12 @@ type keyPollEnd struct {
 	leadStart uint64
 }
 
+type keySent struct {
+	keyid     uint16
+	leadStart uint64
+	locations []string
+}
+
 func (b *keyPollBook) init() {
 	if b.running == nil {
 		b.running = map[ZoneName]int{}
@@ -113,6 +124,7 @@ func (b *keyPollBook) init() {
 		b.trustAsked = map[ZoneName]time.Time{}
 		b.offered = map[ZoneName]time.Time{}
 		b.lost = map[ZoneName]uint16{}
+		b.sent = map[ZoneName]keySent{}
 	}
 }
 
@@ -188,6 +200,22 @@ func (b *keyPollBook) pollEnded(zone ZoneName, keyid uint16, leadStart uint64, f
 		b.ended[zone] = keyPollEnd{keyid: keyid, leadStart: leadStart}
 	}
 	return b.running[zone]
+}
+
+// sentTo notes where the zone's KEY keyid went, in the lead leadStart.
+func (b *keyPollBook) sentTo(zone ZoneName, keyid uint16, leadStart uint64, locations []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.init()
+	b.sent[canonZone(zone)] = keySent{keyid: keyid, leadStart: leadStart, locations: slices.Clone(locations)}
+}
+
+// lastSent is where the zone's KEY last went, and in which lead.
+func (b *keyPollBook) lastSent(zone ZoneName) keySent {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.init()
+	return b.sent[canonZone(zone)]
 }
 
 // lastOffer is when the zone's key was last offered to the parent.

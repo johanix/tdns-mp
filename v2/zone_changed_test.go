@@ -177,7 +177,7 @@ func TestAFirstLoadAfterTheSetUpGetsEveryElectionCheck(t *testing.T) {
 
 	lem := conf.setUpLeaderElection(context.Background(), conf.MpConfig())
 	t.Cleanup(func() { stopElectionTimers(lem) })
-	if conf.InternalMp.LeaderElectionManager != lem || lem.onLeaderElected == nil || lem.onZoneJoined == nil {
+	if conf.InternalMp.LeaderElectionManager != lem || lem.onLeaderElected == nil || lem.onZoneJoined == nil || lem.onKeyLocations == nil {
 		t.Fatal("the set-up did not wire the election manager and its callbacks")
 	}
 	// the multi-provider zone: the parentsync detection and the first-load

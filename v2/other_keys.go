@@ -255,6 +255,9 @@ func (conf *Config) queueKeyForSignalNames(zone string) error {
 		return nil
 	}
 	_, _, agentsErr, err := sendZoneKEY(conf.InternalMp.MPTransport, z, zk.held.key, "")
+	if err == nil {
+		conf.noteKeySent(z, zk.held.keyid)
+	}
 	return errors.Join(err, agentsErr)
 }
 

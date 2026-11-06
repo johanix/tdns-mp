@@ -209,6 +209,7 @@ type LeaderElectionManager struct {
 	configuredPeersFunc  func(zone ZoneName) int         // returns count of configured peers for a zone
 	onLeaderElected      func(zone ZoneName) error       // called when local agent wins election
 	onZoneJoined         func(zone ZoneName) error       // called when a zone joins a group the local agent already leads
+	onKeyLocations       func(zone ZoneName) error       // called when a zone this agent leads changes its active instructions (zoneChanged)
 	onZoneLeft           func(zone ZoneName) bool        // ends what is scheduled for the parent of a zone that left its group (step 8)
 	onZoneRegrouped      func(zone ZoneName)             // called when a zone enters a provider group, whoever leads it (SetOnZoneRegrouped)
 	onLeaderNamed        func()                          // called when an election names a leader, this agent or another (SetOnLeaderNamed)
