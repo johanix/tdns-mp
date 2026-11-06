@@ -185,6 +185,16 @@ func (lem *LeaderElectionManager) SetOnZoneJoined(f func(zone ZoneName) error) {
 	}
 }
 
+// SetOnKeyLocations sets the callback invoked when a zone this agent leads
+// has a change of its active instructions (zoneChanged): it sends the KEY to
+// a location the zone has gained, with no new lead. It runs with the zone's
+// key-setup lock held, as every setup of the zone's key does.
+func (lem *LeaderElectionManager) SetOnKeyLocations(f func(zone ZoneName) error) {
+	lem.onKeyLocations = func(zone ZoneName) error {
+		return lem.inKeySetup(zone, func() error { return f(zone) })
+	}
+}
+
 // StartGroupElection initiates a leader election for a provider group.
 func (lem *LeaderElectionManager) StartGroupElection(groupHash string, members []string, zones []ZoneName) {
 	lem.startGroupElection(groupHash, members, zones, nil)
@@ -1226,11 +1236,16 @@ func (lem *LeaderElectionManager) electAtFirstLoad(zd *tdns.ZoneData) {
 //     nothing else is done; the group's election decides;
 //  3. no group covers the zone and this agent is its only voting member:
 //     it elects itself, unless it leads already (#149).
+//
+// And when this agent votes in the zone and leads it, a location the zone
+// has gained for its KEY gets the KEY with no new lead (onKeyLocations):
+// at-ns once HSYNC3 is added to a zone that says pubkey.
 func (lem *LeaderElectionManager) zoneChanged(zone ZoneName) {
 	if !votesInZone(zone, lem.localID) {
 		lem.dropZoneElection(zone)
 		return
 	}
+	defer lem.keyLocationsChanged(zone)
 	if lem.providerGroupMgr != nil {
 		if pg := lem.providerGroupMgr.GetGroupForZone(zone); pg != nil {
 			lem.dropZoneElection(zone)
@@ -1240,6 +1255,19 @@ func (lem *LeaderElectionManager) zoneChanged(zone ZoneName) {
 	if lem.configuredPeers(zone) == 0 && !lem.IsLeader(zone) {
 		lem.StartElection(zone, 0)
 	}
+}
+
+// keyLocationsChanged runs onKeyLocations for a zone this agent leads, in
+// a goroutine of its own.
+func (lem *LeaderElectionManager) keyLocationsChanged(zone ZoneName) {
+	if lem.onKeyLocations == nil || !lem.IsLeader(zone) {
+		return
+	}
+	go func() {
+		if err := lem.onKeyLocations(zone); err != nil {
+			logLeaderCallback("onKeyLocations", err, "zone", zone)
+		}
+	}()
 }
 
 // dropZoneElection drops the zone's own election, its timers and a deferred
