@@ -9,7 +9,6 @@ package tdnsmp
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -62,8 +61,8 @@ func keepRemoval(t *testing.T, s *InstructionStore, zone, label, identity string
 
 // The three sets of a reading: every ON record is a member, with a role or
 // without; servers= and signers= vote; auditors= alone audits. An OFF
-// record is no member. HSYNC3 with no HSYNCPARAM has no reading (#308), and
-// no members.
+// record is no member. HSYNC3 with no HSYNCPARAM is no error (#383): it
+// reads as the records alone, and an ON record is a member with no role.
 func TestMembersVotingMembersAndAuditorsOfAZone(t *testing.T) {
 	in := readOf(t, s15Records(7)...)
 	members, voting, auditors := participantsOf(in)
@@ -84,8 +83,12 @@ func TestMembersVotingMembersAndAuditorsOfAZone(t *testing.T) {
 			t.Errorf("%s: standing %q, want %q", id, got, want)
 		}
 	}
-	if _, err := ReadInstructions(apexOf(t, `3600 IN HSYNC3 ON alpha `+acAlpha+` .`)); !errors.Is(err, errNoHsyncparam) {
-		t.Errorf("HSYNC3 with no HSYNCPARAM: %v, want %v", err, errNoHsyncparam)
+	alone, err := ReadInstructions(apexOf(t, `3600 IN HSYNC3 ON alpha `+acAlpha+` .`))
+	if err != nil || alone == nil || alone.HasParam {
+		t.Fatalf("HSYNC3 with no HSYNCPARAM: reading %+v, error %v; want the records alone", alone, err)
+	}
+	if got := zoneStanding(alone, acAlpha); got != standingNoRole {
+		t.Errorf("HSYNC3 with no HSYNCPARAM: alpha's standing %v, want a member with no role", got)
 	}
 	if m, v, a := participantsOf(nil); m != nil || v != nil || a != nil {
 		t.Errorf("no reading: %v %v %v", m, v, a)
