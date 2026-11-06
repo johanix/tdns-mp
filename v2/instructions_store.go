@@ -1101,6 +1101,15 @@ func (s *InstructionStore) fillMPZoneInfo(zone string, info *MPZoneInfo) {
 	}
 }
 
+// noteLocks is a lock per zone (canonicalName), held while the zone's copy
+// is read and noted (noteInstructions). tdns can run two post-refresh runs
+// of a zone at once: a first load's owed callbacks, from its retry on the
+// refresh engine's loop, beside a refresh in its pool. Each reads the copy
+// under the lock, so the one that notes last read last, and an older copy
+// is never noted after a newer one, such as a serial after the copy that
+// dropped its HSYNCPARAM.
+var noteLocks sync.Map
+
 // noteInstructions has the store classify the zone's copy as a refresh left
 // it, at the first load and at every refresh (the post-refresh callback).
 func (conf *Config) noteInstructions(mpzd *MPZoneData) {
@@ -1108,6 +1117,9 @@ func (conf *Config) noteInstructions(mpzd *MPZoneData) {
 	if s == nil {
 		return
 	}
+	mu, _ := noteLocks.LoadOrStore(canonicalName(mpzd.ZoneName), &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	defer mu.(*sync.Mutex).Unlock()
 	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
 	if err != nil || apex == nil {
 		return

@@ -476,14 +476,32 @@ func readingOf(apex *tdns.OwnerData) *Instructions {
 		}
 		return nil
 	}
+	// A copy with no HSYNCPARAM expresses no intent and is no last good
+	// reading. After one that lists several providers and gives roles it is
+	// the owner error the agent's store makes of it ("dropped while serial N
+	// lists M providers", design 7): that reading stays, as for a copy that
+	// does not read, until a copy with HSYNCPARAM or the agent's hand-over,
+	// so that a part with no hand-over yet keeps its roles. After any other
+	// it is the end of the zone's management: the records read as they
+	// stand, and a later copy that does not read keeps nothing.
+	if in != nil && !in.HasParam {
+		if prev, ok := lastGood.Load(zone); ok {
+			if p := prev.(*Instructions); len(p.Records) > 1 && givesRoles(p) {
+				if _, logged := noReading.LoadOrStore(zone, true); !logged {
+					lg.Warn("the zone's copy has no HSYNCPARAM while its last reading lists several providers with roles, keeping that", "zone", zone)
+				}
+				return p
+			}
+		}
+		noReading.Delete(zone)
+		lastGood.Delete(zone)
+		return in
+	}
 	noReading.Delete(zone)
 	// A copy that reads, with instructions or with none (the end of
 	// multi-provider service), is the zone's last good reading: a later copy
-	// that does not read keeps that, never the instructions from before. A
-	// copy with no HSYNCPARAM expresses no intent and is not one: whether it
-	// ends the zone's serials is the store's to judge, and a later copy that
-	// does not read keeps nothing.
-	if in != nil && in.HasParam {
+	// that does not read keeps that, never the instructions from before.
+	if in != nil {
 		lastGood.Store(zone, in)
 	} else {
 		lastGood.Delete(zone)

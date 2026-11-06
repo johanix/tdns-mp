@@ -13,10 +13,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 )
 
 const storeZone = "store.example."
@@ -899,6 +901,34 @@ func TestStatusShowsActiveNewestCopyAndOwnerError(t *testing.T) {
 	s.fillMPZoneInfo(storeZone, &info)
 	if info.Active.Serial != 7 || info.Newest.Serial != 8 || !strings.HasPrefix(info.OwnerError, "serial 8 with two digests") {
 		t.Errorf("mplist: active %s newest %s owner error %q", serialOf(info.Active), serialOf(info.Newest), info.OwnerError)
+	}
+}
+
+// The zone's copy is read and noted under one lock (noteLocks): a note
+// that waits for another reads the copy as it is once it runs, so an older
+// copy is never noted after a newer one. Here the first load's copy has a
+// serial, and a refresh drops its HSYNCPARAM while a note waits: the store
+// keeps nothing, as for a first load of the copy without HSYNCPARAM.
+func TestACopyIsReadAndNotedUnderOneLock(t *testing.T) {
+	mpzd := instrTestZone(t, "ordered.note.example.", acRecords("", `serial="7" servers="alpha,beta"`)...)
+	s := newStore(t)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.InternalMp.Instructions = s
+	mu, _ := noteLocks.LoadOrStore(canonicalName(mpzd.ZoneName), &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	done := make(chan struct{})
+	go func() { conf.noteInstructions(mpzd); close(done) }()
+	if _, ok := recvWithin(done, 100*time.Millisecond); ok {
+		mu.(*sync.Mutex).Unlock()
+		t.Fatal("the note did not wait for the lock")
+	}
+	setApex(t, mpzd, core.TypeHSYNCPARAM) // the other run's copy: HSYNCPARAM dropped
+	mu.(*sync.Mutex).Unlock()
+	if _, ok := recvWithin(done, 5*time.Second); !ok {
+		t.Fatal("the note did not end")
+	}
+	if s.keeps(mpzd.ZoneName) {
+		t.Errorf("the copy read before the lock was noted after the newer one: %s", status(t, s, mpzd.ZoneName).Line())
 	}
 }
 
