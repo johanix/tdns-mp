@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1112,5 +1113,287 @@ func TestAChangeOfParentsyncIsAgreed(t *testing.T) {
 	}
 	if rs := judgeTransition(at(1, "owner"), at(2, "agent")); len(rs) != 0 {
 		t.Errorf("owner to agent: %+v", rs)
+	}
+}
+
+// madeElsewhere is a key another agent made: its data, and nothing of it in
+// this agent's keystore.
+func (r *rollRig) madeElsewhere(t *testing.T) sig0Row {
+	t.Helper()
+	k := testSig0Key(t, r.mpzd.KeyDB, string(r.zone))
+	r.dropKey(t, k.keyid)
+	return k
+}
+
+func (r *rollRig) dropKey(t *testing.T, keyid uint16) {
+	t.Helper()
+	if err := sig0KeyChange(r.mpzd.KeyDB, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "delete", Zone: string(r.zone), Keyname: string(r.zone), Keyid: keyid}); err != nil {
+		t.Fatalf("deleting key %d: %v", keyid, err)
+	}
+}
+
+// takeUpSerial is the serial of the instructions that took the sync up.
+func (r *rollRig) takeUpSerial(t *testing.T) uint32 {
+	t.Helper()
+	serial, ok := r.conf.InternalMp.Instructions.takenAt(r.mpzd.ZoneName, parentSyncTakeUpKey)
+	if !ok || serial == 0 {
+		t.Fatalf("the take-up's serial: %d (taken %v)", serial, ok)
+	}
+	return serial
+}
+
+// takeUpAnswer is a peer's answer to this agent's key round with k, as a take-up
+// made under takeup has it ("": no take-up's key).
+func takeUpAnswer(k sig0Row, takeup string) keyReply {
+	data := keyData(k)
+	if takeup != "" {
+		data["takeup"] = takeup
+	}
+	return keyReply{outcome: keyGot, data: data}
+}
+
+// keyCount is how many keys of the zone the keystore holds, in any state.
+func (r *rollRig) keyCount(t *testing.T) int {
+	t.Helper()
+	var n int
+	if err := r.mpzd.KeyDB.QueryRow(`SELECT COUNT(*) FROM Sig0KeyStore WHERE zonename=?`, dns.Fqdn(string(r.zone))).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// A new leader in the middle of a take-up keeps a key made since the hand-back
+// (the project owner, 2026-11-06): the key another leader made in this
+// take-up comes here with the take-up's serial, and is published and offered
+// as it is. A key the round hands over with no serial, or an earlier
+// take-up's, is older than the hand-back, and the take-up makes a new one.
+func TestANewLeaderInATakeUpKeepsAKeyMadeSinceTheHandBack(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		takeup func(serial uint32) string
+		kept   bool
+	}{
+		{"made in this take-up", func(s uint32) string { return strconv.FormatUint(uint64(s), 10) }, true},
+		{"made under later instructions", func(s uint32) string { return strconv.FormatUint(uint64(s+1), 10) }, true},
+		{"no take-up's", func(uint32) string { return "" }, false},
+		{"an earlier take-up's", func(s uint32) string { return strconv.FormatUint(uint64(s-1), 10) }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := takeUpRig(t, "kept.takeup.example.")
+			k := r.madeElsewhere(t)
+			r.publish(t, k)
+			r.decide(map[AgentId]keyReply{r.them: takeUpAnswer(k, tc.takeup(r.takeUpSerial(t)))})
+			if _, ok := r.conf.InternalMp.MPTransport.rollKEYs.state(r.zone); !ok {
+				t.Fatal("the key taken was not published")
+			}
+			ro := r.roll(t)
+			if !tc.kept {
+				if ro == nil || ro.phase != rollTakeUp || ro.oldKeyid != k.keyid {
+					t.Fatalf("the take-up's record: %+v, want a new key in place of %d", ro, k.keyid)
+				}
+				return
+			}
+			if ro != nil {
+				t.Fatalf("the take-up made a key of its own: %+v", ro)
+			}
+			if n := r.keyCount(t); n != 2 {
+				t.Errorf("the keystore holds %d keys, want the old one and the key taken", n)
+			}
+			if keyid, at, ok := loadTakeUpKey(r.mpzd.KeyDB, r.zone); !ok || keyid != k.keyid || at < r.takeUpSerial(t) {
+				t.Errorf("the take-up's key here: %d at %d (%v), want %d", keyid, at, ok, k.keyid)
+			}
+			r.confirmAll(t)
+			if w := r.conf.takeUpWait(string(r.zone)); w != "" {
+				t.Fatalf("every recipient has confirmed the KEY, and the step waits for %q", w)
+			}
+			if keyid := r.polled(t, "the take-up's offer"); keyid != k.keyid {
+				t.Errorf("the take-up offered key %d, want the key taken, %d", keyid, k.keyid)
+			}
+		})
+	}
+}
+
+// LM1S: the parent sync is handed back; india, leading, finds no key and
+// makes one; the lead moves to hotel, which takes the key and makes no second
+// one; then back to india, which still holds the key and can roll it. Here
+// this agent is india, then hotel (its keystore emptied of the key, which it
+// takes from india's answer), then india again.
+func TestTheLeadMovingInATakeUpLeavesTheZoneOneKey(t *testing.T) {
+	r := takeUpRig(t, "lm1s.takeup.example.")
+	zone := string(r.zone)
+	r.dropKey(t, r.old.keyid)
+	r.lem.SetOnZoneJoined(func(z ZoneName) error {
+		return r.conf.leaderKeySetup(r.ctx, z, false)
+	})
+
+	// india: no key held or published, and none at any voting member
+	r.decide(map[AgentId]keyReply{r.them: {outcome: keyNone}})
+	active := r.active(t)
+	if len(active) != 1 {
+		t.Fatalf("india's key: active %v, want one key made", active)
+	}
+	k := r.row(t, tdns.Sig0StateActive, active[0])
+	if ro := r.roll(t); ro != nil {
+		t.Fatalf("the key india made has a take-up's record: %+v", ro)
+	}
+	r.publish(t, k)
+	r.confirmAll(t)
+	if w := r.conf.takeUpWait(zone); w != "" {
+		t.Fatalf("india's step waits for %q", w)
+	}
+	if keyid := r.polled(t, "india's offer"); keyid != k.keyid {
+		t.Fatalf("india offered key %d, want %d", keyid, k.keyid)
+	}
+	answer, keyid, err := sig0KeyAnswer(r.mpzd.KeyDB, r.zone)
+	if err != nil || keyid != k.keyid || answer["takeup"] == "" {
+		t.Fatalf("india's answer to a key round: %v (key %d, %v), want key %d with the take-up's serial", answer, keyid, err, k.keyid)
+	}
+
+	// hotel: the lead moves to it, it takes india's key, and makes none
+	r.conf.InternalMp.MPTransport.rollKEYs.forget(r.zone)
+	r.conf.InternalMp.parentSyncs.with(zone, func(z *parentSyncZone) { z.keyConfirmed = false })
+	r.dropKey(t, k.keyid)
+	r.decide(map[AgentId]keyReply{r.them: {outcome: keyGot, data: answer}})
+	if ro := r.roll(t); ro != nil {
+		t.Fatalf("hotel made a second key: %+v", ro)
+	}
+	if got := r.active(t); !slices.Equal(got, []uint16{k.keyid}) {
+		t.Fatalf("hotel's active keys: %v, want india's %d", got, k.keyid)
+	}
+	r.confirmAll(t)
+	if w := r.conf.takeUpWait(zone); w != "" {
+		t.Fatalf("hotel's step waits for %q", w)
+	}
+	if keyid := r.polled(t, "hotel's offer"); keyid != k.keyid {
+		t.Fatalf("hotel offered key %d, want india's %d", keyid, k.keyid)
+	}
+
+	// india again: the lead comes back, the key is held, and the roll starts
+	r.leader(r.them)
+	r.pass(t, syncOther)
+	r.leader(r.us)
+	if err := r.conf.leaderKeySetup(r.ctx, r.zone, true); err != nil {
+		t.Fatalf("india's set-up: %v", err)
+	}
+	if ro := r.roll(t); ro != nil {
+		t.Fatalf("india made a key when the lead came back: %+v", ro)
+	}
+	if n := r.keyCount(t); n != 1 {
+		t.Errorf("the keystore holds %d keys, want the one key", n)
+	}
+	r.conf.InternalMp.keyPolls.goroutines.Wait()
+	newKeyid, err := r.conf.startSig0Roll(r.ctx, r.zone, dns.ED25519)
+	if err != nil {
+		t.Fatalf("india's roll: %v", err)
+	}
+	if newKeyid == k.keyid {
+		t.Errorf("the roll's new key is the old one, %d", newKeyid)
+	}
+}
+
+// An abandoned take-up's key goes, and its KEY, under this agent's name, is
+// taken back at this agent's combiner and every agent's. The old KEY, under
+// another agent's name, stays: the copy serves it beside the new one, and
+// the key it names stays active.
+func TestAnAbandonedTakeUpTakesItsKEYBackAtEveryAgent(t *testing.T) {
+	r := takeUpRig(t, "abandoned.takeup.example.")
+	var takenBack []ZoneName
+	prev := sendKEYTakeBack
+	sendKEYTakeBack = func(_ *MPTransportBridge, zone ZoneName) error {
+		takenBack = append(takenBack, zone)
+		return nil
+	}
+	t.Cleanup(func() { sendKEYTakeBack = prev })
+	// the old KEY, which an earlier leader published, under its name
+	r.publish(t, r.old)
+	if err := r.conf.leaderKeySetup(r.ctx, r.zone, true); err != nil {
+		t.Fatalf("the set-up: %v", err)
+	}
+	ro := r.roll(t)
+	if ro == nil || ro.phase != rollTakeUp {
+		t.Fatalf("the take-up made no key of its own: %+v", ro)
+	}
+	newKey := r.row(t, tdns.Sig0StatePublished, ro.newKeyid)
+	r.publish(t, r.old, newKey)
+
+	r.leader(r.them)
+	r.pass(t, syncOther)
+	if ro := r.roll(t); ro != nil {
+		t.Fatalf("another agent leads, and the take-up's record stays: %+v", ro)
+	}
+	if !r.conf.keyGone(r.zone, newKey.keyid) {
+		t.Errorf("the abandoned take-up's key %d stays", newKey.keyid)
+	}
+	if !slices.Equal(takenBack, []ZoneName{r.zone}) {
+		t.Errorf("the KEY taken back: %v, want once for %s", takenBack, r.zone)
+	}
+	if got := r.active(t); !slices.Equal(got, []uint16{r.old.keyid}) {
+		t.Errorf("active after the take-up is abandoned: %v, want the old key %d", got, r.old.keyid)
+	}
+}
+
+// A take-up abandoned once its key is the one the copy serves keeps the key,
+// now active, and its KEY.
+func TestATakeUpAbandonedWithItsKEYServedKeepsIt(t *testing.T) {
+	r := takeUpRig(t, "served.takeup.example.")
+	var takenBack int
+	prev := sendKEYTakeBack
+	sendKEYTakeBack = func(*MPTransportBridge, ZoneName) error { takenBack++; return nil }
+	t.Cleanup(func() { sendKEYTakeBack = prev })
+	if err := r.conf.leaderKeySetup(r.ctx, r.zone, true); err != nil {
+		t.Fatalf("the set-up: %v", err)
+	}
+	newKey := r.serveTakeUpKey(t)
+	r.leader(r.them)
+	r.pass(t, syncOther)
+	if st := r.keyState(t, newKey.keyid); st != tdns.Sig0StateActive {
+		t.Errorf("the take-up's key is %s, want active", st)
+	}
+	if takenBack != 0 {
+		t.Errorf("the KEY was taken back %d times", takenBack)
+	}
+}
+
+// The take-back of a sender's own KEY is taken whoever leads; a KEY of
+// another's, one with records, or a publication is not.
+func TestAKEYTakeBackIsTakenFromASenderThatDoesNotLead(t *testing.T) {
+	r := receivingRig(t, "takeback.example.")
+	z := ZoneName(r.mpzd.ZoneName)
+	peer := AgentId(r.peer.Identity)
+	keyRR := "takeback.example. 3600 IN KEY 256 3 15 dGhpcyBpcyBub3QgYSByZWFsIGtleSBidXQgaXQgcGFyc2Vz"
+	for _, tc := range []struct {
+		name   string
+		origin AgentId
+		zu     func() *ZoneUpdate
+		taken  bool
+	}{
+		{"its own KEY taken back", peer, func() *ZoneUpdate { return keyTakeBack(z) }, true},
+		{"with no publish instruction", peer, func() *ZoneUpdate { zu := keyTakeBack(z); zu.Publish = nil; return zu }, true},
+		{"another's KEY", AgentId("agent.other.example."), func() *ZoneUpdate { return keyTakeBack(z) }, false},
+		{"a KEY with records", peer, func() *ZoneUpdate {
+			zu := keyTakeBack(z)
+			zu.Operations[0].Records = []string{keyRR}
+			return zu
+		}, false},
+		{"a publication", peer, func() *ZoneUpdate {
+			zu := keyTakeBack(z)
+			zu.Publish = &core.PublishInstruction{KEYRRs: []string{keyRR}, Locations: []string{"at-apex"}}
+			return zu
+		}, false},
+		{"a CSYNC with it", peer, func() *ZoneUpdate {
+			zu := keyTakeBack(z)
+			zu.Operations = append(zu.Operations, core.RROperation{Operation: "replace", RRtype: "CSYNC"})
+			return zu
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zu := tc.zu()
+			zu.AgentId = tc.origin
+			u := &SynchedDataUpdate{Zone: z, AgentId: tc.origin, DeliveredBy: peer, UpdateType: "remote", Update: zu}
+			reason := r.conf.refuseCsyncNotFromLeader(u, r.us.MsgQs)
+			if taken := reason == "" && len(u.Update.Operations) == len(tc.zu().Operations); taken != tc.taken {
+				t.Errorf("taken %v (reason %q, operations %+v), want %v", taken, reason, u.Update.Operations, tc.taken)
+			}
+		})
 	}
 }

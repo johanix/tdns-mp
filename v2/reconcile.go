@@ -339,6 +339,24 @@ func (s *InstructionStore) tookStep(zone, key string) bool {
 	return z != nil && slices.Contains(z.Taken, key)
 }
 
+// takenAt is the serial of the instructions whose transition has taken the
+// step named key: the active one; ok false while the step is not taken.
+func (s *InstructionStore) takenAt(zone, key string) (serial uint32, ok bool) {
+	if s == nil {
+		return 0, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, z := s.zoneLocked(zone)
+	if z == nil || !slices.Contains(z.Taken, key) {
+		return 0, false
+	}
+	if z.Active != nil {
+		serial = z.Active.Serial
+	}
+	return serial, true
+}
+
 // reconcileInputs is what the reconciliation reads of the store for a zone.
 type reconcileInputs struct {
 	name        string
