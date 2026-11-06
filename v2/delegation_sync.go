@@ -233,6 +233,8 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					continue
 				}
 
+				// what was owed before the analysis, this sync answers
+				analysed := time.Now()
 				syncstate, err := zd.AnalyseZoneDelegation(imr().Imr)
 				if err != nil {
 					syncstate.Error = true
@@ -286,6 +288,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					// that went out as a NOTIFY waits for: the peers are
 					// told of that sync now
 					conf.delegationSyncInSync(ds.ZoneName, true)
+					conf.owedSyncAnswered(ds.ZoneName, analysed)
 					if ds.Response != nil {
 						ds.Response <- syncstate
 					}
@@ -327,6 +330,9 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					// are told nothing, until the parent is seen in sync
 					if !pending {
 						conf.delegationSyncSucceeded(ds.ZoneName)
+						if rcode == dns.RcodeSuccess {
+							conf.owedSyncAnswered(ds.ZoneName, analysed)
+						}
 						// Notify peer agents that parent sync is done
 						go notifyPeersParentSyncDone(conf, ds.ZoneName, dns.RcodeToString[int(rcode)], msg)
 					}

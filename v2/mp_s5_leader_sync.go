@@ -1078,6 +1078,15 @@ func (conf *Config) delegationSyncSucceeded(zone string) (notified string, reche
 	return notified, rechecks
 }
 
+// owedSyncAnswered is for an explicit sync that sent the difference to the
+// parent, or found none: a sync owed since before its analysis began
+// (analysed) is answered, and the room ticker asks for it no more (#267).
+func (conf *Config) owedSyncAnswered(zone string, analysed time.Time) {
+	if conf.InternalMp.CatchUp.syncedSince(ZoneName(zone), analysed) {
+		lgEngine.Info("the sync that was owed is answered by this one", "zone", zone)
+	}
+}
+
 // delegationSyncInSync is for an analysis that found the parent in sync with
 // the zone. It ends the zone's chain. If the chain had sent a NOTIFY, this
 // is when that sync is done, so the peers are told now, once; a sync that
