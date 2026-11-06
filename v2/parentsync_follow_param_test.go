@@ -134,6 +134,11 @@ func TestTheDelegationSyncFollowsHSYNCPARAM(t *testing.T) {
 	r.leader("agent.us.example.")
 	z := r.mpzd.ZoneName
 	r.mpzd.SetOption(tdns.OptParentSync, false)
+	// the agent's store of serials is the one the test installs, as a
+	// refresh notes the copy's instructions in it (noteInstructions)
+	store := newStore(t)
+	withStore(t, store)
+	r.conf.InternalMp.Instructions = store
 
 	steps := []struct {
 		what       string
@@ -152,8 +157,10 @@ func TestTheDelegationSyncFollowsHSYNCPARAM(t *testing.T) {
 	}
 	for _, s := range steps {
 		servedParentSync(t, r.mpzd, s.parentsync, s.gone)
+		// a copy with no HSYNCPARAM is a refresh's, as production has it:
+		// its instructions noted, then the sets acted on
 		if s.gone {
-			r.conf.onSetsChanged(r.mpzd, true)
+			refreshed(t, r.conf, r.mpzd)
 		} else {
 			activeFromCopy(t, r.conf, r.mpzd)
 		}
