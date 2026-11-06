@@ -31,6 +31,7 @@ const (
 	knownFromLeader  = "leader"
 	knownFromRecords = "the voting members with a record"
 	knownFromNewest  = "common newest"
+	knownFromNoVoter = "no voting member"
 )
 
 // reading is the zone's instructions as the readers act by them: the active
@@ -130,6 +131,11 @@ func (conf *Config) restartView(zone string, now time.Time) (restartView, bool) 
 		t = tm.stamps
 	}
 	told := t.firstHand(canonicalName(name))
+	if len(voters) == 0 && noVoterWord(s, name, newest.SerialDigest, told) {
+		sd := newest.SerialDigest
+		v.take, v.by, v.from = &sd, local, knownFromNoVoter
+		return v, true
+	}
 	switch {
 	case tdns.Globals.App.Type == AppTypeMPAuditor || !isAmong(voters, AgentId(local)):
 	case len(voters) == 1:
@@ -199,6 +205,28 @@ func (conf *Config) restartView(zone string, now time.Time) (restartView, bool) 
 		}
 	}
 	return v, true
+}
+
+// noVoterWord: the newest serial, which has no voting member, is taken at once
+// (the project owner, 2026-11-06): nobody leads it or tells it. Not while a
+// member tells another active serial that has a voting member, or that this
+// agent does not hold: an agent that lost its record takes the word of a fleet
+// whose active serial gives roles, as leadersWord has it.
+func noVoterWord(s *InstructionStore, zone string, newest SerialDigest, told map[string]toldStamp) bool {
+	for _, st := range told {
+		if !st.Known || st.ActiveDigest == "" {
+			continue
+		}
+		sd := SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}
+		if sd == newest {
+			continue
+		}
+		in := s.readingAt(zone, sd)
+		if in == nil || len(identities(in.providers(slices.Concat(in.Servers, in.Signers)))) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // leadersWord is the rule of a member with no record, and of the auditor:
