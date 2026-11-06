@@ -1006,7 +1006,8 @@ func (c *delegationSyncChains) endChainLocked(zone string) *delegationNotifyHold
 }
 
 // stillParticipates: one of this agent's identities has a role in the zone
-// (zoneParticipants: an HSYNCPARAM role through an ON HSYNC3 record). A
+// (participantsOf's voting members and auditors: an HSYNCPARAM role through
+// an ON HSYNC3 record); a member with no role takes no part (plan S15). A
 // refresh that removed this agent from the zone has published that before
 // PostRefresh queues anything, so the syncher reads it whatever the order of
 // the group recompute: PostRefresh queues a delegation sync before it applies
@@ -1023,8 +1024,8 @@ func (conf *Config) stillParticipates(zone string) bool {
 	if len(ids) == 0 || !hasHSYNC3(in) {
 		return true
 	}
-	participants, _ := participantsOf(in)
-	for _, p := range participants {
+	_, voting, auditors := participantsOf(in)
+	for _, p := range append(voting, auditors...) {
 		if isAmong(ids, AgentId(p)) {
 			return true
 		}

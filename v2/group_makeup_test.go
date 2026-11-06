@@ -89,7 +89,7 @@ func TestAGroupsZonesAgreeOnWhoVotes(t *testing.T) {
 	pgm.RecomputeGroups()
 	for _, pg := range pgm.GetGroups() {
 		for _, z := range pg.Zones {
-			if _, voting := participantsOf(instructionsFor(z)); !slices.Equal(voting, pg.VotingMembers) {
+			if _, voting, _ := participantsOf(instructionsFor(z)); !slices.Equal(voting, pg.VotingMembers) {
 				t.Errorf("zone %s votes %v in group %s, whose voting members are %v", z, voting, pg.GroupHash, pg.VotingMembers)
 			}
 		}
