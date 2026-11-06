@@ -354,6 +354,8 @@ type InternalMpConf struct {
 	// parent in a test. Nil asks the parent through tdns.
 	sig0Rolls  rollBook
 	rollParent rollParent
+	// keyTrust: the parent's word a KEY drop waits for (parentsync_roll.go)
+	keyTrust keyTrustBook
 	// ownReads counts the re-reads of the agents' own state under way
 	// (own_read.go), until each has handed its answer back.
 	ownReads sync.WaitGroup
