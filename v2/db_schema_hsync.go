@@ -352,6 +352,16 @@ var HsyncTables = map[string]string{
 		lasterr   TEXT DEFAULT '',
 		UNIQUE (zonename)
 	)`,
+	// MPSig0TakeUp is the key a take-up of the zone's parent sync publishes,
+	// one row per zone: its id and the serial of the instructions that took
+	// the sync up (plan S20). A key made since the hand-back is kept by a
+	// new leader in the middle of the take-up.
+	"MPSig0TakeUp": `CREATE TABLE IF NOT EXISTS 'MPSig0TakeUp' (
+		zonename  TEXT NOT NULL,
+		keyid     INTEGER NOT NULL,
+		serial    INTEGER NOT NULL,
+		UNIQUE (zonename)
+	)`,
 	// MPStampEpoch is the epoch of this agent's stamps (plan S5a), one row,
 	// raised at every start: its peers count its tellings only from its
 	// last start (design 3.4).

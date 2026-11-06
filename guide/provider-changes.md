@@ -155,83 +155,110 @@ RRset to the parent: the add ends there.
 
 ## 4. Removing a Provider
 
-A planned removal, with the leaving provider's
-cooperation.
+The owner edits the HSYNCPARAM and raises its serial; the
+leader carries out the rest, one step at a time, and
+needs nothing from charlie: it may be stopped. Follow it
+in `tdns-mpcli agent parentsync status`. The other edits
+the owner makes meanwhile wait until it is done.
+
+Do not revoke charlie's access to the zone before "done":
+it goes on serving and signing as before until its steps
+take it out.
 
 ### 4.1 The owner takes charlie's roles away
 
-Charlie leaves `servers=` and `signers=`. Its HSYNC3
-record stays.
+Charlie leaves `servers=`, `signers=` or both, in one
+edit. Its HSYNC3 record stays: removing the record of a
+provider with a role is refused. With `nsmgmt="owner"`,
+the same edit also drops charlie's NS records from the
+owner's NS RRset (4.2).
+
+Every agent agrees on the serial and the leader thaws it.
+Charlie stays a member, with no role, until its removal
+is done. The leader's first step keeps charlie's
+nameserver names with the removal, on every agent, so that
+any leader can go on: those charlie tells in its beats,
+and those the parent's NS RRset holds that no other
+provider tells or contributes. The roll of the zone's
+SIG(0) key starts here, because charlie holds the private
+key. If the roll fails, the removal goes on, and the roll
+is tried again on its own schedule.
 
 ### 4.2 Charlie's NS records leave the zone
 
-With `nsmgmt="agent"` the NS records charlie contributed
-are removed at this moment, not when its HSYNC3 record
-goes: by then it is too late. With the NS RRset managed
-by the owner, the owner removes them in the same edit.
+With `nsmgmt="agent"` the leader withdraws the NS records
+charlie contributed, at every member. With
+`nsmgmt="owner"` nobody withdraws anything: the owner's
+edit did. Then the leader syncs with the parent and
+watches it:
 
-**Today:** contributed NS records stay until an operator
-purges them at every remaining provider
-([issue 159](https://github.com/johanix/tdns-mp/issues/159)):
-
-```sh
-tdns-mpcli combiner zone edits purge -z example.com. \
-    --origin agent.charlie.example.
 ```
+reconciling 41->42: removing agent.charlie.example., step 2 (its NS), waiting until the parent no longer names ns1.charlie.example.
+```
+
+An NS RRset of the owner's that still names charlie's
+names holds this step, safely, and the status says so.
 
 ### 4.3 Charlie keeps answering
 
 Charlie answers correctly, and keeps signing if it signs,
-for the NS RRset's TTL plus a safety period of its own.
-It notes any query that still arrives.
+through the larger of the parent's and the zone's NS TTL,
+plus the propagation delay, counted from when the parent
+no longer names its names:
 
-**Today:** an edit that takes a role away is refused
-until the removal's steps are built
-([issue 211](https://github.com/johanix/tdns-mp/pull/211)).
-The agents hold the new serial, say why they refuse it
-(`takes a role from agent.charlie.example.: not built yet`, in
-`tdns-mpcli agent parentsync status`), and act by the
-serial before it: charlie keeps every role it had. Revert
-the edit, or keep it until the removal is built.
+```
+reconciling 41->42: removing agent.charlie.example., step 2 (its NS), waiting for the NS TTL until 2026-10-20 15:00 UTC
+```
+
+Then charlie leaves the providers whose confirmations a
+key's distribution expects, and a rollover paused on it
+resumes. A provider that only serves is done here. A
+signer that serves nothing has no NS step: it leaves those
+confirmations at the first step.
 
 ### 4.4 For a signer: NS first, DS second
 
 1. The NS wait of 4.3 passes.
-2. The leader removes charlie's DS at the parent. It
-   needs nothing from charlie for that: when it is safe
-   is a matter of time and TTL only.
-3. The DS RRset's TTL passes.
-4. The other signers drop charlie's DNSKEYs.
+2. The leader takes charlie out of the providers whose
+   KSKs have a DS. Its CDS records are withdrawn, and the
+   leader syncs and watches the parent until it no longer
+   serves charlie's DS.
+3. The parent's DS TTL, as last served, and the DNSKEY TTL
+   pass.
+4. Charlie's DNSKEYs are withdrawn, it leaves the providers
+   that publish keys and sign, and its own agent tells its
+   signer so: it stops signing.
 
-Charlie's DS has to outlive its NS because every signer
-signs its DNSKEY RRset with its own KSK.
-
-**Today:** the steps above, each at its own time, are not
-built yet
-([issue 138](https://github.com/johanix/tdns-mp/issues/138),
-[issue 211](https://github.com/johanix/tdns-mp/pull/211)).
-Once they are, a leaving signer stays in each of the
-zone's sets until its step for that set: its DS in the DS
-set until the DS step, its DNSKEYs at the other signers
-until the DNSKEY step.
+Steps 2 and 4 wait for an emergency rollover at another
+provider; nothing else does. Charlie's DS has to outlive
+its NS because every signer signs its DNSKEY RRset with
+its own KSK.
 
 ### 4.5 "Safe to remove"
 
-When the waits are over, charlie's `zone mplist` shows
-the zone as safe to remove. Charlie's operator, not the
-software, then takes the zone out of service.
+When the last step is done, charlie's
+`tdns-mpcli agent parentsync status` ends in
+`safe to remove`. Charlie's operator, not the software,
+then takes the zone out of service.
 
-**Today:** nothing says so
-([issue 137](https://github.com/johanix/tdns-mp/issues/137)).
-Count the waits by hand.
+If charlie's agent was running and stopped answering, or
+was stopped, it is excused after
+`multi-provider.transitions.leaving-timeout`, with a log
+line, and the removal goes on without it.
 
 ### 4.6 The owner removes the HSYNC3 record
 
-Last, after every cache has expired.
+Last, after every cache has expired: a transition of its
+own, with nothing to carry out. Comms with charlie end
+after the hold time.
 
-**Today** no removal is carried out: an edit that takes
-charlie's roles away is refused (4.3), and so is one that
-removes the HSYNC3 record of a provider with a role.
+When a transition is done, each agent drops from its own
+data, and from its own combiner, every contribution the
+active instructions do not entitle its origin to: NS
+needs `nsmgmt="agent"` and the origin in `servers=`;
+DNSKEY and CDS the origin in `signers=`; KEY and CSYNC
+are the leader's. No purge by hand is needed after a
+removal.
 
 ## 5. Changing a Provider's Role
 
@@ -311,15 +338,10 @@ Every agent refuses, with the same reason:
 
 On this build the agents also refuse every edit whose
 steps tdns-mp does not carry out yet (`step-missing`,
-`not-built`): a role taken away (section 4), a server role
-(3.4), a move into `signers=` (3.4, 5.1), and a change of
-an upstream, of `nsmgmt`, `parentsync`, `pubkey` or
-`pubcds`. So:
-
-- a removal is refused. The owner keeps the provider's NS
-  records in its own NS RRset and at the parent;
-- a change of `parentsync` is refused. The owner does not
-  write to the parent.
+`not-built`): a server role (3.4), a move into `signers=`
+(3.4, 5.1), and a change of an upstream, of `nsmgmt`,
+`pubkey` or `pubcds`. A role taken away is carried out
+(section 4), and so is a change of `parentsync` (6.1).
 
 A change of `auditors=` or `suffix`, and an HSYNC3 record
 added or removed for a provider with no role, are agreed.
@@ -333,6 +355,51 @@ agent's log.
 agents agree on a serial before they act on it, they act
 by the zone's own copy, refused or not
 ([issue 211](https://github.com/johanix/tdns-mp/issues/211)).
+
+### 6.1 Changing `parentsync`
+
+A change of `parentsync` is carried out in steps by the
+leader of the zone's group, and each step is confirmed by
+every provider. `tdns-mpcli agent parentsync status` shows
+the step, for example `parent sync to the owner: step 3
+(the agents' key deleted at the parent)`.
+
+**From `agent` to `owner`.** The owner raises the serial
+and **does not write to the parent until every provider
+shows the transition as done**. Until then the agents still
+hold the delegation sync, and what they send could undo what
+the owner put there. In order:
+
+1. Every provider withdraws its CDS and CSYNC records.
+2. Their TTL passes.
+3. The agents' SIG(0) key is deleted at the parent, by an
+   update that key signs.
+4. Every agent stops syncing, and the agents' KEY record
+   leaves the zone. Then the transition is done.
+
+At a parent that takes NOTIFY only, and if the delete fails,
+the agents cannot delete the key, and the transition goes
+on: the owner has to delete it. The leader says so in its
+log, and on the `SIG(0) key:` line of its `agent parentsync
+status`, naming the key. That line does not survive a
+restart of the leader; the log line does.
+
+**From `owner` to `agent`.** The owner **stops writing to
+the parent before it raises the serial**. At the first step
+the leader takes the zone up: it publishes the zone's KEY,
+offers the key to the parent once every provider has
+confirmed the KEY, and syncs the delegation, looking at the
+parent first and sending only the difference. The transition
+is done once the KEY is confirmed, or at once for a zone
+that uses no key. It does not wait for the parent to trust
+the key: until the parent does, the sync waits, and
+`SIG(0) key:` says the key is offered and not taken yet.
+
+**Under `parentsync=owner`**, a provider's signer serves no
+CDS of its own, and its combiner applies no CDS, no CSYNC and
+no KEY from the agents. The owner adds the DS. A CDS, CSYNC
+or KEY in the owner's own copy of the zone is served as it
+comes.
 
 ## 7. Open Points
 

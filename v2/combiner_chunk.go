@@ -82,6 +82,9 @@ type editPolicy struct {
 	Leaving     bool  // a signer out of signers= that the step's sets keep signing (plan S13): it applies, and submits no keys
 	NSmgmt      uint8 // core.HsyncNSmgmtOWNER or core.HsyncNSmgmtAGENT
 	ParentSync  uint8 // core.HsyncParentSyncOwner or core.HsyncParentSyncAgent
+	// CDSWithdrawn: the first step of the parent sync's hand-over to the owner
+	// (plan S20): no CDS or CSYNC, while the KEY stays until its last
+	CDSWithdrawn bool
 }
 
 // canApply returns true if this combiner should apply the contribution
@@ -121,7 +124,7 @@ func (p *editPolicy) canApply(rrtype uint16) bool {
 	case dns.TypeDNSKEY:
 		return true
 	case dns.TypeCDS, dns.TypeCSYNC:
-		return p.ParentSync == core.HsyncParentSyncAgent
+		return p.ParentSync == core.HsyncParentSyncAgent && !p.CDSWithdrawn
 	case dns.TypeKEY:
 		return p.ParentSync == core.HsyncParentSyncAgent
 	}
@@ -158,7 +161,7 @@ func (p *editPolicy) canSubmit(rrtype uint16) bool {
 	case dns.TypeDNSKEY:
 		return p.WeAreSigner && !p.Leaving
 	case dns.TypeCDS, dns.TypeCSYNC:
-		return p.WeAreSigner && !p.Leaving && p.ParentSync == core.HsyncParentSyncAgent
+		return p.WeAreSigner && !p.Leaving && p.ParentSync == core.HsyncParentSyncAgent && !p.CDSWithdrawn
 	}
 	return true
 }
@@ -180,6 +183,7 @@ func (zd *MPZoneData) getEditPolicy() *editPolicy {
 	r := zd.roles()
 	p.NSmgmt = r.NSmgmt
 	p.ParentSync = r.ParentSync
+	p.CDSWithdrawn = r.CDSWithdrawn
 	return p
 }
 
@@ -348,10 +352,11 @@ func (mpzd *MPZoneData) checkMPauthorization() error {
 // that stops voting stays (decision 37). One exception: while its provider
 // is out of signers= and the step's sets keep it signing (plan S13), the
 // combiner takes its own agent's operations (local, one of its configured
-// agents), so that what it serves does not go stale. Nil when the origin
-// may contribute.
-func originVoteRefusal(zone, origin string, local bool, ops []core.RROperation, records map[string][]string) *CombinerSyncResponse {
-	if votesInZone(ZoneName(zone), AgentId(origin)) {
+// agents), so that what it serves does not go stale. A removal this combiner
+// takes in any origin's name (combinerTakesRemoval, S16) is no refusal, and
+// logs none. Nil when the origin may contribute.
+func originVoteRefusal(zone, origin string, local, removal bool, ops []core.RROperation, records map[string][]string) *CombinerSyncResponse {
+	if removal || votesInZone(ZoneName(zone), AgentId(origin)) {
 		return nil
 	}
 	if mpzd, ok := Zones.Get(zone); local && ok && mpzd.leavingSigner() {
@@ -446,7 +451,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		}
 	}
 
-	if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Operations, req.Records); refusal != nil && !req.Removal {
+	if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Removal, req.Operations, req.Records); refusal != nil {
 		refusal.DistributionID, refusal.Timestamp = resp.DistributionID, resp.Timestamp
 		return refusal
 	}

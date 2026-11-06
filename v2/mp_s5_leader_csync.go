@@ -225,6 +225,7 @@ func (conf *Config) distributeCsync(ctx context.Context, zone string, csync *dns
 				Records:   []string{csync.String()},
 			}},
 		},
+		Step:     conf.InternalMp.reconciles.asksSync(canonicalName(zone)) || conf.parentSyncTakenUp(zone),
 		Response: answer,
 	}
 	var stopped <-chan struct{}
@@ -419,10 +420,10 @@ func (conf *Config) csyncAwaited(zone string) bool {
 }
 
 // noRoleOnly: every recipient still awaited is a member of the zone with no
-// role (design 4), and wait is how long, from now, until the time-out
+// role or an auditor (design 4), and wait is how long, from now, until the time-out
 // counted from since has passed (zero or less: it has).
 func noRoleOnly(zone ZoneName, awaited []string, since, now time.Time, timeout time.Duration) (only bool, wait time.Duration) {
-	only = len(awaited) > 0 && !slices.ContainsFunc(awaited, func(r string) bool { return !noRoleMember(zone, AgentId(r)) })
+	only = len(awaited) > 0 && !slices.ContainsFunc(awaited, func(r string) bool { return !memberWithTimeOut(zone, AgentId(r)) })
 	return only, timeout - now.Sub(since)
 }
 
@@ -548,6 +549,11 @@ func (conf *Config) refuseCsyncNotFromLeader(u *SynchedDataUpdate, msgQs *MsgQs)
 	}
 	same := func(a, b AgentId) bool { return sameName(string(a), string(b)) }
 	if known && same(sender, leader) && same(u.AgentId, leader) {
+		return ""
+	}
+	// a sender's take-back of its own KEY, whoever leads: an abandoned
+	// take-up's (plan S20)
+	if keyTakenBack(u) {
 		return ""
 	}
 	u.Update.Publish = nil

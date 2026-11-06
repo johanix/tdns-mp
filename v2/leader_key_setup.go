@@ -61,8 +61,9 @@ func (conf *Config) leaderKeySetup(ctx context.Context, zone ZoneName, elected b
 		return fmt.Errorf("onLeaderElected: reading the SIG(0) keys of %s: %v", zone, err)
 	}
 	// While this agent rolls the zone's key, the roll publishes the new
-	// key and retires the old one (plan S17a): no set-up
-	if zk.rolling {
+	// key and retires the old one (plan S17a): no set-up. The take-up's
+	// own key the step publishes through the set-up (takeUpKey)
+	if zk.rolling && !conf.parentSyncTakenUp(string(zone)) {
 		lgAgent.Info("the zone's SIG(0) key is being rolled; the roll publishes the new key", "zone", zone, "keyid", zk.held.keyid)
 		return nil
 	}
@@ -86,7 +87,7 @@ func (conf *Config) leaderKeySetup(ctx context.Context, zone ZoneName, elected b
 	// poll, whatever the poll's outcome. A new lead, a new or taken key, and
 	// a restart publish and poll as before.
 	_, _, ended := conf.InternalMp.keyPolls.state(zone)
-	if renewalKeepsKey(zk, ended, lem.LeadStart(zone)) {
+	if !conf.parentSyncTakenUp(string(zone)) && renewalKeepsKey(zk, ended, lem.LeadStart(zone)) {
 		lgAgent.Info("a renewal of the lead keeps the zone's SIG(0) key as it is: published, and bootstrapped in this lead",
 			"zone", zone, "keyid", zk.held.keyid)
 		return nil
@@ -160,8 +161,9 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 		return errLeadMoved
 	}
 	// The KEY is not published while the zone is frozen (plan S6), unless a
-	// rollover under way waits for the parent to trust it (S14): the
-	// take-up when the transition is done publishes it (takeUp)
+	// rollover under way waits for the parent to trust it (S14) or a step's
+	// own sync waits for it (S17b): the take-up when the transition is done
+	// publishes it (takeUp)
 	if held, why := conf.offerHeld(ctx, zone); held {
 		lgAgent.Info("the zone's KEY is published when the transition is done", "zone", zone, "phase", why)
 		return errHeldDuringTransition
@@ -171,14 +173,30 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 		return fmt.Errorf("onLeaderElected: the zone's SIG(0) key is not held after the setup for zone %s (%v)", zone, err)
 	}
 	// tdns's bootstrap uploads the first active key: while another one is
-	// active, the key is neither published nor polled
-	if only, err := retireOthers(kdb, zone, zk); err != nil || !only {
+	// active, the key is neither published nor polled. The take-up's new
+	// key, not active yet, is the zone's key beside the old one, which stays
+	// active until the new one is (takeUpKey). The step is read once: its
+	// serial is kept with the take-up's key, and a transition done after
+	// this read does not leave the key with none
+	serial, takenUp := conf.InternalMp.Instructions.takenAt(string(zone), parentSyncTakeUpKey)
+	takingUp := zk.rolling && takenUp
+	if only, err := retireOthers(kdb, zone, zk); !takingUp && (err != nil || !only) {
 		lgAgent.Warn("an active SIG(0) key that is not the zone's key could not be retired; the key is not published, and the sync with the parent waits", "zone", zone, "keyid", zk.held.keyid, "err", err)
 		return errOtherKeysActive
 	}
 	held := *zk.held
 	keyRR := held.key
 	lgAgent.Info("publishing KEY to combiner with PublishInstruction", "zone", zone, "keyid", held.keyid)
+	// As the step that takes the parent sync up, every recipient's word on
+	// the KEY comes before its offer: the step offers it (plan S20). The
+	// KEY is the take-up's new key's
+	if takenUp {
+		key, err := conf.takeUpKey(kdb, zone, zk, made, serial)
+		if err != nil {
+			return err
+		}
+		return conf.publishRolledKEY(zone, key)
+	}
 	if _, _, _, err := sendZoneKEY(tm, zone, keyRR, ""); err != nil {
 		return err
 	}
@@ -232,7 +250,8 @@ func sendZoneKEY(tm *MPTransportBridge, zone ZoneName, keyRR *dns.KEY, distID st
 }
 
 // errHeldDuringTransition: the zone is frozen (plan S6); the KEY is
-// published, and polled, when the transition is done.
+// published, and polled, when a step's own sync asks for it, or when the
+// transition is done.
 var errHeldDuringTransition = errors.New("held until the zone's transition is done")
 
 // errOtherKeysActive: the zone's key is not its only active key, and could

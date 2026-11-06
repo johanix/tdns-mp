@@ -1,6 +1,6 @@
 # Changes to the zone owner's instructions: numbered by the owner, agreed before they act, carried out by the leader
 
-**Status:** PROPOSAL, 2026-10-18, revision 6 (2026-10-26); rule 2 amended 2026-10-28.
+**Status:** PROPOSAL, 2026-10-18, revision 6 (2026-10-26); rule 2 amended 2026-10-28; section 4 amended 2026-11-02; section 5.2 amended 2026-11-03.
 
 This document describes how tdns-mp handles a change of a zone owner's instructions: every edit of the zone's HSYNC3 or HSYNCPARAM records. It describes the design as it is meant to stand. The difference from today's code and the steps of the work are in the plan beside it, `2026-10-18-owner-instruction-transitions-plan.md`, whose section 6 lists the decisions this design rests on and the parts of the membership design it changes.
 
@@ -176,11 +176,12 @@ What no rule between agents covers is the owner's own action at the parent and i
 ## 4. Members that do not vote
 
 - An auditor confirms at once, whatever serials it holds. It is never waited for in the agreement.
+  *Amended 2026-11-02 (Johan):* in a distribution, an auditor that has not confirmed is waited for as a member with no role is: up to the time-out, and then the sender goes on. An auditor that cannot be reached holds nothing for good.
 - A member with no role, on its way in or out, is waited for by a distribution with a time-out, as a leaving provider is (5.2). After the time-out the sender goes on; a member with no role cannot hold the zone.
 
 ## 5. The kinds of change
 
-The leader orders a transition that changes several things: additions first, then role changes, then removals. When a leaving provider is excused, its NS step comes before any addition's DNSKEY step, and once its NS TTL has passed it leaves the expected confirmations and the paused rollovers resume. A leaving signer that serves nothing, excused or not, has no NS step: nobody is delegated to it, and it leaves the expected confirmations at the reconciliation's first step. An addition starts at the provider's own servers and ends at the parent; a removal starts at the parent and ends at the provider's own servers.
+The leader orders a transition that changes several things: additions first, then role changes, then removals. When a leaving provider is excused, its NS step comes before any addition's DNSKEY step, and once its NS TTL has passed it leaves the expected confirmations and the paused rollovers resume. A leaving signer that serves nothing, excused or not, has no NS step: nobody is delegated to it, and it leaves the expected confirmations at the reconciliation's first step. An addition starts at the provider's own servers and ends at the parent; a removal starts at the parent and ends at the provider's own servers. *Clarified 2026-11-03 (the project owner):* that describes a removal as a whole, whose last act is at the provider's own servers. It does not say that the NS leaves the parent before the zone: 5.2 step 2 has that order.
 
 ### 5.1 A provider is added, or put back
 
@@ -197,15 +198,16 @@ The owner's order stays: the roles first, the record later. The leader under V r
 
 1. The zone's SIG(0) key is rolled (section 6), because the leaving provider holds the private key. The roll is the zone's obligation, not a gate: if it fails, the removal goes on, and the roll is retried on its own schedule until it has succeeded. The status shows it.
 2. The leaving provider's NS records leave the zone: withdrawn by the leader under `nsmgmt=agent`, dropped by the owner in its own NS RRset under `nsmgmt=owner` (in the edit that takes the server role away). The step waits until the parent's NS RRset no longer names the leaving provider's nameservers, and counts the NS RRset's TTL from then. When that TTL has passed, the leaving provider leaves a key distribution's expected confirmations; that is part of this step, sent even while the zone is frozen.
+   *Note 2026-11-03 (the project owner):* the NS leaves the zone first, then the parent. Under generalized NOTIFY the parent only reflects what the child publishes, so it cannot be made to remove an NS still in the zone, and one order works for every parent, UPDATE included: "we should NOT have different ordering of steps depending on delegation sync mechanism." It is safe because the leaving provider goes on answering until it is told that the zone is safe to remove, and the wait counts from when the parent has dropped the NS: the larger of the parent's and the zone's NS TTL, plus the propagation delay.
 3. Waiting for an emergency rollover, the leaving provider leaves the providers whose KSKs have a DS and whose CDS records are published, at every part that counts them; its CDS records are withdrawn, and its DS leaves the parent.
 4. After the DS RRset's TTL, waiting for an emergency rollover, its DNSKEYs are withdrawn, and it leaves the providers whose keys are published and who sign: then it stops signing.
 5. Its operator is told that the zone is safe to remove.
 
-**The withdrawal.** The leader withdraws another provider's records by an operation of its own: an empty `replace` of one RRtype, which names the provider in a field of its own (the message's sender is the leader). It may only delete. A member applies it when the sender is the zone's leader under the active serial and the active instructions do not list the provider in the list that RRtype depends on: `servers=` for NS records, `signers=` for DNSKEY and CDS records. Its confirmation goes to the leader. Withdrawals and the provider's own operations are ordered by the active serial stamped at their send, then by their creation time.
+**The withdrawal.** The leader withdraws another provider's records by an operation of its own: an empty `replace` of one RRtype, which names the provider in a field of its own (the message's sender is the leader). It may only delete. A member applies it when the sender is the zone's leader under the active serial and the active instructions do not list the provider in the list that RRtype depends on: `servers=` for NS records, `signers=` for DNSKEY and CDS records. Its confirmation goes to the leader. Withdrawals and the provider's own operations are ordered by the active serial stamped at their send, then by their creation time. *Amended 2026-11-03 (the project owner: "the auditor is a passive participant, it must not be allowed to affect progress"):* a withdrawal waits for the combiner and the members with a vote. A member with no vote is sent it all the same, and is not waited for.
 
 **Waiting for a leaving provider.** A distribution waits for a leaving provider's confirmation with a time-out (section 4), except a distribution of another signer's new DNSKEY while the leaving provider is still delegated to: resolvers sent to it need that key. After the time-out the leader goes on, and for a CDS or a CSYNC the parent's own check of the nameservers decides.
 
-**The record.** Last, after every cache has expired: a transition of its own, with nothing to carry out. Comms with the provider end after the membership design's hold time.
+**The record.** Last, after every cache has expired: a transition of its own, with nothing to carry out. Comms with the provider end after the membership design's hold time. *Amended 2026-11-03:* the provider follows that transition. A serial that waited thaws in the turn that says "done", and the thaw takes the provider out of the zone, so it may have heard neither. The members go on telling it the zone in their beats until the next thaw, while the beats last. It moves to the serial that took its record, its operator is told that the zone is safe to remove, and its own hold time ends its comms.
 
 **The order of the zone's NS RRset and the parent's.** Under `nsmgmt=agent` the zone's NS RRset goes first: the leader's withdrawal at every member; then the leader's explicit sync with the parent; then a watch on the parent until its NS RRset no longer names the leaving provider's nameservers. Under `nsmgmt=owner` the order is the owner's: its edit drops the names from the zone first.
 

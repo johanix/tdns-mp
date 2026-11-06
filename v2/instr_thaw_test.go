@@ -292,7 +292,7 @@ func TestNoThawWhileTheTransitionUnderWayIsNotDone(t *testing.T) {
 
 func TestNoThawOfARefusedTransition(t *testing.T) {
 	r := newThawRig(t, "refused.thaw.example.", roleA)
-	r.store.Note(r.zone, freezeAt(t, 42, "v", "a", ""), nil) // takes b's role: refused until S17b
+	r.store.Note(r.zone, freezeAt(t, 42, "v", "a,b,zulu", ""), nil) // gives a role to a label with no record
 	if _, ok := r.conf.thawView(r.zone, time.Now()); ok {
 		t.Fatal("a refused serial is agreed on")
 	}
@@ -403,13 +403,13 @@ func TestANewerSerialDuringAgreeingIsTheOneAgreedOn(t *testing.T) {
 	}
 }
 
-// A refused newer serial does not replace the serial agreed on: a record
-// and then its role, published before the first is thawed. The first is
-// thawed, and the second is judged again against it.
+// A refused newer serial does not replace the serial agreed on: published
+// before the first is thawed, it is judged again against the first, and waits
+// on past that transition's "done".
 func TestARefusedNewerSerialDoesNotReplaceTheSerialAgreedOn(t *testing.T) {
-	r := newThawRig(t, "record-then-role.thaw.example.", roleA)
+	r := newThawRig(t, "refused-newer.thaw.example.", roleA)
 	r.agree()
-	w := freezeAt(t, 43, "v", "a,b,n", "") // n's role: refused until S18a
+	w := freezeAt(t, 43, "v", "a,b,z", "") // refused: a role for z, which has no record
 	r.store.Note(r.zone, w, nil)
 	st := status(t, r.store, r.zone)
 	if st.Agreeing == nil || st.Agreeing.Serial != 42 || st.Newest.Serial != 43 || len(st.Refused) == 0 {
@@ -419,9 +419,16 @@ func TestARefusedNewerSerialDoesNotReplaceTheSerialAgreedOn(t *testing.T) {
 	r.hear(roleB, r.agreeing(), true)
 	r.conf.thawTurn(r.zone)
 	st = status(t, r.store, r.zone)
-	// TestARefusedNewerSerialIsJudgedAgainAfterDone
 	if st.Active.Serial != 42 || st.Newest.Serial != 43 || len(st.Refused) == 0 || st.Agreeing != nil {
 		t.Fatalf("after the thaw: active %s, newest %s, refused %v, agreeing %s", serialOf(st.Active), serialOf(st.Newest), st.Refused, serialOf(st.Agreeing))
+	}
+	// TestARefusedNewerSerialIsJudgedAgainAfterDone
+	if err := r.store.Done(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	st = status(t, r.store, r.zone)
+	if st.Active.Serial != 42 || st.Newest.Serial != 43 || len(st.Refused) == 0 || st.Agreeing != nil || st.DoneAt.IsZero() {
+		t.Fatalf("after done: active %s, newest %s, refused %v, agreeing %s, done at %v", serialOf(st.Active), serialOf(st.Newest), st.Refused, serialOf(st.Agreeing), st.DoneAt)
 	}
 }
 
@@ -721,11 +728,11 @@ func TestAMemberActivatesOnAVotingMemberUnderV(t *testing.T) {
 
 // A member behind the thaw's from-serial, holding both, moves straight to
 // the target. It judges the thaw's own pair, not its own active serial
-// against the target: 40 to 42 changes nsmgmt and is refused, 41 to 42 is
-// not.
+// against the target: 40 to 42 removes z's record with its role and is
+// refused, 41 to 42 is not.
 func TestAMemberThatMovesStraightJudgesTheThawsPairNotItsOwn(t *testing.T) {
 	r := newThawRig(t, "straight.thaw.example.", roleB)
-	old := jAt(t, 40, `servers="a,b" nsmgmt="owner" suffix="o"`, freezeRecords...)
+	old := jAt(t, 40, `servers="a,b,z" nsmgmt="agent" suffix="o"`, append(slices.Clone(freezeRecords), `3600 IN HSYNC3 ON z z.role.example. .`)...)
 	if err := r.store.Forget(r.zone); err != nil {
 		t.Fatal(err)
 	}
@@ -840,7 +847,7 @@ func TestAnAgentFetchesASerialAgreedOnThatItDoesNotHold(t *testing.T) {
 // An agent never makes active a serial it refused.
 func TestAMemberNeverActivatesASerialItRefused(t *testing.T) {
 	r := newThawRig(t, "neverrefused.thaw.example.", roleB)
-	v := freezeAt(t, 42, "v", "a", "") // refused: b's role taken
+	v := freezeAt(t, 42, "v", "a,b,z", "") // refused: a role for z, which has no record
 	r.store.Note(r.zone, v, nil)
 	st := tells(v, v)
 	st.Thaw = &Thaw{From: sd(r.n), To: sd(v)}
@@ -1135,5 +1142,40 @@ func TestAHeardMemberThatTellsNothingOfTheZoneIsNotNotHeard(t *testing.T) {
 	r.hear(roleB, r.agreeing(), true)
 	if v := r.view(); !v.ready() {
 		t.Errorf("b telling agreement: %q", v.waits)
+	}
+}
+
+// A voting member's telling of a roll owed is kept here, so that this agent,
+// leading later, owes it; a telling of a roll done ends it, and an older
+// telling of the roll owed does not raise it again (plan S17b; the project
+// owner, 2026-11-05).
+func TestARollOwedToldByAMemberIsKeptUntilARollDoneIsTold(t *testing.T) {
+	r := newThawRig(t, "debt.told.thaw.example.", roleB)
+	s := r.store
+	owedAt := time.Now().Add(-time.Hour).Truncate(time.Second)
+	st := tells(r.n, r.n)
+	st.RollOwed = owedAt
+	r.hear(roleB, st, true)
+	r.conf.rollDebtTurn(r.zone)
+	if owed, _ := s.rollDebt(r.zone); !owed.Equal(owedAt) {
+		t.Fatalf("the member's roll owed is not kept: %v", owed)
+	}
+	st.RollOwed, st.RollDone = time.Time{}, owedAt.Add(time.Minute)
+	r.hear(roleB, st, true)
+	r.conf.rollDebtTurn(r.zone)
+	if owed, done := s.rollDebt(r.zone); !owed.IsZero() || !done.Equal(owedAt.Add(time.Minute)) {
+		t.Fatalf("a roll done told does not end the roll owed: owed %v, done %v", owed, done)
+	}
+	st.RollOwed, st.RollDone = owedAt, time.Time{}
+	r.hear(roleB, st, true)
+	r.conf.rollDebtTurn(r.zone)
+	if owed, _ := s.rollDebt(r.zone); !owed.IsZero() {
+		t.Errorf("an older telling raised the roll done again: %v", owed)
+	}
+	st.RollOwed = owedAt.Add(2 * time.Minute)
+	r.hear(roleB, st, true)
+	r.conf.rollDebtTurn(r.zone)
+	if owed, _ := s.rollDebt(r.zone); !owed.Equal(owedAt.Add(2 * time.Minute)) {
+		t.Errorf("a roll owed after the last done is not kept: %v", owed)
 	}
 }

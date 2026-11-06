@@ -194,13 +194,13 @@ func TestALeavingSignerSignsAndAppliesUntilItsDNSKEYStep(t *testing.T) {
 	if p.canSubmit(dns.TypeDNSKEY) || p.canSubmit(dns.TypeCDS) || p.canSubmit(dns.TypeCSYNC) {
 		t.Error("the leaving provider's agent may submit keys: it must start nothing")
 	}
-	if r := originVoteRefusal(z, "agent.us.example.", true, ops, nil); r != nil {
+	if r := originVoteRefusal(z, "agent.us.example.", true, false, ops, nil); r != nil {
 		t.Errorf("the leaving provider's combiner refused its own agent: %s", r.Message)
 	}
-	if r := originVoteRefusal(z, "agent.us.example.", false, ops, nil); r == nil {
+	if r := originVoteRefusal(z, "agent.us.example.", false, false, ops, nil); r == nil {
 		t.Error("the leaving provider's agent was taken as an origin from outside: only its own combiner takes it")
 	}
-	if r := originVoteRefusal(z, "agent.p3.example.", false, ops, nil); r == nil {
+	if r := originVoteRefusal(z, "agent.p3.example.", false, false, ops, nil); r == nil {
 		t.Error("an origin with no role that is not this combiner's agent was taken")
 	}
 
@@ -208,7 +208,7 @@ func TestALeavingSignerSignsAndAppliesUntilItsDNSKEYStep(t *testing.T) {
 	if d := mpzd.MP.MPdata; d.WeAreSigner || d.Leaving {
 		t.Errorf("at its DNSKEY step: signer=%v leaving=%v, want neither", d.WeAreSigner, d.Leaving)
 	}
-	if r := originVoteRefusal(z, "agent.us.example.", true, ops, nil); r == nil {
+	if r := originVoteRefusal(z, "agent.us.example.", true, false, ops, nil); r == nil {
 		t.Error("after its DNSKEY step the combiner took its own agent's operations with no role")
 	}
 }
@@ -533,42 +533,5 @@ func TestADSChangeARefreshPublishedFirstStillAsksTheSync(t *testing.T) {
 	r.conf.onSetsChanged(r.mpzd, false)
 	if n := r.requests(t); n != 0 {
 		t.Errorf("the change was asked for again: %d more syncs", n)
-	}
-}
-
-// A step that gives the parent sync back to the agents runs the leader's
-// setup, which an election skipped while the owner synced the zone: a step
-// has no PostRefresh to wait for, as a refresh has, which runs it itself
-// (CodeRabbit on #339).
-func TestAStepThatGivesTheParentSyncBackRunsTheLeadersSetup(t *testing.T) {
-	asMPDaemon(t, AppTypeMPAgent)
-	r := newComputedDSRig(t, "giveback.steps.example.", []string{"us", "p2"})
-	z := r.mpzd.ZoneName
-	r.mpzd.Options[tdns.OptMultiProvider] = true
-	r.mpzd.Options[tdns.OptParentSync] = false // the owner syncs the parent
-	r.leader("agent.us.example.")
-	ran := make(chan ZoneName, 4)
-	r.lem.onLeaderElected = func(zone ZoneName) error {
-		ran <- zone
-		return nil
-	}
-	s := withActiveStore(t, r.mpzd)
-	rest := r.mpzd.roles()
-	rest.ParentSync = core.HsyncParentSyncOwner
-	stepAs(t, s, z, 1, withSigners(rest, "us", "p2"))
-	r.conf.onSetsChanged(r.mpzd, true)
-	sets := withSigners(rest, "us", "p2")
-	sets.ParentSync = core.HsyncParentSyncAgent
-	stepAs(t, s, z, 2, sets)
-	if givenBack := r.conf.onSetsChanged(r.mpzd, true); !givenBack {
-		t.Fatal("the step gave the parent sync back, and onSetsChanged does not say so")
-	}
-	select {
-	case zone := <-ran:
-		if zone != ZoneName(z) {
-			t.Errorf("the leader's setup ran for %s", zone)
-		}
-	case <-time.After(2 * time.Second):
-		t.Error("the step gave the parent sync back, and the leader's setup did not run")
 	}
 }

@@ -152,9 +152,9 @@ func (conf *Config) wantsZoneKey(ctx context.Context, zone ZoneName) bool {
 	if retired {
 		conf.releaseKeyHold(ctx, zone)
 	}
-	// at the leader the entry stays until the key is usable: its rounds
-	// offer the key again (S14)
-	return wants || (!several && conf.keyPending(ctx, zone))
+	// at the leader the entry stays until the key is usable, and published:
+	// its rounds offer the key again (S14)
+	return wants || (!several && (conf.keyPending(ctx, zone) || conf.keyToPublish(zone)))
 }
 
 // keyRoundPeers are the agents a round asks: none at a leader that holds the
@@ -398,7 +398,7 @@ func (conf *Config) decideZoneKeyLocked(ctx context.Context, zone ZoneName, answ
 	}
 	// and for the transition's end: nothing new starts while the zone is
 	// frozen (plan S6)
-	if held, why := conf.syncHeld(string(zone), syncOther); held {
+	if held, why := conf.syncHeld(string(zone), conf.syncCauseFor(string(zone), tdns.DelegationSyncStatus{})); held {
 		lgAgent.Info("deciding that the zone has no SIG(0) key waits for the transition", "zone", zone, "phase", why)
 		return false, false
 	}
@@ -434,16 +434,17 @@ var keyOfferEvery = 5 * time.Minute
 // reofferZoneKey is a round's word at the leader that holds the zone's key:
 // while the parent does not trust it (keyPending) the key is offered again,
 // at most every keyOfferEvery and not while a poll of it runs, under the
-// zone's parent context (launchKeyPoll); a key whose publication failed is
-// published again, which starts its poll. It reports whether the key is
-// still pending: the round's entry stays until the key is usable (S14).
-// Under the zone's key-setup lock.
+// zone's parent context (launchKeyPoll); a key whose publication failed, or was
+// held by the freeze, is published again, whatever the parent thinks of it,
+// which starts its poll. It reports whether the key is still pending: the
+// round's entry stays until the key is usable and published (S14). Under the
+// zone's key-setup lock.
 func (conf *Config) reofferZoneKey(ctx context.Context, zone ZoneName, zk *zoneKey) bool {
-	if !conf.keyPending(ctx, zone) {
-		return false
-	}
 	b := &conf.InternalMp.keyPolls
 	running, unpublished, _ := b.state(zone)
+	if !unpublished && !conf.keyPending(ctx, zone) {
+		return false
+	}
 	if running > 0 || time.Since(b.lastOffer(zone)) < keyOfferEvery || zk.held.key == nil {
 		return true
 	}
@@ -452,14 +453,16 @@ func (conf *Config) reofferZoneKey(ctx context.Context, zone ZoneName, zk *zoneK
 	if held, _ := conf.offerHeld(ctx, zone); held {
 		return true
 	}
-	lgAgent.Info("the parent has not taken the zone's SIG(0) key, offering it again", "zone", zone, "keyid", zk.held.keyid,
-		"parent_state", edns0.KeyStateToString(zk.held.parentState), "in", keyOfferEvery)
 	if unpublished {
+		lgAgent.Info("the zone's SIG(0) key is not published in this lead, publishing it", "zone", zone, "keyid", zk.held.keyid,
+			"parent_state", edns0.KeyStateToString(zk.held.parentState))
 		tk := b.begin(zone)
 		err := conf.publishZoneKey(ctx, zone, tk, false, 0)
 		tk.end(err != nil && !errors.Is(err, errLeadMoved))
 		return true
 	}
+	lgAgent.Info("the parent has not taken the zone's SIG(0) key, offering it again", "zone", zone, "keyid", zk.held.keyid,
+		"parent_state", edns0.KeyStateToString(zk.held.parentState), "in", keyOfferEvery)
 	conf.launchKeyPoll(ctx, nil, zone, string(zone), zk.held.keyid, zk.held.key.Algorithm)
 	return true
 }

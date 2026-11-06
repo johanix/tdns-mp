@@ -551,10 +551,10 @@ func newLeavingRig(t *testing.T, zone string) *reconcileRig {
 
 // TestALeavingMemberThatDoesNotConfirmAStepIsExcusedFromThenOn, with
 // TestAnExcusedLeavingMemberIsNotWaitedFor: a leaving member that is heard
-// and does not confirm a step holds it up to no-role-timeout; one that has
-// not confirmed a step for leaving-timeout is excused, with a log line,
-// and kept so on disk.
+// and does not confirm a step holds it until it has not confirmed a step for
+// leaving-timeout; it is then excused, with a log line, and kept so on disk.
 func TestALeavingMemberThatDoesNotConfirmAStepIsExcusedFromThenOn(t *testing.T) {
+	defer withRunners()()
 	logs := captureLog(t)
 	r := newLeavingRig(t, "leaving.reconcile.example.")
 	r.partsTake()
@@ -627,6 +627,7 @@ func TestAChangeOfTheSetsLooksAgainAtTheCSYNCThatWaits(t *testing.T) {
 // auditor is not waited for, and its stamps never tell a step held, so a
 // step goes on without it and it is not excused (CodeRabbit on #327).
 func TestAVoterThatBecomesTheAuditorIsNotLeaving(t *testing.T) {
+	defer withRunners()()
 	logs := captureLog(t)
 	r := newReconcileRig(t, "toauditor.reconcile.example.", roleA)
 	r.n = freezeAt(t, 41, "n", "a,b,n", "")
@@ -993,6 +994,70 @@ func TestADNSKEYDistributionGoesOnWithoutAMemberWithNoRoleAfterTheTimeOut(t *tes
 	tm.dnskeyPropMu.Unlock()
 	if !waiting {
 		t.Error("the distribution went on without b")
+	}
+}
+
+// So does it for an auditor (design 4, amended 2026-11-02): one that cannot be
+// reached holds no key from going on.
+func TestADNSKEYDistributionGoesOnWithoutAnAuditorAfterTheTimeOut(t *testing.T) {
+	r := newReconcileRig(t, "auditor.dnskey.reconcile.example.", roleA)
+	activeAs(t, r.store, r.zone, freezeAt(t, 42, "v", "a,b", "n")) // n an auditor
+	tm := r.conf.InternalMp.MPTransport
+	tm.noRoleTimeout = time.Hour // the test ends the wait itself
+	tm.TrackDnskeyPropagation(t.Context(), ZoneName(r.zone), "d1", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.ProcessDnskeyConfirmation("d1", roleB, transport.ConfirmSuccess.String(), nil, nil)
+	waits := func() bool {
+		tm.dnskeyPropMu.Lock()
+		defer tm.dnskeyPropMu.Unlock()
+		_, waiting := tm.pendingDnskeyPropagations["d1"]
+		return waiting
+	}
+	if !waits() {
+		t.Fatal("the distribution did not wait for the auditor")
+	}
+	tm.dnskeyNoRoleTimedOut(t.Context(), "d1")
+	if waits() {
+		t.Error("the distribution still waits for the auditor after the time-out")
+	}
+}
+
+// A provider leaves the key confirmers: a distribution that waits only for it
+// goes on at once. The look does not end the wait for anyone else: an auditor
+// or a member with no role has up to the distribution's own time-out, however
+// long it has run (CodeRabbit at e33810c).
+func TestLeavingTheKeyConfirmersEndsTheWaitForTheLeaverAlone(t *testing.T) {
+	r := newReconcileRig(t, "leftconfirmers.reconcile.example.", roleA)
+	activeAs(t, r.store, r.zone, freezeAt(t, 42, "v", "a", "n")) // b with no role, n an auditor
+	tm := r.conf.InternalMp.MPTransport
+	tm.noRoleTimeout = time.Hour // the test ends the waits itself
+	zone := ZoneName(r.zone)
+	pending := func(id string) bool {
+		tm.dnskeyPropMu.Lock()
+		defer tm.dnskeyPropMu.Unlock()
+		_, ok := tm.pendingDnskeyPropagations[id]
+		return ok
+	}
+
+	tm.TrackDnskeyPropagation(t.Context(), zone, "d1", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.ProcessDnskeyConfirmation("d1", roleN, transport.ConfirmSuccess.String(), nil, nil)
+	tm.TrackDnskeyPropagation(t.Context(), zone, "d2", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.lookAgainAtDnskeyPropagations(zone, roleB)
+	if pending("d1") {
+		t.Error("the distribution that waited only for the leaver still waits")
+	}
+	if !pending("d2") {
+		t.Fatal("the distribution went on without the auditor, before its time-out")
+	}
+	tm.dnskeyPropMu.Lock()
+	answered := tm.pendingDnskeyPropagations["d2"].ExpectedAgents
+	leaver, auditor := answered[roleB], answered[roleN]
+	tm.dnskeyPropMu.Unlock()
+	if !leaver || auditor {
+		t.Errorf("after the look: the leaver counted %v, the auditor %v", leaver, auditor)
+	}
+	tm.dnskeyNoRoleTimedOut(t.Context(), "d2")
+	if pending("d2") {
+		t.Error("the distribution's own time-out did not end the wait for the auditor")
 	}
 }
 

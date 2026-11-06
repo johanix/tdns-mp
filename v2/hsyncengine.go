@@ -342,24 +342,14 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				} else if zd, ok := Zones.Get(string(ampp.Zone)); !ok || zd == nil || zd.KeyDB == nil {
 					configErr = "zone or KeyDB not available"
 				} else {
-					// The key handed over is the zone's key (readZoneKey), not
-					// the first active row: an active key the zone does not
-					// publish is no key of the zone's (step 7b).
-					zk, err := readZoneKey(zd.KeyDB, ampp.Zone)
+					data, keyid, err := sig0KeyAnswer(zd.KeyDB, ampp.Zone)
 					if err != nil {
 						configErr = fmt.Sprintf("error looking up SIG(0) key: %v", err)
-					} else if zk.several() {
-						// not "no key": its keystore may hold one of them
-						configData = map[string]string{"status": sig0StatusSeveral}
-					} else if zk.held == nil {
-						configData = map[string]string{"status": "no sig0 key for zone"}
 					} else {
-						lgEngine.Info("CONFIG sig0key: returning key to peer", "zone", ampp.Zone, "peer", ampp.OriginatorID, "keyid", zk.held.keyid)
-						configData = map[string]string{
-							"algorithm":  zk.held.algorithm,
-							"privatekey": zk.held.privatekey,
-							"keyrr":      zk.held.keyrr,
+						if data["keyrr"] != "" {
+							lgEngine.Info("CONFIG sig0key: returning key to peer", "zone", ampp.Zone, "peer", ampp.OriginatorID, "keyid", keyid)
 						}
+						configData = data
 					}
 				}
 
@@ -836,4 +826,31 @@ func notTaken(err error) string {
 		return "not taken: " + err.Error()
 	}
 	return "no response (timeout)"
+}
+
+// sig0KeyAnswer is the answer to a peer's CONFIG sig0key for the zone: the
+// zone's key (readZoneKey), not the first active row, as an active key the
+// zone does not publish is no key of the zone's (step 7b); keyid is the key
+// handed over, 0 with none. A take-up's key goes with the serial it was made
+// under, and a new leader keeps it (plan S20).
+func sig0KeyAnswer(kdb *tdns.KeyDB, zone ZoneName) (data map[string]string, keyid uint16, err error) {
+	zk, err := readZoneKey(kdb, zone)
+	switch {
+	case err != nil:
+		return nil, 0, err
+	case zk.several():
+		// not "no key": its keystore may hold one of them
+		return map[string]string{"status": sig0StatusSeveral}, 0, nil
+	case zk.held == nil:
+		return map[string]string{"status": "no sig0 key for zone"}, 0, nil
+	}
+	data = map[string]string{
+		"algorithm":  zk.held.algorithm,
+		"privatekey": zk.held.privatekey,
+		"keyrr":      zk.held.keyrr,
+	}
+	if tag := takeUpTag(kdb, zone, zk.held.keyid); tag != "" {
+		data["takeup"] = tag
+	}
+	return data, zk.held.keyid, nil
 }

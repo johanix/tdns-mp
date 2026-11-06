@@ -292,8 +292,9 @@ func (conf *Config) withdraw(zdr *ZoneDataRepo, zone ZoneName, provider AgentId,
 // withdrawalDone: the withdrawal of provider's records of rrtype is done
 // here, by this agent's tracking. Every record of it this agent still
 // holds is pending removal, and every recipient that has not confirmed it
-// is a member with no role, after S12's time-out from the withdrawal's
-// start (design 4). A record that every recipient confirmed is gone.
+// has no vote: a member with no role or an auditor, which are sent it all the
+// same and are not waited for (design 5.2). A record that every recipient
+// confirmed is gone.
 func (conf *Config) withdrawalDone(zdr *ZoneDataRepo, zone ZoneName, provider AgentId, rrtype string) bool {
 	t := dns.StringToType[strings.ToUpper(rrtype)]
 	held := zdr.heldOf(zone, provider, t)
@@ -304,26 +305,17 @@ func (conf *Config) withdrawalDone(zdr *ZoneDataRepo, zone ZoneName, provider Ag
 	if tracked == nil {
 		return false
 	}
-	wait := noRoleTimeoutDefault
-	if tm := conf.InternalMp.MPTransport; tm != nil {
-		wait = tm.noRoleWait()
-	}
-	now := time.Now()
 	for _, rr := range held {
 		i := slices.IndexFunc(tracked.Tracked, func(tr TrackedRR) bool { return tr.RR.String() == rr.String() })
 		if i < 0 || tracked.Tracked[i].State != RRStatePendingRemoval {
 			return false
 		}
 		tr := tracked.Tracked[i]
-		start := tr.UpdatedAt
-		if sw, ok := zdr.withdrawalSent(tr.DistributionID); ok {
-			start = sw.at
-		}
 		for _, r := range tr.ExpectedRecipients {
 			if c, ok := tr.Confirmations[r]; ok && c.Status != "pending" {
 				continue
 			}
-			if !noRoleMember(zone, AgentId(r)) || now.Sub(start) < wait {
+			if !memberWithTimeOut(zone, AgentId(r)) {
 				return false
 			}
 		}

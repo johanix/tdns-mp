@@ -103,10 +103,9 @@ func (lem *LeaderElectionManager) configuredPeers(zone ZoneName) int {
 }
 
 // SetOnLeaderElected sets the callback invoked when the local agent wins an
-// election, renews its lease, or leads a zone whose delegation sync comes back
-// to the agents (delegationSyncGivenBack). Each of those runs it in a goroutine
-// of its own. For one zone they run one at a time, so that two leader setups
-// never both find no SIG(0) key and each make one.
+// election or renews its lease. Each of those runs it in a goroutine of its
+// own. For one zone they run one at a time, so that two leader setups never
+// both find no SIG(0) key and each make one.
 func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error) {
 	lem.onLeaderElected = func(zone ZoneName) error {
 		return lem.inKeySetup(zone, func() error { return f(zone) })
@@ -114,9 +113,10 @@ func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error
 }
 
 // inKeySetup runs f with the zone's key-setup lock held. Every setup of a
-// zone's SIG(0) key takes it: the leader's after an election, a renewal or a
-// sync given back (SetOnLeaderElected), the one at an arrival
-// (SetOnZoneJoined), and a key round's decision (decideZoneKey). For one zone
+// zone's SIG(0) key takes it: the leader's after an election or a renewal
+// (SetOnLeaderElected), the one at an arrival and at the step that takes the
+// parent sync up (SetOnZoneJoined), and a key round's decision
+// (decideZoneKey). For one zone
 // they run one at a time, so that two of them never both find no key and
 // each make one, and a setup's clean-up of a key it made for a lead that
 // moved never takes a key another setup has just adopted. It is taken once
@@ -2224,6 +2224,18 @@ func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]s
 		return fmt.Errorf("Sig0KeyMgmt add error: %s", resp.ErrorMsg)
 	}
 	lgElect.Info("imported SIG(0) key from peer", "name", keyName, "algorithm", algorithm, "keyid", pkc.KeyId)
+	// A take-up's key is kept as the take-up's here too: as this agent's
+	// lead, it is kept, not made anew (plan S20). Without the record a new
+	// leader in the middle of the take-up makes a key of its own.
+	if tag := configData["takeup"]; tag != "" {
+		serial, err := strconv.ParseUint(tag, 10, 32)
+		if err == nil {
+			err = saveTakeUpKey(hdb.KeyDB, ZoneName(keyName), pkc.KeyId, uint32(serial))
+		}
+		if err != nil {
+			lgElect.Warn("the imported SIG(0) key is not kept as the take-up's", "zone", keyName, "keyid", pkc.KeyId, "takeup", tag, "err", err)
+		}
+	}
 	// One active key per zone (step 7b): with the key added, every other
 	// active key is retired, so that a failed import never leaves the agent
 	// without one. A retire that fails leaves the zone's key not held; it is

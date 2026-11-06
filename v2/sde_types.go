@@ -156,6 +156,8 @@ type SynchedDataCmd struct {
 	CatchUp *CatchUp `json:"catch_up,omitempty"`
 	// Withdraw: for "withdraw", the leader's withdrawal to send (plan S16)
 	Withdraw *Withdraw
+	// Sweep: for "sweep", the instructions it sweeps by (plan S17b)
+	Sweep    *Instructions
 	Response chan *SynchedDataCmdResponse
 	// ownRead: for "own-read", what a re-read of the zone brought
 	// (own_read.go)
@@ -206,6 +208,9 @@ type ZoneDataRepo struct {
 	// DNSKEY replaces whose final confirmation waits for the combiner's word
 	// on that distribution's set (waitForCombiner). Engine only.
 	staleWaits map[string][]*staleWait
+	// sweepsOwed: the sweeps the tick runs again, by zone (entitlement.go,
+	// plan S17b). The engine's goroutine only.
+	sweepsOwed map[ZoneName]sweepOwed
 	// withdrawals: the leader's withdrawals this agent sent, by
 	// distribution (withdrawal.go, plan S16). Under mu.
 	withdrawals map[string]sentWithdrawal

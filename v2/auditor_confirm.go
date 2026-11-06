@@ -16,11 +16,13 @@ package tdnsmp
 // the event log, as an agent's is its combiner: the event logged, the
 // distribution is done here, and that is SUCCESS, the records as done. It
 // goes the way the agents' own final confirmations go, through
-// OnRemoteConfirmationReady, to the originator. An auditor never delays or
-// gates a change: it confirms every distribution it receives, at once.
+// OnRemoteConfirmationReady, to answerTo: the originator, or the leader that
+// delivered a withdrawal. An auditor never delays or gates a change: it
+// confirms every distribution it receives, at once, and one that cannot be
+// reached is waited for only up to no-role-timeout (memberWithTimeOut).
 // AuditorEngine.recordSyncMsg calls it after the event is logged; an RFI,
 // or a message with no distribution ID, gets no confirmation.
-func auditorConfirms(msgQs *MsgQs, msg *AgentMsgPostPlus, senderID, zone string) {
+func auditorConfirms(msgQs *MsgQs, msg *AgentMsgPostPlus, answerTo, zone string) {
 	if msgQs == nil || msgQs.OnRemoteConfirmationReady == nil || msg == nil || msg.DistributionID == "" {
 		return
 	}
@@ -33,12 +35,12 @@ func auditorConfirms(msgQs *MsgQs, msg *AgentMsgPostPlus, senderID, zone string)
 	}
 	msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 		OriginatingDistID: msg.DistributionID,
-		OriginatingSender: senderID,
+		OriginatingSender: answerTo,
 		Mechanism:         msg.Mechanism,
 		Zone:              ZoneName(zone),
 		Status:            "SUCCESS",
 		Message:           "auditor: recorded",
 		AppliedRecords:    recorded,
 	})
-	lgAuditor.Info("confirmed to the originator: recorded", "zone", zone, "originator", senderID, "distrib", msg.DistributionID, "records", len(recorded))
+	lgAuditor.Info("confirmed: recorded", "zone", zone, "to", answerTo, "distrib", msg.DistributionID, "records", len(recorded))
 }
