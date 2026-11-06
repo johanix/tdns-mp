@@ -139,9 +139,7 @@ func TestAJoinersKeyUnderAProvidersTagDoesNotHoldItsDS(t *testing.T) {
 // The check compares keys, not tags. Our own KSK under another provider's
 // tag, or a third provider's under it, is not that provider's key: the
 // signer's inventory lacks its DS, and the set is unknown, not one with
-// another DS in place of theirs. Before their record has arrived the tag is
-// all there is, and only another provider's row holds it. sameTag is our
-// KSK first, then p3's.
+// another DS in place of theirs. sameTag is our KSK first, then p3's.
 func TestAnotherKeyUnderAProvidersTagDoesNotHoldItsDS(t *testing.T) {
 	yes, no := true, false
 	r := newComputedDSRig(t, "sametag.ds.example.", []string{"us", "p2", "p3"})
@@ -166,14 +164,6 @@ func TestAnotherKeyUnderAProvidersTagDoesNotHoldItsDS(t *testing.T) {
 		}
 	}
 
-	r.conf.noteForeignDistribution(r.ctx, ZoneName(z), "agent.p2.example.", []core.RROperation{{
-		Operation: "replace", RRtype: "DNSKEY", Records: []string{theirZSK.String()},
-		KeyStates: []core.KeyState{{KeyTag: theirKSK.KeyTag(), State: KeyStateActive, DS: &yes}, {KeyTag: theirZSK.KeyTag(), State: KeyStateActive, DS: &no}},
-	}})
-	inventory(row(sameTag, tdns.DnskeyStateActive, true), row(ourZSK, tdns.DnskeyStateActive, false),
-		row(theirZSK, DnskeyStateForeign, false))
-	unknown("our own KSK under p2's KSK's tag, before p2's KSK's record")
-
 	r.distribution(t, "agent.p2.example.", word{theirKSK, KeyStateActive, &yes}, word{theirZSK, KeyStateActive, &no})
 	inventory(row(ourKSK, tdns.DnskeyStateActive, true), row(ourZSK, tdns.DnskeyStateActive, false),
 		row(theirKSK, DnskeyStateForeign, true), row(theirZSK, DnskeyStateForeign, false))
@@ -189,4 +179,37 @@ func TestAnotherKeyUnderAProvidersTagDoesNotHoldItsDS(t *testing.T) {
 	inventory(row(ourKSK, tdns.DnskeyStateActive, true), row(ourZSK, tdns.DnskeyStateActive, false),
 		row(sameTag, DnskeyStateForeign, true), row(theirZSK, DnskeyStateForeign, false))
 	unknown("p3's KSK under p2's KSK's tag")
+}
+
+// A provider's key whose record has not arrived here is held by nothing: the
+// tag is all there is, and a third provider's key under it would pass for
+// theirs. The set is unknown until the record comes, as the computed set is,
+// and the status says what it waits for.
+func TestAProvidersKeyWithNoRecordYetIsHeldByNothing(t *testing.T) {
+	yes, no := true, false
+	r := newComputedDSRig(t, "norecord.ds.example.", []string{"us", "p2", "p3"})
+	r.owner.SetForeignDSCheck(r.conf.foreignDSWithheld)
+	z := r.mpzd.ZoneName
+	theirKSK, theirZSK, ourKSK, ourZSK := testDnskey(t, z, 257), testDnskey(t, z, 256), testDnskey(t, z, 257), testDnskey(t, z, 256)
+	p3KSK := sameTagOtherKey(t, theirKSK)
+	r.conf.noteForeignDistribution(r.ctx, ZoneName(z), "agent.p2.example.", []core.RROperation{{
+		Operation: "replace", RRtype: "DNSKEY", Records: []string{theirZSK.String()},
+		KeyStates: []core.KeyState{{KeyTag: theirKSK.KeyTag(), State: KeyStateActive, DS: &yes}, {KeyTag: theirZSK.KeyTag(), State: KeyStateActive, DS: &no}},
+	}})
+	r.distribution(t, "agent.p3.example.", word{p3KSK, KeyStateActive, &yes})
+
+	row := func(k *dns.DNSKEY, state string, ds bool) KeyInventoryItem {
+		return KeyInventoryItem{KeyTag: k.KeyTag(), Algorithm: k.Algorithm, Flags: k.Flags, State: state, KeyRR: k.String(), Pub: true, DS: &ds}
+	}
+	r.conf.noteKeyInventory(r.ctx, r.mpzd, &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: z, Owned: true, Inventory: []KeyInventoryItem{
+		row(ourKSK, tdns.DnskeyStateActive, true), row(ourZSK, tdns.DnskeyStateActive, false),
+		row(p3KSK, DnskeyStateForeign, true), row(theirZSK, DnskeyStateForeign, false),
+	}})
+	if known, tags := r.dsSet(t); known {
+		t.Fatalf("p3's KSK under the tag of p2's, whose record has not arrived: the DS set is known with %v", tags)
+	}
+	want := fmt.Sprintf("provider agent.p2.example. holds its key %d active with its DS at the parent, and this agent has no record of that key yet", theirKSK.KeyTag())
+	if why := r.conf.dsSetWaitingFor(z); why != want {
+		t.Fatalf("the status says %q, want %q", why, want)
+	}
 }
