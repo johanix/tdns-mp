@@ -83,6 +83,10 @@ const (
 	servingNS     = servingTestZone + " 300 IN NS ns1.elsewhere.example."
 	servingDS     = servingTestZone + " 300 IN DS 1 15 2 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	servingNSECed = servingTestZone + " 300 IN NSEC a.asked.example. SOA NS RRSIG NSEC"
+	// another owner's, at thirty days, and a signature over another type
+	servingElsewhereKey   = "elsewhere." + servingTestZone + " 2592000 IN DNSKEY 257 3 15 l02Woi0iS8Aa25FQkUd9RMzZHJpBoRQwAQEX1SxZJA4="
+	servingElsewhereRRSIG = "elsewhere." + servingTestZone + " 2592000 IN RRSIG DNSKEY 15 3 2592000 20300101000000 20200101000000 1 " + servingTestZone + " c2lnbmF0dXJl"
+	servingSOARRSIG       = servingTestZone + " 300 IN RRSIG SOA 15 2 300 20300101000000 20200101000000 1 " + servingTestZone + " c2lnbmF0dXJl"
 )
 
 func servingKeys(q *dns.Msg) *dns.Msg {
@@ -130,6 +134,15 @@ func TestAskServingReadsWhatANameserverAnswers(t *testing.T) {
 		}},
 		{name: "another type in the answer", want: noRRset, answer: func(q *dns.Msg, _ bool) *dns.Msg {
 			return servingReply(q, dns.RcodeSuccess, []string{servingNS}, nil)
+		}},
+		{name: "the keys beside another owner's", want: serves, answer: func(q *dns.Msg, _ bool) *dns.Msg {
+			return servingReply(q, dns.RcodeSuccess, []string{servingKSK, servingZSK, servingRRSIG, servingElsewhereKey, servingElsewhereRRSIG}, nil)
+		}},
+		{name: "another owner's keys alone", want: noRRset, answer: func(q *dns.Msg, _ bool) *dns.Msg {
+			return servingReply(q, dns.RcodeSuccess, []string{servingElsewhereKey, servingElsewhereRRSIG}, nil)
+		}},
+		{name: "the keys beside a signature over another type", want: serves, answer: func(q *dns.Msg, _ bool) *dns.Msg {
+			return servingReply(q, dns.RcodeSuccess, []string{servingKSK, servingZSK, servingRRSIG, servingSOARRSIG}, nil)
 		}},
 		{name: "NXDOMAIN with a SOA", want: noRRset, answer: func(q *dns.Msg, _ bool) *dns.Msg {
 			return servingReply(q, dns.RcodeNameError, nil, []string{servingAbove})
@@ -301,6 +314,23 @@ func TestAJoinersKeysStepReadsWhatTheWireSays(t *testing.T) {
 		}
 		if got := w.after(5 * time.Minute); got != "" {
 			t.Errorf("both serve them and their TTL has passed, and it waits for %q", got)
+		}
+	})
+	t.Run("another owner's DNSKEY in the answer counts for nothing", func(t *testing.T) {
+		w := newKeysWait(t, "wire-owner.keys.adding.example.")
+		serving(t, w)
+		other := testDnskey(t, "elsewhere."+w.r.zone, 257)
+		other.Hdr.Ttl = 30 * 24 * 3600
+		ask(w, keysNS2, servingListener(t, true, func(q *dns.Msg, _ bool) *dns.Msg {
+			r := keysReply(w, q)
+			r.Answer = append(r.Answer, other)
+			return r
+		}))
+		if got := w.look(); got == "" || strings.Contains(got, keysNS2) {
+			t.Fatalf("it waits for %q, want the TTL and not ns2", got)
+		}
+		if got := w.after(5 * time.Minute); got != "" {
+			t.Errorf("both serve them at 5m and that has passed, and it waits for %q: another owner's TTL counted", got)
 		}
 	})
 	t.Run("a truncated reply and no TCP is silence, and does not hold", func(t *testing.T) {
