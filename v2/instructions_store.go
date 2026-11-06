@@ -73,6 +73,12 @@ type zoneSerials struct {
 	// next thaw, so that a member behind the thaw can fetch it here (the
 	// instructions RFI, plan S7).
 	LastFrom *heldSerial `json:"last_from,omitempty"`
+	// NamedAt is the serial that named this agent again when it dropped an
+	// active serial with no record of it (startOver), until an active serial
+	// is known. A word for a serial below it is not taken: that serial has no
+	// record of this agent either, and it would only start over again. Nil with
+	// none, as an owner's serial may be 0.
+	NamedAt *uint32 `json:"named_at,omitempty"`
 	// OwnerError holds the zone (design 3.6) until a copy above ErrorAt is
 	// noted; ErrorAt nil: nothing was held when it was noted. Conflict is
 	// the digests seen at ErrorAt for "one serial, two digests".
@@ -651,6 +657,7 @@ func (s *InstructionStore) Know(zone string, sd SerialDigest, thaw *Thaw, reconc
 		a := *h
 		a.Since, a.Refused = time.Now(), nil
 		z.Active = &a
+		z.NamedAt = nil
 		z.dropAtOrBelow(a.Serial)
 		s.judged(zone, z)
 		if thaw != nil {

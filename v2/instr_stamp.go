@@ -45,6 +45,10 @@ const stampGroupHash = hsync.StampGroupHash
 // upstream that keeps serving an old copy causes no fetch at every beat.
 const fetchInterval = time.Minute
 
+// copyStuckAfter is how long a member's telling of a serial this agent lacks may
+// go unanswered by its own refreshes before it warns, once.
+const copyStuckAfter = 5 * time.Minute
+
 // stampEntryBudget bounds the zones a stamp entry tells, in bytes of their
 // JSON (plan S22, amended 2026-10-30): with the rest of a beat and the
 // transport's envelope, a beat stays well under what one carries inline
@@ -90,6 +94,9 @@ type stampTable struct {
 	// case: the zone's name here ("" when this agent has no such zone), and
 	// whether the refresh was queued. Nil: none.
 	fetch func(zone string) (name string, queued bool)
+	// copyStuck is told once when the fetches have not brought a serial told
+	// for copyStuckAfter; nil: nobody is told.
+	copyStuck func(zone string, told uint32, member string)
 	// onTold is asked of a zone after a member's first-hand stamp of it is
 	// kept: the thaw's turn (plan S7). Nil: none.
 	onTold func(zone string)
@@ -178,6 +185,8 @@ func (m *memberStamp) encrypted() bool {
 type fetchMark struct {
 	serial uint32
 	at     time.Time
+	since  time.Time // when this agent came to be behind what it is told
+	warned bool      // copyStuck is told of this
 }
 
 // newStampTable is the stamp table of localID, whose serials store keeps,
@@ -905,15 +914,22 @@ func (t *stampTable) fetchIfNewer(zone string, m *memberStamp) {
 	if st.NewestDigest == "" || t.fetch == nil {
 		return
 	}
-	if own, ok := t.store.ownView(zone); ok && CompareSerial(st.Newest, own.highest) <= 0 {
+	own, ok := t.store.ownView(zone)
+	if ok && CompareSerial(st.Newest, own.highest) <= 0 {
 		return
 	}
 	now := time.Now()
 	t.mu.Lock()
 	f, seen := t.fetched[zone]
 	due := !seen || CompareSerial(st.Newest, f.serial) > 0 || now.Sub(f.at) >= fetchInterval
+	mark := fetchMark{serial: st.Newest, at: now, since: now}
+	if seen && (!ok || CompareSerial(f.serial, own.highest) > 0) {
+		mark.since, mark.warned = f.since, f.warned // still behind what it was told
+	}
+	stuck := due && !mark.warned && now.Sub(mark.since) >= copyStuckAfter
+	mark.warned = mark.warned || stuck
 	if due {
-		t.fetched[zone] = fetchMark{serial: st.Newest, at: now}
+		t.fetched[zone] = mark
 	}
 	t.mu.Unlock()
 	if !due {
@@ -927,7 +943,7 @@ func (t *stampTable) fetchIfNewer(zone string, m *memberStamp) {
 		// not fetched (the queue was full, or the zone is not here, yet or
 		// any more), so the next telling asks again
 		t.mu.Lock()
-		if t.fetched[zone] == (fetchMark{serial: st.Newest, at: now}) {
+		if t.fetched[zone] == mark {
 			if seen {
 				t.fetched[zone] = f
 			} else {
@@ -935,6 +951,10 @@ func (t *stampTable) fetchIfNewer(zone string, m *memberStamp) {
 			}
 		}
 		t.mu.Unlock()
+		return
+	}
+	if stuck && t.copyStuck != nil {
+		t.copyStuck(zone, st.Newest, m.Identity)
 	}
 }
 
@@ -1309,6 +1329,7 @@ func (conf *Config) wireStamps(tm *MPTransportBridge, mp *MultiProviderConf, cry
 		t.hold = conf.holdConfirmed
 		t.stepHeld = conf.holdsStep
 		t.fetch = conf.fetchZone
+		t.copyStuck = func(zone string, told uint32, member string) { go warnCopyStuck(zone, told, member) }
 		t.work = func(peer string) map[string]bool { return conf.workWith(tm, peer) }
 		if !crypto {
 			lgGossip.Warn("payload encryption is off: no transition of a zone this agent votes for is thawed")
@@ -1351,15 +1372,7 @@ func (conf *Config) workWith(tm *MPTransportBridge, peer string) map[string]bool
 // refresh for a name it does not hold. A full refresh queue drops it, and
 // the next telling asks again.
 func (conf *Config) fetchZone(zone string) (string, bool) {
-	zd, ok := tdns.Zones.Get(zone)
-	if !ok {
-		for _, name := range tdns.Zones.Keys() {
-			if core.EqualNames(name, zone) {
-				zd, ok = tdns.Zones.Get(name)
-				break
-			}
-		}
-	}
+	zd, ok := tdnsZoneNamed(zone)
 	if !ok || zd == nil || zd.ZoneType == 0 || !zd.Options[tdns.OptMultiProvider] {
 		return "", false
 	}
@@ -1370,6 +1383,64 @@ func (conf *Config) fetchZone(zone string) (string, bool) {
 		lgGossip.Warn("the refresh queue is full; the zone is fetched at a later telling", "zone", zd.ZoneName)
 		return zd.ZoneName, false
 	}
+}
+
+// tdnsZoneNamed is the zone under its name in any case.
+func tdnsZoneNamed(zone string) (*tdns.ZoneData, bool) {
+	zd, ok := tdns.Zones.Get(zone)
+	if !ok {
+		for _, name := range tdns.Zones.Keys() {
+			if core.EqualNames(name, zone) {
+				return tdns.Zones.Get(name)
+			}
+		}
+	}
+	return zd, ok
+}
+
+// warnCopyStuck says that refreshes do not bring a serial a member tells, with
+// the SOA of this agent's copy and of its upstreams. A copy above every upstream
+// that answers is the case to name, as nothing else tells of it: a secondary keeps
+// the higher serial, and the owner's edits never reach this agent. It comes of an
+// upstream whose chain changed, a signer moved from another provider's to its own.
+// With an upstream at or above the copy a refresh can still replace it, and one
+// that does not answer may be that upstream, so the operator looks at it first.
+func warnCopyStuck(zone string, told uint32, member string) {
+	zd, ok := tdnsZoneNamed(zone)
+	if !ok || zd == nil {
+		return
+	}
+	soa, err := zd.GetSOA()
+	if err != nil || soa == nil {
+		lgGossip.Warn("a member tells newer instructions and refreshing the zone has not brought them; this agent's copy has no SOA", "zone", zone, "told", told, "member", member)
+		return
+	}
+	var upstreams []string
+	above, notAbove, silent := false, false, false
+	for _, up := range zd.Upstreams {
+		rrs, err := tdns.AuthQuery(zd.ZoneName, up.Addr, dns.TypeSOA)
+		if err != nil || len(rrs) == 0 {
+			upstreams = append(upstreams, up.Addr+"=no answer")
+			silent = true
+			continue
+		}
+		if s, ok := rrs[0].(*dns.SOA); ok {
+			upstreams = append(upstreams, fmt.Sprintf("%s=%d", up.Addr, s.Serial))
+			if CompareSerial(soa.Serial, s.Serial) > 0 {
+				above = true
+			} else {
+				notAbove = true
+			}
+		}
+	}
+	msg := "a member tells newer instructions and refreshing the zone has not brought them"
+	switch {
+	case above && !notAbove && silent:
+		msg += "; this agent's copy has a higher SOA than every upstream that answers, and one that does not answer may be higher: its operator looks at those first, and if none is higher takes the zone out of the configuration and back"
+	case above && !notAbove:
+		msg += "; this agent's copy has a higher SOA than its upstream, so no refresh replaces it until the upstream's passes it: its operator takes the zone out of the configuration and back"
+	}
+	lgGossip.Warn(msg, "zone", zone, "told", told, "member", member, "copy_soa", soa.Serial, "upstream_soa", strings.Join(upstreams, " "))
 }
 
 // rolloverAt is rolloverUnderWay at this provider as the agent knows it:
