@@ -468,9 +468,9 @@ func (b *reconcileBook) forget(zone string) {
 }
 
 // noVotingMember: no ON record's label is in servers= or signers= under in,
-// as participantsOf counts the voting members.
+// as participantsOf counts the voting members; true for no instructions.
 func noVotingMember(in *Instructions) bool {
-	return len(identities(in.providers(slices.Concat(in.Servers, in.Signers)))) == 0
+	return in == nil || len(identities(in.providers(slices.Concat(in.Servers, in.Signers)))) == 0
 }
 
 // reconcileTurn is the zone's reconciliation, at its turn (thawTurn): the

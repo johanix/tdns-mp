@@ -205,6 +205,11 @@ func TestATransitionWithNoVotingMemberIsDoneAsItTakesEffect(t *testing.T) {
 	if s := status(t, r.store, r.zone); s.Phase != PhaseReconciling {
 		t.Fatalf("73's transition did not start: %+v", s)
 	}
+	// 73 gives a role: its transition is not done at its first turn
+	r.conf.reconcileTurn(r.zone, time.Now())
+	if s := status(t, r.store, r.zone); s.Phase != PhaseReconciling || s.From == nil || s.From.Serial != 72 {
+		t.Errorf("73's transition after a turn: phase %s from %s", s.Phase, serialOf(s.From))
+	}
 }
 
 // A change with no voting member under the active serial nor under the one
