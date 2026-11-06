@@ -46,7 +46,7 @@ func ListMPZones(resp tdnsmp.MPListResponse) {
 		return
 	}
 
-	var out, ownerErrors, refusals, acting []string
+	var out, ownerErrors, benign, refusals, acting []string
 	out = append(out, "Zone|Serial|Digest|Servers|Signers|Auditors|NoRole|This|NSmgmt|ParentSync|Suffix|Options")
 
 	var znames []string
@@ -113,6 +113,9 @@ func ListMPZones(resp tdnsmp.MPListResponse) {
 		case digest == "":
 			serial, digest = "-", "-"
 		}
+		if info.CopyError != "" && info.OwnerError == "" {
+			benign = append(benign, fmt.Sprintf("  %s: %s", zname, info.CopyError))
+		}
 		if info.Acting != "" {
 			acting = append(acting, fmt.Sprintf("  %s: %s", zname, info.Acting))
 		}
@@ -124,6 +127,10 @@ func ListMPZones(resp tdnsmp.MPListResponse) {
 	if len(ownerErrors) > 0 {
 		fmt.Println("Owner errors in the zone's instructions:")
 		fmt.Println(strings.Join(ownerErrors, "\n"))
+	}
+	if len(benign) > 0 {
+		fmt.Println("Benign owner errors in the zone's instructions (no role given, nothing held):")
+		fmt.Println(strings.Join(benign, "\n"))
 	}
 	if len(refusals) > 0 {
 		fmt.Println("Refused changes of the zone's instructions:")

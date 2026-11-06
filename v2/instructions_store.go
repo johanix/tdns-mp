@@ -505,8 +505,11 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 	// intent, and there is no serial to keep (the project owner, 2026-11-06).
 	noIntent := readErr == nil && (in == nil || !in.HasParam)
 	// An HSYNCPARAM without serial= that gives no role is a benign owner
-	// error: reported, and holding nothing while no serial held gives roles
-	// either (the project owner, 2026-11-06).
+	// error: reported, and holding nothing while the active serial gives no
+	// role, or, with none known, no serial held gives one (activeOrHeld; the
+	// project owner, 2026-11-06). A newer serial held that gives roles does
+	// not count while an active serial is known: the transition to it goes
+	// on (his ruling (a), 2026-11-06).
 	var ns noSerialError
 	benign := errors.As(readErr, &ns) && !ns.roles
 	if noIntent || benign {
@@ -520,8 +523,21 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 	err := s.update(zone, func(z *zoneSerials) error {
 		switch {
 		case benign && !givesRoles(activeOrHeld(z)):
-			if z.CopyError != readErr.Error() {
+			// the hold an earlier copy without serial= that gave a role
+			// started ends with it. Any other owner error ends only at a
+			// serial above it (design 3.6), a conflict too, whose message
+			// a later owner error overwrites while its Conflict stays.
+			ended := z.OwnerError == readErr.Error() && len(z.Conflict) == 0
+			if z.CopyError != readErr.Error() || ended {
 				lg.Warn("a benign owner error in the zone's instructions: no role is given, and nothing is held", "zone", zone, "error", readErr.Error())
+			}
+			if ended {
+				z.OwnerError, z.ErrorAt = "", nil
+				if z.Active == nil && len(z.Held) == 0 {
+					// the copy that started it came at a first load: nothing
+					// is kept, as for a first load of this copy
+					return errNothingKept
+				}
 			}
 			z.Copy, z.CopyError = SerialDigest{}, readErr.Error()
 			return nil
@@ -597,6 +613,8 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 		return nil
 	})
 	switch {
+	case errors.Is(err, errNothingKept):
+		lg.Info("the zone's copy without serial= gives no role any more; the hold ends, and nothing is kept", "zone", zone)
 	case errors.Is(err, errEndOfService):
 		// The end of multi-provider service (design 7): update dropped the
 		// zone's serials.
@@ -608,6 +626,11 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 
 var errEndOfService = errors.New("the zone's instructions are gone")
 
+// errNothingKept is errEndOfService for a zone a first load's copy without
+// serial= that gave a role put in the store, once a copy that gives no role
+// ends its hold: nothing was held, and nothing is kept (decision 107a).
+var errNothingKept = fmt.Errorf("%w: a copy without serial= gives no role", errEndOfService)
+
 // givesRoles: an ON record's label is in servers= or signers= under in, as
 // participantsOf counts the voting members.
 func givesRoles(in *Instructions) bool {
@@ -616,7 +639,11 @@ func givesRoles(in *Instructions) bool {
 
 // activeOrHeld is a reading that gives roles among the zone's active serial
 // or, with none known, the serials it holds, if any does; the active reading
-// or nil otherwise. Called inside update.
+// or nil otherwise. With an active serial known the serials held above it
+// are not read: a copy without serial= that gives no role is benign under an
+// active serial that gives none, whatever a newer serial held gives, and the
+// transition to that serial goes on (the project owner's ruling (a),
+// 2026-11-06). Called inside update.
 func activeOrHeld(z *zoneSerials) *Instructions {
 	if z.Active != nil {
 		return z.Active.Reading
@@ -1091,7 +1118,11 @@ func (st *InstructionsStatus) Line() string {
 	if st.Newest != nil && (st.Active == nil || *st.Newest != *st.Active) {
 		parts = append(parts, "newest "+st.Newest.String())
 	}
-	parts = append(parts, fmt.Sprintf("copy %d", st.Copy.Serial))
+	if st.CopyError != "" {
+		parts = append(parts, "copy: "+st.CopyError+", nothing held") // a benign owner error (decision 107a)
+	} else {
+		parts = append(parts, fmt.Sprintf("copy %d", st.Copy.Serial))
+	}
 	line := strings.Join(parts, ", ")
 	if r := st.refusedLine(); r != "" {
 		line = r + "; " + line
@@ -1125,6 +1156,9 @@ func (s *InstructionStore) fillMPZoneInfo(zone string, info *MPZoneInfo) {
 	info.Refused = st.refusedLine()
 	if info.OwnerError == "" {
 		info.OwnerError = st.OwnerError
+	}
+	if info.CopyError == info.OwnerError {
+		info.CopyError = "" // the store holds it: an owner error after all
 	}
 }
 

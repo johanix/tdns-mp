@@ -34,6 +34,10 @@ type MPZoneInfo struct {
 	Serial     uint32 `json:"serial"`
 	Digest     string `json:"digest,omitempty"`
 	OwnerError string `json:"owner_error,omitempty"`
+	// CopyError is the copy's benign owner error: an HSYNCPARAM without
+	// serial= that gives no role, while no serial kept gives one either
+	// (decision 107a). Reported; it holds nothing.
+	CopyError string `json:"copy_error,omitempty"`
 	// Active and Newest are the serials the agent or the auditor keeps for
 	// the zone (instructions_store.go): the active one and the newest held.
 	// Nil where none are kept, as on the combiner and the signer.
