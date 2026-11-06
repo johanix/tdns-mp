@@ -2307,6 +2307,20 @@ func Sig0KeyOwnerName(zone, nameserver string) string {
 	return "_sig0key." + dns.Fqdn(zone) + "_signal." + dns.Fqdn(nameserver)
 }
 
+// queuedSyncLine is the status of a zone's sync that waits in, or runs from,
+// its parent's queue in the delegation syncher, with the parent's failed
+// analyses when the catch-up tracker has seen them.
+func queuedSyncLine(pos tdns.DelegationSyncPosition, t *catchUpTracker, zone ZoneName) string {
+	line := fmt.Sprintf("queued: %d ahead for parent %s", pos.Ahead, pos.Parent)
+	if pos.Running {
+		line = fmt.Sprintf("syncing with parent %s", pos.Parent)
+	}
+	if down, since, lastErr := t.parentDownState(zone); down {
+		line += fmt.Sprintf("; the parent's analysis fails since %s (%s)", since.UTC().Format(time.RFC3339), lastErr)
+	}
+	return line
+}
+
 // GetParentSyncStatus computes the current parent sync status for a zone on demand.
 func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.ZoneData, hdb *HsyncDB, imr *Imr, ar *AgentRegistry, schemes []string) ParentSyncStatus {
 	status := ParentSyncStatus{
@@ -2346,8 +2360,9 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 
 	// The zone's catch-up (catchup.go), which needs neither the zone's data
 	// nor the keystore.
+	var t *catchUpTracker
 	if ar != nil && ar.MPTransport != nil {
-		t := ar.MPTransport.catchUp
+		t = ar.MPTransport.catchUp
 		status.CatchUp = t.Status(zone)
 		if owed, room := t.owedState(zone); owed && status.IsLeader {
 			caughtUp, _ := t.CaughtUp(zone)
@@ -2365,6 +2380,15 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 			default:
 				status.ParentSync = "owed"
 			}
+		}
+	}
+	// A sync on its way to the parent waits in the parent's queue in the
+	// delegation syncher (tdns #1002); behind a parent that does not answer,
+	// that is where it waits. It is not owed: the owed mark goes when the
+	// sync is queued.
+	if status.ParentSync == "" {
+		if pos, ok := tdns.DelegationSyncWaiting(string(zone)); ok {
+			status.ParentSync = queuedSyncLine(pos, t, zone)
 		}
 	}
 
