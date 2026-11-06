@@ -156,6 +156,37 @@ func readZoneKey(kdb *tdns.KeyDB, zone ZoneName) (*zoneKey, error) {
 	return z, nil
 }
 
+// keyLeaderPublishes is the KEY this agent publishes for the zone as its
+// leader: the zone's key, while it is the one KEY the zone publishes. Nil at
+// a member, and while the apex carries several, where nothing picks one for
+// the operator (decision 98). A combiner keeps it with this agent's KEY
+// data, which need not hold it, so that a replace of that data would take it
+// away (#340).
+func (conf *Config) keyLeaderPublishes(zone ZoneName) (*dns.KEY, error) {
+	lem := conf.InternalMp.LeaderElectionManager
+	if lem == nil || !lem.IsLeader(zone) {
+		return nil, nil
+	}
+	kdb := conf.zoneKeyDB(zone)
+	if kdb == nil {
+		return nil, nil
+	}
+	zk, err := readZoneKey(kdb, zone)
+	if err != nil {
+		return nil, err
+	}
+	if zk.held == nil || len(zk.published) != 1 {
+		return nil, nil
+	}
+	return zk.held.key, nil
+}
+
+// isThisKey: rr is the KEY key.
+func isThisKey(rr dns.RR, key *dns.KEY) bool {
+	k, ok := rr.(*dns.KEY)
+	return ok && sameKey(k, key)
+}
+
 // keystoreBusy: tdns's KeyDB refuses a transaction while another is open,
 // with this text and no sentinel error.
 func keystoreBusy(err error) bool {
