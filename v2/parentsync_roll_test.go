@@ -564,6 +564,30 @@ func TestAMemberKeepsTheLeadersKEYAndNoOther(t *testing.T) {
 	}
 }
 
+// A KEY under another name is not asked to be dropped while the leader's KEY
+// is on its way to this agent's combiner, nor after the combiner ignored it: a
+// drop that came first would leave the zone with no KEY. The combiner's final
+// word on the leader's KEY has the drop asked for then, not at the next tick.
+func TestAKEYPurgeWaitsForTheCombinerToHoldTheLeadersKEY(t *testing.T) {
+	r := newKeyPurgeRig(t, "roll.purgewait.example.")
+	r.zdr.noteCombinerSend(r.zone, r.them, []uint16{dns.TypeKEY}, time.Now(), "leader-key-1")
+	r.conf.dropOtherKEYs(r.zdr, r.zone, r.them)
+	if len(r.sends) != 0 {
+		t.Fatalf("asked to drop while the leader's KEY is on its way: %d sends", len(r.sends))
+	}
+	r.zdr.noteCombinerFailed(r.zone, "leader-key-1", true, nil)
+	r.conf.retryKEYPurges(r.zdr)
+	if len(r.sends) != 0 {
+		t.Fatalf("asked to drop after the combiner ignored the leader's KEY: %d sends", len(r.sends))
+	}
+	r.zdr.noteCombinerSend(r.zone, r.them, []uint16{dns.TypeKEY}, time.Now(), "leader-key-2")
+	r.zdr.noteCombinerConfirmed(r.zone, "leader-key-2", time.Now())
+	r.conf.leaderKEYConfirmed(r.zdr, r.zone, "leader-key-2")
+	if len(r.sends) != 1 || !r.holds(earlierLeader) {
+		t.Fatalf("on the combiner's word on the leader's KEY: %d sends, earlier KEY held %v", len(r.sends), r.holds(earlierLeader))
+	}
+}
+
 // A drop the combiner has not made is asked for again until it has: after a
 // send that failed, a refusal, and a restart that lost the book. Until then
 // the KEY stays in the data, the record of what is owed.
