@@ -157,6 +157,8 @@ github.com/johanix/tdns/v2 v2.0.0-20261105215110-830851b071b1 h1:H2DLXUWA1AHRfk2
 github.com/johanix/tdns/v2 v2.0.0-20261105215110-830851b071b1/go.mod h1:83TZ0IeS2C9m1hU4kVxOr0qEVqJHpqnYN10rlJFiZSw=
 github.com/johanix/tdns/v2 v2.0.0-20261106055955-f2399aae2cf7 h1:Tvlzn+dAK3J6eDoXVGWxMH6SJ0BQ85tNJOthTH++H6o=
 github.com/johanix/tdns/v2 v2.0.0-20261106055955-f2399aae2cf7/go.mod h1:83TZ0IeS2C9m1hU4kVxOr0qEVqJHpqnYN10rlJFiZSw=
+github.com/johanix/tdns/v2 v2.0.0-20261106080910-de1409a25421 h1:sKG8W6duZOauiw0KVT2b3i8lSbqaTTJSV+Fm/hi7lFY=
+github.com/johanix/tdns/v2 v2.0.0-20261106080910-de1409a25421/go.mod h1:83TZ0IeS2C9m1hU4kVxOr0qEVqJHpqnYN10rlJFiZSw=
 github.com/johanix/tdns/v2/cache v0.0.0-20261102143859-91b4e41c48b6 h1:6YttZ0AMwZ/qreiGcCg78BUGFPRVUmKmm9FqqK1W7Kc=
 github.com/johanix/tdns/v2/cache v0.0.0-20261102143859-91b4e41c48b6/go.mod h1:kFEyTCL7pIVo/K+DGeMiUanKo9mzcstT8zvTey1NJq0=
 github.com/johanix/tdns/v2/core v0.0.0-20261102143859-91b4e41c48b6 h1:KOqn3qtIyRRwPyMZW5VeN1i/IqLXhzzPvGGoTawjDhU=
@@ -165,6 +167,8 @@ github.com/johanix/tdns/v2/edns0 v0.0.0-20261105215110-830851b071b1 h1:T+CBz68ao
 github.com/johanix/tdns/v2/edns0 v0.0.0-20261105215110-830851b071b1/go.mod h1:v9UI8Ccjj3xNp9ltCeOGPrv8ouz5kMnAEKHlRy21wsY=
 github.com/johanix/tdns/v2/edns0 v0.0.0-20261106055955-f2399aae2cf7 h1:gqgVodOH/avwWqT9a51gXtRQD+UrsCzoJUvCKvGySqw=
 github.com/johanix/tdns/v2/edns0 v0.0.0-20261106055955-f2399aae2cf7/go.mod h1:v9UI8Ccjj3xNp9ltCeOGPrv8ouz5kMnAEKHlRy21wsY=
+github.com/johanix/tdns/v2/edns0 v0.0.0-20261106080910-de1409a25421 h1:3tb3ZZr/ZjCqyzUlTxqx3bBr6Gd8XphhByQrVRf5nes=
+github.com/johanix/tdns/v2/edns0 v0.0.0-20261106080910-de1409a25421/go.mod h1:v9UI8Ccjj3xNp9ltCeOGPrv8ouz5kMnAEKHlRy21wsY=
 github.com/jstemmer/go-junit-report v0.0.0-20190106144839-af01ea7f8024/go.mod h1:6v2b51hI/fHJwM22ozAgKL4VKDeJcHhJFhtBdhmNjmU=
 github.com/jstemmer/go-junit-report v0.9.1/go.mod h1:Brl9GWCQeLvo8nXZwPNNblvFj/XSXhF0NWZEnDohbsk=
 github.com/kisielk/gotool v1.0.0/go.mod h1:XhKaO+MFFWcvkIS/tQcRk01m1F5IRFswLeQ+oQHNcck=
