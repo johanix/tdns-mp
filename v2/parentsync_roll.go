@@ -1053,6 +1053,10 @@ func (conf *Config) dropOtherKEYs(zdr *ZoneDataRepo, zone ZoneName, leader Agent
 	every := rollRetryFor(conf.MpConfig())
 	self := conf.localAgentID()
 	conf.dropOwnKEY(zdr, zone, self, leader, theirs.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs, every)
+	// and a drop is asked for only once this agent's combiner holds the
+	// leader's KEY: one that came first would leave the zone with no KEY
+	// until it did (leaderKEYConfirmed)
+	held := zdr.combinerHoldsSet(zone, leader, dns.TypeKEY)
 	for _, id := range ar.Data.Keys() {
 		if sameName(string(id), string(leader)) {
 			tm.keyPurges.forget(zone, id)
@@ -1074,6 +1078,9 @@ func (conf *Config) dropOtherKEYs(zdr *ZoneDataRepo, zone ZoneName, leader Agent
 			zdr.removeTracking(zone, id, dns.TypeKEY)
 			tm.keyPurges.forget(zone, id)
 			lgEngine.Info("a KEY held under another name than the leader's is dropped", "zone", zone, "origin", id, "leader", leader)
+			continue
+		}
+		if !held {
 			continue
 		}
 		distID, due := tm.keyPurges.due(zone, id, every)
@@ -1163,6 +1170,25 @@ func (conf *Config) retryKEYPurges(zdr *ZoneDataRepo) {
 			conf.dropOtherKEYs(zdr, zone, leader)
 		}
 	}
+}
+
+// leaderKEYConfirmed is the combiner's final confirmation of distID: when it
+// is the hand-over of the zone's leader's KEY, the KEYs held under another
+// name are asked to be dropped now, not at the next tick (dropOtherKEYs). On
+// the engine's goroutine.
+func (conf *Config) leaderKEYConfirmed(zdr *ZoneDataRepo, zone ZoneName, distID string) {
+	lem := conf.InternalMp.LeaderElectionManager
+	if zdr == nil || lem == nil || distID == "" {
+		return
+	}
+	leader, ok := lem.ZoneLeader(zone)
+	if !ok {
+		return
+	}
+	if n := zdr.notes[zone][leader][dns.TypeKEY]; n == nil || n.distID != distID {
+		return
+	}
+	conf.dropOtherKEYs(zdr, zone, leader)
 }
 
 // keyPurge is the drop of origin's KEY at this agent's combiner: an empty
