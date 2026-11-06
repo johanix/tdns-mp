@@ -400,4 +400,7 @@ type InternalMpConf struct {
 	// servedKeys is what the signer has seen the servers of a zone it does not
 	// sign yet serve its DNSKEY RRset with (E5).
 	servedKeys servedKeysBook
+	// upstreamXfrs: the XFR addresses the agent's upstreams named, for its
+	// operator's hint (server_role.go).
+	upstreamXfrs upstreamXfrBook
 }
