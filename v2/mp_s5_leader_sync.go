@@ -486,7 +486,7 @@ func (conf *Config) delegationSyncNotified(ctx context.Context, zone string, sen
 func (conf *Config) delegationSyncNotifiedWith(ctx context.Context, zone string, sent delegationNotifies, delays []time.Duration) (held bool, failed error) {
 	c := &conf.InternalMp.delegationSyncChains
 	every := delegationCsyncAwaitedEvery
-	frozen := conf.zoneFrozen(zone)
+	frozen := conf.frozenForNotify(zone)
 	c.mu.Lock()
 	if sent.run != nil && sent.run.Err() != nil {
 		// The owner took the sync over after the sync last looked at the
@@ -661,7 +661,7 @@ func (conf *Config) delegationSyncReleaseAfter(ctx context.Context, zone string,
 		stopped := ctx != nil && ctx.Err() != nil
 		leads := conf.leadsZone(zone)
 		caughtUp, waiting := conf.InternalMp.CatchUp.CaughtUp(ZoneName(zone))
-		frozen := conf.zoneFrozen(zone)
+		frozen := conf.frozenForNotify(zone)
 		c.mu.Lock()
 		ch := c.zones[zone]
 		if ch == nil || ch.ask != ask || ch.hold == nil || ch.hold.awaiting {

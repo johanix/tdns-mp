@@ -92,6 +92,11 @@ type planView struct {
 	removals []Removal
 	excused  map[string]bool
 	taken    []string
+	// conf and told are for a step's own closures, when it is taken: what the
+	// leaving provider tells (S17b). Nil in a plan made only to be looked at
+	// by a test.
+	conf *Config
+	told map[string]toldStamp
 }
 
 // plannedStep is one step of a runner's.
@@ -108,15 +113,22 @@ type plannedStep struct {
 	// leaverNS: a leaving provider's NS step, which comes before any
 	// addition's DNSKEY step once its provider is excused (design 5).
 	leaverNS bool
+	// first: the reconciliation's first step, ahead of every addition (a
+	// signer that serves nothing leaves KeyConfirmers there, design 5).
+	first bool
 	// sets are the sets once the step is taken, from those held before it;
 	// removals the removals under way. Nil keeps them.
 	sets     func(held Roles) Roles
 	removals func(held []Removal) []Removal
 	// start is the leader's own action when it takes the step (a
 	// withdrawal, a sync: S16, S17b); wait what else the step waits for
-	// before it is held, since it was taken ("" for nothing). Nil for none.
+	// before it is held, since it was taken ("" for nothing), looked at once
+	// every member holds it; ready what it waits for before it is taken. Nil
+	// for none. A wait that opens with "until " or "for the " says it itself
+	// in the status; any other names whom it waits for.
 	start func(conf *Config, zone string)
 	wait  func(conf *Config, zone string, since time.Time) string
+	ready func(conf *Config, zone string) string
 }
 
 // lastStepKey is the key of every transition's last step.
@@ -141,6 +153,15 @@ func planSteps(p planView) []plannedStep {
 		}
 	}
 	steps = excusedNSFirst(steps, p.excused, p.taken)
+	slices.SortStableFunc(steps, func(a, b plannedStep) int {
+		switch {
+		case a.first == b.first:
+			return 0
+		case a.first:
+			return -1
+		}
+		return 1
+	})
 	to := p.to
 	return append(steps, plannedStep{
 		key:  lastStepKey,
@@ -382,6 +403,14 @@ func noRoleMember(zone ZoneName, id AgentId) bool {
 	return ok
 }
 
+// memberWithTimeOut: a distribution waits for id only up to
+// multi-provider.transitions.no-role-timeout: a member with no role, or an
+// auditor (design 4, amended 2026-11-02): one that cannot be reached holds
+// nothing for good.
+func memberWithTimeOut(zone ZoneName, id AgentId) bool {
+	return zoneStanding(instructionsFor(zone), string(id)) == standingAuditor || noRoleMember(zone, id)
+}
+
 // --- The parts ---
 
 // holdsStep: this agent holds the zone's step at the active serial sd: both
@@ -433,6 +462,15 @@ type reconcileBook struct {
 type zoneReconcile struct {
 	owing map[string]time.Time // by member, folded: when the first step it has not confirmed was taken
 	said  map[string]bool
+
+	// What a removal's steps read, at the leader (S17b).
+	parent    parentSeen
+	lookedAt  time.Time
+	looking   bool
+	since     map[string]time.Time // by wait: when it was first asked of
+	withdrawn map[string]bool      // by provider and type: the data engine says it is done
+	stepSync  bool                 // the step held asks the leader's sync (syncCauseFor)
+	syncAt    time.Time
 }
 
 func (b *reconcileBook) zone(zone string) *zoneReconcile {
@@ -494,6 +532,11 @@ func (conf *Config) reconcileTurn(zone string, now time.Time) {
 	if v.adopt != nil {
 		conf.takeFrom(in, v.adopt, "the furthest step a voting member holds")
 		return
+	}
+	// a new leader, that did not take the removal's first step, owes the roll
+	// of the zone's key all the same (S17b)
+	if len(in.removals) > 0 && conf.InternalMp.reconciles.sayOnce(key, removalRollOwed) {
+		oweRemovalRoll(conf, ZoneName(in.name))
 	}
 	for _, id := range v.excuse {
 		if err := s.excuse(in.name, id); err == nil {
@@ -626,14 +669,14 @@ func (conf *Config) reconcileView(in reconcileInputs, told map[string]toldStamp,
 	if in.from != nil {
 		from = in.from.Reading
 	}
-	plan := planSteps(planView{zone: in.name, from: from, to: in.active.Reading, held: held, removals: removals, excused: excused, taken: in.step.Taken})
+	plan := planSteps(planView{zone: in.name, from: from, to: in.active.Reading, held: held, removals: removals, excused: excused, taken: in.step.Taken, conf: conf, told: told})
 	var cur *plannedStep
 	if n := len(in.step.Taken); n > 0 {
 		if i := slices.IndexFunc(plan, func(st plannedStep) bool { return st.key == in.step.Taken[n-1] }); i >= 0 {
 			cur = &plan[i]
 		}
 	}
-	if cur != nil && cur.wait != nil {
+	if cur != nil && cur.wait != nil && len(v.waits) == 0 {
 		if w := cur.wait(conf, in.name, in.step.at); w != "" {
 			v.waits = append(v.waits, w)
 		}
@@ -643,6 +686,11 @@ func (conf *Config) reconcileView(in reconcileInputs, told map[string]toldStamp,
 	switch {
 	case len(untaken) > 0:
 		v.next = &untaken[0]
+		if v.next.ready != nil && len(v.waits) == 0 {
+			if w := v.next.ready(conf, in.name); w != "" {
+				v.waits = append(v.waits, w)
+			}
+		}
 		if v.next.keys {
 			v.rollover = conf.emergencyRollover(in, told, excused)
 		}
@@ -658,8 +706,10 @@ func (conf *Config) reconcileView(in reconcileInputs, told map[string]toldStamp,
 // no-role-timeout from the step (design 4, plan S12's item 9): a newcomer
 // whose agent is not running holds nothing up. A leaving
 // member (voting under N and not under V, or one whose removal is under
-// way) has no role too, and once it has not confirmed a step for
-// leaving-timeout it is excused (design 3.2). The auditor is not waited
+// way) has no role too: a step waits for it, while it is heard, until it has
+// not confirmed a step for leaving-timeout, and it is then excused (design
+// 3.2; S17b's reading of S12's item 5). One that leaves servers= and stays in
+// signers= is a voting member, waited for as one. The auditor is not waited
 // for. A member holds the step when its first-hand stamp tells the active
 // serial, the step by number and digest, and that both its parts hold it.
 func (conf *Config) stepWaits(in reconcileInputs, told map[string]toldStamp, votersN, votersV []string, removals []Removal, excused map[string]bool, now time.Time, v *reconcileView) {
@@ -690,7 +740,9 @@ func (conf *Config) stepWaits(in reconcileInputs, told map[string]toldStamp, vot
 		}
 	}
 	for _, r := range removals {
-		leaving[canonicalName(r.Identity)] = true
+		if !isAmong(votersV, AgentId(r.Identity)) {
+			leaving[canonicalName(r.Identity)] = true
+		}
 	}
 	var noRoleIDs []string
 	for _, rec := range in.active.Reading.Records {
@@ -730,13 +782,8 @@ func (conf *Config) stepWaits(in reconcileInputs, told map[string]toldStamp, vot
 			v.excuse = append(v.excuse, id)
 			continue
 		}
-		fresh := heard && now.Sub(st.heard) <= timeout
-		switch {
-		case !fresh:
-		case now.Sub(in.step.at) < noRole:
+		if heard && now.Sub(st.heard) <= timeout {
 			v.waits = append(v.waits, id+" (leaving)")
-		default:
-			v.timedOut = append(v.timedOut, id)
 		}
 	}
 	for _, id := range noRoleIDs {
@@ -807,6 +854,7 @@ func (conf *Config) takeStep(in reconcileInputs, st plannedStep, of int) {
 		lg.Error("the step could not be kept", "zone", in.name, "step", next.Number, "err", err)
 		return
 	}
+	conf.InternalMp.reconciles.stepTaken(canonicalName(in.name))
 	lg.Info("transition step sent", "zone", in.name, "step", next.Number, "what", st.what)
 	if mpzd, ok := Zones.Get(in.name); ok && mpzd != nil {
 		conf.onSetsChanged(mpzd, true)
@@ -881,19 +929,43 @@ func (conf *Config) followStep(in reconcileInputs, told map[string]toldStamp) {
 // transitionDone ends the zone's transition here (design 3.3): the store
 // drops the from-serial, the step and the removals; the parts are handed
 // the active serial's sets at rest; the freeze's end releases what the zone
-// kept (onFreeze); and a newer serial that waited is judged and agreed at
-// the next turn.
+// kept (onFreeze); each agent sweeps what V does not entitle (design 3.3);
+// and a newer serial that waited is judged and agreed at the next turn.
 func (conf *Config) transitionDone(zone string, serial uint32) {
+	reading := conf.InternalMp.Instructions.activeReading(zone)
 	if err := conf.InternalMp.Instructions.Done(zone); err != nil {
 		lg.Error("the transition could not be marked done", "zone", zone, "serial", serial, "err", err)
 		return
 	}
 	conf.InternalMp.reconciles.forget(canonicalName(zone))
 	lg.Info("transition done", "zone", zone, "serial", serial)
+	if conf.safeToRemove(zone) {
+		lg.Info("safe to remove", "zone", zone, "serial", serial)
+	}
 	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil {
 		conf.onSetsChanged(mpzd, true)
 	}
+	// by V, also when Done just followed a serial not built (sweep), and before
+	// a newer serial that waited is agreed on, at the next turn
+	askSweep(conf, zone, reading)
 	conf.askThaw(zone)
+}
+
+// waitsText is what a step waits for, as the status says it: whom, then what
+// a runner's own waits say themselves.
+func waitsText(waits []string) string {
+	var whom, own []string
+	for _, w := range waits {
+		if strings.HasPrefix(w, "until ") || strings.HasPrefix(w, "for the ") {
+			own = append(own, w)
+		} else {
+			whom = append(whom, w)
+		}
+	}
+	if len(whom) > 0 {
+		own = slices.Insert(own, 0, "for "+strings.Join(whom, ", "))
+	}
+	return strings.Join(own, ", ")
 }
 
 // reconcileLine is the zone's reconciliation as the status shows it: the
@@ -914,6 +986,8 @@ func (conf *Config) reconcileLine(zone string, now time.Time) string {
 		line = head + ": waiting for the leader's step"
 	case in.step.Number == 0:
 		line = head + ": step 0 (the sets held)"
+	case strings.HasPrefix(in.step.What, "removing "):
+		line = head + ": " + in.step.What
 	default:
 		line = fmt.Sprintf("%s: step %d of %d", head, in.step.Number, in.step.Of)
 		if in.step.What != "" {
@@ -930,7 +1004,7 @@ func (conf *Config) reconcileLine(zone string, now time.Time) string {
 		case v.adopt != nil:
 			line += fmt.Sprintf(", taking step %d from %s", v.adopt.Step.Number, v.adopt.identity)
 		case len(v.waits) > 0:
-			line += ", waiting for " + strings.Join(v.waits, ", ")
+			line += ", waiting " + waitsText(v.waits)
 		case v.rollover != "":
 			line += ", the next step waits for an emergency rollover at " + v.rollover
 		}

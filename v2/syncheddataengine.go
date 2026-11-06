@@ -185,6 +185,15 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			// this goroutine: the test reads the keystore and asks the
 			// resolver
 			conf.retestKeyHoldsInBackground(ctx)
+			// the leader's rolls of a zone's SIG(0) key: one waiting for
+			// its members, and one whose retry is due (plan S17a)
+			conf.rollsDue(ctx)
+			// a KEY held under another name than the leader's, until the
+			// combiner has dropped it (plan S17a)
+			conf.retryKEYPurges(ctx, zdr)
+			// a sweep with a purge the combiner could not be asked for
+			// (plan S17b)
+			conf.retrySweeps(zdr)
 			// what a zone kept, released when its freeze ended and the
 			// engine's queue had no room, or a restart came between
 			conf.releaseUnfrozen(ctx, zdr)
@@ -587,6 +596,19 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					sdcmd.Response <- &r
 				}
 
+			case "plan-withdraw":
+				// a removal's withdrawal, and whether it is done (plan S17b)
+				if sdcmd.Withdraw != nil {
+					conf.planWithdraw(zdr, sdcmd.Zone, sdcmd.Withdraw)
+				}
+
+			case "sweep":
+				// the zone's transition is done (design 3.3, plan S17b)
+				conf.sweep(zdr, sdcmd.Zone, sdcmd.Sweep)
+				if sdcmd.Response != nil {
+					sdcmd.Response <- &SynchedDataCmdResponse{Msg: "swept"}
+				}
+
 			case "instr-activated":
 				// the zone's active serial changed, became known or went:
 				// what it kept of others goes on, and what waits for the
@@ -729,6 +751,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				// names its records as ignored (#288).
 				if detail.Status == "SUCCESS" || detail.Status == "ok" {
 					zdr.noteCombinerConfirmed(detail.Zone, detail.DistributionID, time.Now())
+					conf.leaderKEYConfirmed(ctx, zdr, detail.Zone, detail.DistributionID)
 				} else {
 					all, ignored := combinerIgnoredTypes(detail)
 					zdr.noteCombinerFailed(detail.Zone, detail.DistributionID, all, ignored)
@@ -1661,9 +1684,20 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 		// the first sign of a new zone key: the leader's replace
 		// reaches every member. The key is checked (step 7b); the
 		// rounds run on the tracker's goroutine.
-		if err == nil && change && synchedDataUpdate.Update != nil &&
+		if err == nil && synchedDataUpdate.Update != nil &&
 			slices.Contains(updateRRtypes(synchedDataUpdate.Update), dns.TypeKEY) {
-			conf.InternalMp.CatchUp.keyCheck(synchedDataUpdate.Zone)
+			if change {
+				conf.InternalMp.CatchUp.keyCheck(synchedDataUpdate.Zone)
+			}
+			// the leader's KEY, and no other (plan S17a), here when the
+			// leader's publication changed nothing; what came here is
+			// the leader's (refuseCsyncNotFromLeader). A change is
+			// handed to the combiner below, and a drop waits for the
+			// combiner's final word on it (leaderKEYConfirmed): one
+			// asked now would come ahead of the new KEY
+			if !change {
+				conf.dropOtherKEYs(ctx, zdr, synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
+			}
 		}
 		// The operations as they arrived, stale replaces too:
 		// the confirmation to the sender names what the repo

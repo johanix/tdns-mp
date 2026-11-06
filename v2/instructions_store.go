@@ -92,6 +92,13 @@ type zoneSerials struct {
 	StepWhat string          `json:"step_what,omitempty"`
 	Taken    []string        `json:"taken,omitempty"`
 	StepAt   time.Time       `json:"step_at,omitzero"`
+	// RollOwed is since when the zone's SIG(0) key roll is owed, and
+	// RollDone when one was last done, as this agent has them or has heard
+	// a voting member tell them (plan S17b). An owed roll outlives the
+	// removal and the lead until it is done: the next leader owes it (the
+	// project owner, 2026-11-05).
+	RollOwed time.Time `json:"roll_owed,omitzero"`
+	RollDone time.Time `json:"roll_done,omitzero"`
 	// Pending: a transition to the active serial may be under way, and this
 	// agent holds no step's sets. It moved straight to the active serial
 	// (S7) or knew it by another's word (S9): it hands its parts nothing
@@ -858,6 +865,20 @@ func (s *InstructionStore) transition(zone string) (from, to *Instructions, step
 	return from, z.Active.Reading, z.Step
 }
 
+// lastFromReading is the reading of the zone's last thaw's from-serial, kept
+// after "done" until the next thaw; nil with none.
+func (s *InstructionStore) lastFromReading(zone string) *Instructions {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, z := s.zoneLocked(zone); z != nil && z.LastFrom != nil {
+		return z.LastFrom.Reading
+	}
+	return nil
+}
+
 // removal is the zone's removal under way of the provider with the label or
 // the identity, if the store holds one (S12, S17b fill them): a provider
 // whose removal is under way is resolved through its stored identity
@@ -880,7 +901,7 @@ func (s *InstructionStore) removal(zone, label, identity string) (Removal, bool)
 
 // removalIdentities are the stored identities of the zone's providers whose
 // removal is under way, the zone named in any case (S12, S17b fill them),
-// each folded as a DNS name.
+// each folded as a DNS name. An empty one is no name, not the root.
 func (s *InstructionStore) removalIdentities(zone string) []string {
 	if s == nil {
 		return nil
@@ -893,7 +914,9 @@ func (s *InstructionStore) removalIdentities(zone string) []string {
 	}
 	var out []string
 	for _, r := range z.Removals {
-		out = append(out, core.CanonicalizeName(dns.Fqdn(r.Identity)))
+		if id := canonicalName(r.Identity); id != "" {
+			out = append(out, id)
+		}
 	}
 	return out
 }
@@ -1104,6 +1127,9 @@ func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack b
 		if conf.csyncAwaited(mpzd.ZoneName) {
 			conf.askCsyncProgress(nil, ZoneName(mpzd.ZoneName))
 		}
+		// and a DNSKEY distribution waiting for a leaver the sets no longer
+		// name a key confirmer goes on
+		conf.lookAgainAtDnskeyWaits(ZoneName(mpzd.ZoneName))
 	}
 	givenBack = conf.followParentSyncParam(mpzd)
 	// A refresh runs the give-back itself, after PostRefresh; a change of
@@ -1119,4 +1145,49 @@ func (conf *Config) onSetsChanged(mpzd *MPZoneData, recompute bool) (givenBack b
 	}
 	conf.handOverToParts(mpzd.ZoneName) // the agent's combiner and signer act by the sets too (S10, S11)
 	return givenBack
+}
+
+// rollDebt is since when the zone's roll is owed here, and when one was last
+// done; zero times for none.
+func (s *InstructionStore) rollDebt(zone string) (owed, done time.Time) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, z := s.zoneLocked(dns.Fqdn(zone)); z != nil {
+		return z.RollOwed, z.RollDone
+	}
+	return
+}
+
+// noteRollDebt keeps a roll owed since owed and one done at done, as this
+// agent comes to know them: a roll done at or after the roll owed ends it, and
+// a roll owed counts only after the last one done, so an older telling does not
+// raise a roll done again. A zero time tells nothing. Written only when it
+// changes something.
+func (s *InstructionStore) noteRollDebt(zone string, owed, done time.Time) error {
+	if s == nil {
+		return nil
+	}
+	merge := func(curOwed, curDone time.Time) (time.Time, time.Time) {
+		if done.After(curDone) {
+			curDone = done
+		}
+		if curOwed.IsZero() {
+			curOwed = owed
+		}
+		if !curOwed.IsZero() && !curDone.Before(curOwed) {
+			curOwed = time.Time{}
+		}
+		return curOwed, curDone
+	}
+	curOwed, curDone := s.rollDebt(zone)
+	if o, d := merge(curOwed, curDone); o.Equal(curOwed) && d.Equal(curDone) {
+		return nil
+	}
+	return s.update(dns.Fqdn(zone), func(z *zoneSerials) error {
+		z.RollOwed, z.RollDone = merge(z.RollOwed, z.RollDone)
+		return nil
+	})
 }

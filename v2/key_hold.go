@@ -39,6 +39,18 @@ import (
 // poll of the zone's key ends (keyPollEnded), when the key is retired to one,
 // and from the 30 s ticker (retestKeyHolds).
 
+// trustWord is a key the parent said it trusts, and the lead that heard it.
+type trustWord struct {
+	keyid uint16
+	lead  uint64
+}
+
+// keyHoldLogged is the hold last logged for a zone: when, and its reason.
+type keyHoldLogged struct {
+	at  time.Time
+	why string
+}
+
 // keyPollBook is the per-zone state of the hold, under its own lock: a leaf,
 // taken by nothing that holds another lock of this package's.
 type keyPollBook struct {
@@ -61,8 +73,15 @@ type keyPollBook struct {
 	// lost: the zone publishes a KEY that no agent asked holds, by its key
 	// id, as the leader's last round found (step 7b); shown as LOST.
 	lost map[ZoneName]uint16
-	// logged: when the hold was last logged for the zone (once an hour).
-	logged map[ZoneName]time.Time
+	// logged: the hold last logged for the zone (once an hour, and when its
+	// reason changes).
+	logged map[ZoneName]keyHoldLogged
+	// trustHeard: the key this agent last heard the parent say it trusts, by
+	// its own poll, roll or inquiry, and the lead it heard it in (LeadStart).
+	// With several KEYs at the apex only such a word lets the sync sign.
+	trustHeard map[ZoneName]trustWord
+	// trustAsked: when keyHold last asked the parent's KeyState itself.
+	trustAsked map[ZoneName]time.Time
 	// retesting: a backstop pass runs (retestKeyHoldsInBackground).
 	retesting atomic.Bool
 	// goroutines: the polls and the backstop passes, each to its end, the
@@ -85,7 +104,9 @@ func (b *keyPollBook) init() {
 		b.unpublished = map[ZoneName]bool{}
 		b.ended = map[ZoneName]keyPollEnd{}
 		b.owed = map[ZoneName]bool{}
-		b.logged = map[ZoneName]time.Time{}
+		b.logged = map[ZoneName]keyHoldLogged{}
+		b.trustHeard = map[ZoneName]trustWord{}
+		b.trustAsked = map[ZoneName]time.Time{}
 		b.offered = map[ZoneName]time.Time{}
 		b.lost = map[ZoneName]uint16{}
 	}
@@ -280,6 +301,9 @@ func (conf *Config) keyHold(ctx context.Context, zone ZoneName) (uses bool, why 
 		return true, "not held"
 	}
 	zk, err := readZoneKey(kdb, zone)
+	if err == nil && zk.several() {
+		return true, conf.severalKEYsHold(ctx, kdb, zone, zk)
+	}
 	if err != nil || zk.held == nil {
 		return true, "not held"
 	}
@@ -297,6 +321,153 @@ func (conf *Config) keyHold(ctx context.Context, zone ZoneName) (uses bool, why 
 		return true, "the parent has not taken the key"
 	}
 	return true, ""
+}
+
+// severalKEYsHold is keyHold's reason while the apex carries several KEYs, or
+// "" when the sync signs all the same. The project owner's rule (2026-11-05):
+// "parent trusts a KEY that we hold the private key for, then just sign the
+// update and get on with it". This agent's one active key signs when the
+// parent's word that it trusts it was heard in this lead, by this agent's own
+// poll, roll or inquiry; without that word the parent is asked here, at most
+// every keyTrustAskEvery. A recorded parent_state is not enough: it is what
+// was heard last, and a roll's delete leaves it stale at a member. Several KEYs
+// are then a warning, once an hour.
+func (conf *Config) severalKEYsHold(ctx context.Context, kdb *tdns.KeyDB, zone ZoneName, zk *zoneKey) string {
+	const several = "the zone publishes several KEYs"
+	if len(zk.active) != 1 {
+		return several
+	}
+	keyid := zk.active[0].keyid
+	if !conf.trustHeardInLead(zone, keyid) && (!conf.trustAskDue(zone) || !conf.askParentTrust(ctx, kdb, zone, keyid)) {
+		return fmt.Sprintf("%s, and the parent's word that it trusts key %d is not heard in this lead", several, keyid)
+	}
+	if conf.InternalMp.keyLogs.due("several signs " + string(zone)) {
+		lgAgent.Warn("the zone publishes several SIG(0) KEYs; the sync signs with this agent's key, which the parent trusts",
+			"zone", zone, "keyid", keyid, "keyids", keyTags(zk.published))
+	}
+	return ""
+}
+
+// keyTrustAskEvery paces keyHold's own KeyState inquiries for a zone.
+const keyTrustAskEvery = 30 * time.Second
+
+// trustAskDue books a KeyState inquiry of keyHold's for the zone, unless one
+// went within keyTrustAskEvery.
+func (conf *Config) trustAskDue(zone ZoneName) bool {
+	b := &conf.InternalMp.keyPolls
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.init()
+	if time.Since(b.trustAsked[canonZone(zone)]) < keyTrustAskEvery {
+		return false
+	}
+	b.trustAsked[canonZone(zone)] = time.Now()
+	return true
+}
+
+// noteTrustHeard records the parent's word that it trusts keyid, heard by this
+// agent in its lead lead (LeadStart). Outside a lead nothing is recorded.
+func (conf *Config) noteTrustHeard(zone ZoneName, keyid uint16, lead uint64) {
+	if lead == 0 {
+		return
+	}
+	b := &conf.InternalMp.keyPolls
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.init()
+	b.trustHeard[canonZone(zone)] = trustWord{keyid: keyid, lead: lead}
+}
+
+// trustHeardInLead: the parent's word that it trusts keyid was heard in this
+// agent's present lead of the zone.
+func (conf *Config) trustHeardInLead(zone ZoneName, keyid uint16) bool {
+	lem := conf.InternalMp.LeaderElectionManager
+	if lem == nil {
+		return false
+	}
+	lead := lem.LeadStart(zone)
+	b := &conf.InternalMp.keyPolls
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.init()
+	w, ok := b.trustHeard[canonZone(zone)]
+	return ok && lead != 0 && w.lead == lead && w.keyid == keyid
+}
+
+// askParentTrust asks the parent's KeyState for keyid now (no bootstrap),
+// records the answer as tdns's poll does (parent_state), and reports whether
+// the parent trusts the key.
+func (conf *Config) askParentTrust(ctx context.Context, kdb *tdns.KeyDB, zone ZoneName, keyid uint16) bool {
+	var lead uint64
+	if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
+		lead = lem.LeadStart(zone)
+	}
+	state, err := conf.rollParentOf().keyState(ctx, zone, keyid)
+	if err != nil {
+		lgAgent.Warn("the parent's KeyState for the zone's SIG(0) key could not be asked", "zone", zone, "keyid", keyid, "err", err)
+		return false
+	}
+	tdns.UpdateParentState(kdb, string(zone), keyid, state)
+	if state != edns0.KeyStateTrusted {
+		// the word of this lead that it trusts the key is ended by this one
+		conf.forgetTrustHeard(zone, keyid)
+		return false
+	}
+	conf.noteTrustHeard(zone, keyid, lead)
+	return true
+}
+
+// forgetTrustHeard forgets the parent's word that it trusts keyid: the parent
+// has since said otherwise.
+func (conf *Config) forgetTrustHeard(zone ZoneName, keyid uint16) {
+	b := &conf.InternalMp.keyPolls
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.init()
+	if w, ok := b.trustHeard[canonZone(zone)]; ok && w.keyid == keyid {
+		delete(b.trustHeard, canonZone(zone))
+	}
+}
+
+// trustBeforeSigning asks the parent's KeyState, right before the leader's
+// sync is sent, for the key it signs with while the apex carries several KEYs,
+// and refuses the sync unless the parent trusts it now. tdns uploads a key the
+// parent answers BADKEY for as a bootstrap, and the parent checks that against
+// the apex, which may still show a key the parent has deleted (the project
+// owner's ruling, 2026-11-05). What is left is the time between the inquiry
+// and the send.
+func (conf *Config) trustBeforeSigning(ctx context.Context, ds tdns.DelegationSyncRequest) error {
+	if !mpLeaderSync(conf, ds) {
+		return nil
+	}
+	zone := ZoneName(ds.ZoneName)
+	kdb := conf.zoneKeyDB(zone)
+	if kdb == nil || !conf.zoneUsesKey(ctx, zone) {
+		return nil
+	}
+	zk, err := readZoneKey(kdb, zone)
+	if err != nil || !zk.several() || len(zk.active) != 1 {
+		return nil
+	}
+	if keyid := zk.active[0].keyid; !conf.askParentTrust(ctx, kdb, zone, keyid) {
+		return fmt.Errorf("the zone publishes several KEYs and the parent does not trust key %d now: nothing is sent, so no bootstrap of it starts", keyid)
+	}
+	return nil
+}
+
+// parentTrustsActive: keyid is an active key of the zone's whose recorded
+// parent_state is Trusted. It reads the keystore only.
+func parentTrustsActive(kdb *tdns.KeyDB, zone ZoneName, keyid uint16) bool {
+	active, err := activeSig0Rows(kdb, zone)
+	if err != nil {
+		return false
+	}
+	for _, r := range active {
+		if r.keyid == keyid {
+			return r.parentState == edns0.KeyStateTrusted
+		}
+	}
+	return false
 }
 
 // keyPending: this agent leads the zone, the zone uses a key, and this agent
@@ -347,13 +518,32 @@ func (conf *Config) rolloverInZone(zone string) bool {
 // under way in the zone waits for the parent to trust the key (keyPending):
 // the rollover's DS sync waits for the key, so holding its offers would
 // leave the rollover and the thaw waiting for each other (design 3.1, 6;
-// plan S14).
+// plan S14). Nor as a step of the reconciliation (design 6): a step's own sync
+// waits for the key too (holdForZoneKey comes before the freeze), so a leader
+// elected during a removal would wait for the step, and the step for it.
 func (conf *Config) offerHeld(ctx context.Context, zone ZoneName) (held bool, why string) {
-	if len(conf.zoneFrozen(string(zone))) > 0 && conf.rolloverInZone(string(zone)) && conf.keyPending(ctx, zone) {
-		lgAgent.Info("the zone's SIG(0) key is offered during the transition: a rollover under way waits for the parent to trust it", "zone", zone)
-		return false, ""
+	if len(conf.zoneFrozen(string(zone))) > 0 {
+		if conf.rolloverInZone(string(zone)) && conf.keyPending(ctx, zone) {
+			lgAgent.Info("the zone's SIG(0) key is offered during the transition: a rollover under way waits for the parent to trust it", "zone", zone)
+			return false, ""
+		}
+		if conf.InternalMp.reconciles.asksSync(canonicalName(string(zone))) {
+			lgAgent.Info("the zone's SIG(0) key is published and offered during the transition: a step's own sync waits for it", "zone", zone)
+			return false, ""
+		}
 	}
 	return conf.syncHeld(string(zone), syncOther)
+}
+
+// keyToPublish: this agent leads the zone, and its key's publication in this
+// lead failed or the freeze held it. The key rounds publish it when they may
+// (reofferZoneKey), also for a key the parent trusts, which nothing else would.
+func (conf *Config) keyToPublish(zone ZoneName) bool {
+	if lem := conf.InternalMp.LeaderElectionManager; lem == nil || !lem.IsLeader(zone) {
+		return false
+	}
+	_, unpublished, _ := conf.InternalMp.keyPolls.state(zone)
+	return unpublished
 }
 
 // zoneKeyLine is the status of the zone's SIG(0) key at the leader, for
@@ -368,6 +558,10 @@ func (conf *Config) zoneKeyLine(ctx context.Context, zone ZoneName) string {
 	kdb := conf.zoneKeyDB(zone)
 	if kdb == nil {
 		return ""
+	}
+	// a roll under way says how far it has come (plan S17a)
+	if line := conf.rollLine(kdb, zone); line != "" {
+		return line
 	}
 	zk, err := readZoneKey(kdb, zone)
 	if err != nil {
@@ -394,8 +588,8 @@ func (conf *Config) zoneKeyLine(ctx context.Context, zone ZoneName) string {
 
 // holdForZoneKey holds the leader's sync of a multi-provider zone while the
 // zone's key is not held, not the one tdns signs with, or still being
-// bootstrapped: it marks the sync owed for the key, logs why (the first time
-// and then once an hour), and reports that nothing is to be sent. The
+// bootstrapped: it marks the sync owed for the key, logs why (when the reason
+// is new, and then once an hour), and reports that nothing is to be sent. The
 // syncher calls it after the hold for the catch-up, in both arms; the
 // explicit arm answers its caller at once. Never waits.
 func (conf *Config) holdForZoneKey(ctx context.Context, ds tdns.DelegationSyncRequest) (held bool, why string) {
@@ -424,9 +618,9 @@ func (conf *Config) holdForZoneKey(ctx context.Context, ds tdns.DelegationSyncRe
 	b.init()
 	last := b.logged[canonZone(zone)]
 	now := time.Now()
-	logIt := now.Sub(last) >= time.Hour
+	logIt := last.why != why || now.Sub(last.at) >= time.Hour
 	if logIt {
-		b.logged[canonZone(zone)] = now
+		b.logged[canonZone(zone)] = keyHoldLogged{at: now, why: why}
 	}
 	b.mu.Unlock()
 	if logIt {
@@ -549,8 +743,16 @@ func (conf *Config) launchKeyPoll(ctx context.Context, tk *keyPollToken, zone Zo
 			}
 			if left := b.pollEnded(zone, keyid, leadStart, finished); left == 0 {
 				conf.releaseKeyHold(ctx, zone)
+				// once the parent trusts the zone's key, the retired keys
+				// it may still trust are deleted there (S17a)
+				conf.sweepRetiredKeys(ctx, zone)
 			}
 		}()
 		held = conf.ParentSyncAfterKeyPublication(ctx, zone, keyName, keyid, algorithm)
+		// the parent's word on the key, heard by this poll, in the lead it
+		// started in
+		if kdb := conf.zoneKeyDB(zone); !held && kdb != nil && parentTrustsActive(kdb, zone, keyid) {
+			conf.noteTrustHeard(zone, keyid, leadStart)
+		}
 	}()
 }

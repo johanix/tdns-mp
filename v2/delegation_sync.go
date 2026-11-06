@@ -127,7 +127,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				// Nor while the zone is frozen (plan S6), unless the DS set
 				// is what differs: owed, and asked for when the transition
 				// is done
-				if held, why := conf.syncHeld(ds.ZoneName, syncCauseOf(ds.SyncStatus)); held {
+				if held, why := conf.syncHeld(ds.ZoneName, conf.syncCauseFor(ds.ZoneName, ds.SyncStatus)); held {
 					lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", ds.ZoneName, "phase", why)
 					continue
 				}
@@ -298,7 +298,7 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				// delegation by the sets the parts hold. Any other is owed
 				// until the transition is done. Asked after the analysis,
 				// which only reads, since it tells the two apart.
-				if held, why := conf.syncHeld(ds.ZoneName, syncCauseOf(syncstate)); held {
+				if held, why := conf.syncHeld(ds.ZoneName, conf.syncCauseFor(ds.ZoneName, syncstate)); held {
 					lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", ds.ZoneName, "phase", why)
 					syncstate.Msg = fmt.Sprintf("the sync with the parent is held during the transition (%s); it is sent when the transition is done", why)
 					if ds.Response != nil {
@@ -420,14 +420,19 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 	}
 	// No CSYNC is made while the zone is frozen (plan S6): the leader's
 	// CSYNC would be owed, and the sync that passes, a rollover's DS sync,
-	// must not wait for its confirmations
+	// must not wait for its confirmations. A step's own sync makes one: a
+	// parent that takes NOTIFY only follows it (S17b)
 	var csyncErr error
-	if len(conf.zoneFrozen(ds.ZoneName)) == 0 {
+	if len(conf.zoneFrozen(ds.ZoneName)) == 0 || conf.InternalMp.reconciles.asksSync(canonicalName(ds.ZoneName)) {
 		csyncErr = conf.delegationCsyncStep(runCtx, ds.ZoneName, syncstate)
 	}
 	// Room for more than the two NOTIFYs a sync sends (CSYNC, CDS): the sync
 	// must not wait for a reader that comes only when it has returned.
 	taken := make(chan tdns.NotifyRequest, 8)
+	// with several KEYs at the apex, only a key the parent trusts now signs
+	if terr := conf.trustBeforeSigning(runCtx, ds); terr != nil {
+		return "", 0, tdns.UpdateResult{}, false, terr
+	}
 	msg, rcode, ur, err = ds.ZoneData.SyncZoneDelegation(runCtx, hdb.KeyDB, taken, syncstate, imr)
 	var notifies []tdns.NotifyRequest
 	for len(taken) > 0 {

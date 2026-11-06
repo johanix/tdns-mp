@@ -148,10 +148,13 @@ type MultiProviderConf struct {
 	// NoRoleTimeout: how long a step, a distribution and the leader's
 	// NOTIFY for its CSYNC wait for a member with no role, on its way in or
 	// out, before they go on without it (design 4, plan S12). Zero or
-	// absent: 900.
+	// absent: 900. RollRetry: how long after a failed phase of the
+	// leader's roll of the zone's SIG(0) key it is tried again (plan
+	// S17a). Zero or absent: 900.
 	Transitions struct {
 		LeavingTimeout int `yaml:"leaving-timeout" mapstructure:"leaving-timeout"`
 		NoRoleTimeout  int `yaml:"no-role-timeout" mapstructure:"no-role-timeout"`
+		RollRetry      int `yaml:"roll-retry" mapstructure:"roll-retry"`
 	} `yaml:"transitions" mapstructure:"transitions"`
 	Api LocalAgentApiConf
 	Dns LocalAgentDnsConf

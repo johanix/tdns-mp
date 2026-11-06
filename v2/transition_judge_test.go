@@ -116,8 +116,8 @@ func TestTheJudgeIsAFunctionOfTwoSerials(t *testing.T) {
 
 func TestAMemberThatMovesStraightIsJudgedOnTheThawsPair(t *testing.T) {
 	forty := jAt(t, 40, jServers3, jAlpha, jBeta, jCharlie)
-	fortyOne := jAt(t, 41, jServers2, jAlpha, jBeta, jCharlie) // takes charlie's role
-	fortyTwo := jAt(t, 42, jServers2+` suffix="mp"`, jAlpha, jBeta, jCharlie)
+	fortyOne := jAt(t, 41, jServers2, jAlpha, jBeta) // removes charlie's record with its role
+	fortyTwo := jAt(t, 42, jServers2+` suffix="mp"`, jAlpha, jBeta)
 	s := newStore(t)
 	noteKnown(t, s, storeZone, forty)
 	enforced(t, s, storeZone)
@@ -172,9 +172,7 @@ func TestASignerMovedToServersOnlyIsRefused(t *testing.T) {
 func TestASignerLeavingBothListsWithItsRecordKeptIsAgreed(t *testing.T) {
 	from := jAt(t, 41, `servers="alpha,beta,charlie" signers="alpha,charlie"`, jAlpha, jBeta, jCharlie)
 	to := jAt(t, 42, jServers2, jAlpha, jBeta, jCharlie)
-	// nothing refuses it but that its steps are not built (S17b)
-	wantRefusals(t, "before S17b", judgeTransition(from, to), Refusal{RefusedNotBuilt, "takes a role from agent.charlie.example.: not built yet"})
-	wantRefusals(t, "once S17b has built it", judge(from, to, builtKinds|kindRolesTaken, carriedKinds))
+	wantRefusals(t, "a removal, its steps built (S17b)", judgeTransition(from, to))
 }
 
 func TestEmptyingSignersIsRefused(t *testing.T) {
@@ -227,12 +225,15 @@ func TestAKindWithoutItsStepsIsRefused(t *testing.T) {
 		{jServers2 + ` pubkey`, "changes pubkey"},
 		{jServers2 + ` pubcds`, "changes pubcds"},
 		{jServers3, "gives agent.charlie.example. a server role"},
-		{`servers="alpha" signers="alpha"`, "takes a role from agent.beta.example."},
 	} {
 		to := jAt(t, 42, c.param, jAlpha, jBeta, jCharlie)
 		wantRefusals(t, c.reason, judgeTransition(from, to), Refusal{RefusedNotBuilt, c.reason + ": not built yet"})
 		wantRefusals(t, c.reason+", once built", judge(from, to, allKinds, allKinds))
 	}
+	// a role taken away: its steps are built (S17b)
+	wantRefusals(t, "a role taken", judgeTransition(from, jAt(t, 42, `servers="alpha" signers="alpha"`, jAlpha, jBeta, jCharlie)))
+	wantRefusals(t, "a role taken, not built", judge(from, jAt(t, 42, `servers="alpha" signers="alpha"`, jAlpha, jBeta, jCharlie), 0, allKinds),
+		Refusal{RefusedNotBuilt, "takes a role from agent.beta.example.: not built yet"})
 	// the auditors and the suffix: nothing to carry out (design 5.6)
 	wantRefusals(t, "auditors and suffix", judgeTransition(from, jAt(t, 42, jServers2+` auditors="charlie" suffix="mp"`, jAlpha, jBeta, jCharlie)))
 }
@@ -297,6 +298,28 @@ func TestARefusedSerialIsJudgedAgainWhenTheActiveSerialChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantRefusals(t, "43 against 42", heldAt(t, s, 43).Refused, Refusal{RefusedNotBuilt, "gives agent.charlie.example. a server role: not built yet"})
+}
+
+// A kind not built stays refused until its step lands: the zone stays at its
+// active serial, frozen for nothing, and the owner's way out is a higher serial
+// without it. pubkey's step lands last, with S21, which takes this test away.
+func TestANotBuiltChangeStaysRefused(t *testing.T) {
+	seven := jAt(t, 7, jServers2, jAlpha, jBeta)
+	s := newStore(t)
+	noteKnown(t, s, storeZone, seven)
+	enforced(t, s, storeZone)
+	s.Note(storeZone, jAt(t, 8, jServers2+` pubkey`, jAlpha, jBeta), nil)
+	st := status(t, s, storeZone)
+	if st.Active == nil || st.Active.Serial != 7 || st.Agreeing != nil || len(s.frozen(storeZone)) != 0 {
+		t.Fatalf("a kind not built: %s", st.Line())
+	}
+	if len(st.Refused) == 0 || st.Refused[0].Code != RefusedNotBuilt {
+		t.Errorf("the refusal: %v", st.Refused)
+	}
+	s.Note(storeZone, jAt(t, 9, jServers2+` suffix="mp"`, jAlpha, jBeta), nil)
+	if st := status(t, s, storeZone); st.Active.Serial != 7 || st.Agreeing == nil || st.Agreeing.Serial != 9 {
+		t.Errorf("a higher serial without it is not agreed on: %s", st.Line())
+	}
 }
 
 func TestAnEditWithoutARaisedSerialIsAnOwnerError(t *testing.T) {

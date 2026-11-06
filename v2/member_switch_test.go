@@ -134,6 +134,21 @@ func TestMembershipIsReadFromTheActiveInstructions(t *testing.T) {
 	}
 }
 
+// A removal stored with no identity names nobody: an empty name is no name,
+// and does not become the root as a member.
+func TestARemovalWithNoIdentityAddsNoMember(t *testing.T) {
+	mpzd := instrTestZone(t, "noidentity.s15.example.", s15Records(7)...)
+	zone := ZoneName(mpzd.ZoneName)
+	s := newStore(t)
+	withStore(t, s)
+	activeAs(t, s, mpzd.ZoneName, readOf(t, s15Records(8)...))
+	want := ParticipantsForZone(zone)
+	keepRemoval(t, s, mpzd.ZoneName, "eps", "")
+	if got := ParticipantsForZone(zone); !slices.Equal(got, want) {
+		t.Errorf("a removal with no identity made the members %q, from %q", got, want)
+	}
+}
+
 // A provider whose removal is under way stays a member, with no role, until
 // its removal is done (design 3.3), whatever its record says: OFF, or no
 // record at all.
@@ -250,6 +265,25 @@ func TestADistributionWaitsForTheAuditor(t *testing.T) {
 	slices.Sort(got)
 	if want := []string{acBeta, s15Delta, acGamma}; !slices.Equal(got, want) {
 		t.Errorf("the recipients %v, want %v", got, want)
+	}
+}
+
+// An auditor is waited for up to no-role-timeout too (design 4, amended
+// 2026-11-02): for the zone's CSYNC and for the new KEY of a roll
+// (noRoleOnly).
+func TestAnAuditorIsWaitedForWithTheTimeOut(t *testing.T) {
+	withStore(t, nil)
+	mpzd := instrTestZone(t, "auditor.timeout.s15.example.", s15Records(7)...)
+	zone := ZoneName(mpzd.ZoneName)
+	if !memberWithTimeOut(zone, acGamma) || !memberWithTimeOut(zone, s15Delta) || memberWithTimeOut(zone, acBeta) {
+		t.Fatal("those with a time-out: want gamma, the auditor, and delta, with no role")
+	}
+	now, timeout := time.Now(), 10*time.Minute
+	if only, wait := noRoleOnly(zone, []string{acGamma}, now.Add(-4*time.Minute), now, timeout); !only || wait != 6*time.Minute {
+		t.Errorf("the auditor alone awaited: only %v, wait %s; want true and 6m0s", only, wait)
+	}
+	if only, _ := noRoleOnly(zone, []string{acGamma, acBeta}, now, now, timeout); only {
+		t.Error("a voting member awaited beside the auditor: the wait has a time-out")
 	}
 }
 

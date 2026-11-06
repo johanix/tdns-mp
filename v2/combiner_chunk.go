@@ -348,10 +348,11 @@ func (mpzd *MPZoneData) checkMPauthorization() error {
 // that stops voting stays (decision 37). One exception: while its provider
 // is out of signers= and the step's sets keep it signing (plan S13), the
 // combiner takes its own agent's operations (local, one of its configured
-// agents), so that what it serves does not go stale. Nil when the origin
-// may contribute.
-func originVoteRefusal(zone, origin string, local bool, ops []core.RROperation, records map[string][]string) *CombinerSyncResponse {
-	if votesInZone(ZoneName(zone), AgentId(origin)) {
+// agents), so that what it serves does not go stale. A removal this combiner
+// takes in any origin's name (combinerTakesRemoval, S16) is no refusal, and
+// logs none. Nil when the origin may contribute.
+func originVoteRefusal(zone, origin string, local, removal bool, ops []core.RROperation, records map[string][]string) *CombinerSyncResponse {
+	if removal || votesInZone(ZoneName(zone), AgentId(origin)) {
 		return nil
 	}
 	if mpzd, ok := Zones.Get(zone); local && ok && mpzd.leavingSigner() {
@@ -446,7 +447,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		}
 	}
 
-	if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Operations, req.Records); refusal != nil && !req.Removal {
+	if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Removal, req.Operations, req.Records); refusal != nil {
 		refusal.DistributionID, refusal.Timestamp = resp.DistributionID, resp.Timestamp
 		return refusal
 	}
@@ -571,6 +572,16 @@ func (mpzd *MPZoneData) combinerApplyPublishInstruction(req *CombinerSyncRequest
 	instr := req.Publish
 	zone := req.Zone
 	senderID := req.SenderID
+
+	// An instruction older than the sender's last KEY is not applied, as the
+	// replace that came with it was not: it would put an older KEY back, or
+	// take the newer one away, and be kept in the newer one's place
+	if stale, applied := staleCombinerReplace(req, zone, dns.TypeKEY); stale {
+		lgCombiner.Warn("ignored a stale publish instruction: older than the KEY applied", "zone", zone, "sender", senderID,
+			"this", req.Timestamp.UTC().Format(time.RFC3339Nano), "thisDistrib", req.DistributionID,
+			"applied", applied.Time.UTC().Format(time.RFC3339Nano), "appliedDistrib", applied.DistID)
+		return
+	}
 
 	var storedInstr *StoredPublishInstruction
 	if hdb != nil {
@@ -1324,6 +1335,15 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 					"zone", zonename, "sender", req.SenderID, "rrtype", op.RRtype,
 					"this", req.Timestamp.UTC().Format(time.RFC3339Nano), "thisDistrib", req.DistributionID,
 					"applied", applied.Time.UTC().Format(time.RFC3339Nano), "appliedDistrib", applied.DistID)
+				// A KEY's drop skipped so has dropped nothing: it is refused,
+				// not told as done, and the agent asks again, later than the
+				// KEY that overtook it (keyPurge, plan S17a)
+				if req.Removal && rrtype == dns.TypeKEY {
+					rejectedItems = append(rejectedItems, RejectedItem{
+						Record: fmt.Sprintf("(replace %s)", op.RRtype),
+						Reason: "the drop is older than the KEY applied here: not made",
+					})
+				}
 				continue
 			}
 
