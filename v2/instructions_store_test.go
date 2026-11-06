@@ -339,6 +339,18 @@ func TestNoHSYNCPARAMEndsTheSerialsOfAZoneThatGivesNoRole(t *testing.T) {
 		if s.keeps(storeZone) {
 			t.Errorf("%s, noted again: the serials are kept", c.name)
 		}
+		// no active serial known, and every serial held gives no role:
+		// the serials end too, with no hang (the project owner,
+		// 2026-11-06, (A))
+		u := newStore(t)
+		u.Note(storeZone, noRoles, nil)
+		if !u.activeUnknown(storeZone) {
+			t.Fatalf("%s: an active serial is known", c.name)
+		}
+		u.Note(storeZone, c.copy, nil)
+		if u.keeps(storeZone) {
+			t.Errorf("%s with no active serial known, a serial that gives no role held: kept, %+v", c.name, u.Status(storeZone))
+		}
 	}
 	s := newStore(t)
 	noteKnown(t, s, storeZone, at(t, 7, "alpha,beta"))
@@ -367,8 +379,6 @@ func TestBothRecordsDroppedWithNoActiveSerialKnownIsAnOwnerError(t *testing.T) {
 	}{
 		{"the newest lists two providers", []*Instructions{at(t, 7, "alpha,beta")}, 7},
 		{"the newest lists one provider", []*Instructions{at(t, 7, "alpha,beta"), one}, 8},
-		// the active serial, not held here, may give the roles
-		{"the newest gives no role", []*Instructions{readOf(t, withParam(`serial="7" nsmgmt="agent"`)...)}, 7},
 	} {
 		s := newStore(t)
 		for _, in := range c.held {
