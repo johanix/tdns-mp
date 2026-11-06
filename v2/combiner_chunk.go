@@ -709,10 +709,12 @@ func (mpzd *MPZoneData) combinerResyncSignalKeys(senderID, zone string, hdb *Hsy
 // zone first.
 
 // lacksPubkeyConsent: the customer's zone is loaded and its HSYNCPARAM does
-// not say pubkey. A zone that has not loaded yet says nothing either way,
-// and its stored instructions are left as they are until it has.
+// not say pubkey, or it has no HSYNC3, so its signal names are tdns's
+// use-hsyncparam's to publish (pubkeyHere). A zone that has not loaded yet
+// says nothing either way, and its stored instructions are left as they are
+// until it has.
 func (mpzd *MPZoneData) lacksPubkeyConsent() bool {
-	return mpzd.HasPublishedData() && !mpzd.hasPubkey()
+	return mpzd.HasPublishedData() && !mpzd.pubkeyHere()
 }
 
 // contributionsLoaded: the zone has loaded, its persisted contributions are

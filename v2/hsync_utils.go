@@ -1078,6 +1078,15 @@ func (mpzd *MPZoneData) hasPubkey() bool {
 	return mpzd.roles().Pubkey
 }
 
+// pubkeyHere: the zone says pubkey and its instructions carry HSYNC3, so
+// its providers' agents publish its key in zones of their own. A zone with
+// no HSYNC3 is not a multi-provider zone: tdns's use-hsyncparam publishes
+// for it, each provider on its own, and stands aside only for a copy with
+// HSYNC3 (the project owner, 2026-11-06).
+func (mpzd *MPZoneData) pubkeyHere() bool {
+	return mpzd.hasPubkey() && hasHSYNC3(mpzd.instructions())
+}
+
 // mpDataLocks is a lock per zone (canonicalName), held while the zone's
 // multi-provider data is computed and set and acted on: by a refresh
 // (MPPreRefresh) and by a hand-over (actBySignerHandover, actByHandover),
