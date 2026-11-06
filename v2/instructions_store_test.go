@@ -213,14 +213,12 @@ func TestAChangeAtSerialZeroIsAConflict(t *testing.T) {
 // held, and no instructions are acted on, until a copy that reads; that
 // copy is held, and its zone's active serial is not known (S9).
 func TestACopyWithNoReadingIsAnOwnerError(t *testing.T) {
-	noParam := apexOf(t, instrBase[:3]...)
 	noSerial := apexOf(t, append(slices.Clone(instrBase[:3]), `3600 IN HSYNCPARAM servers="alpha,beta"`)...)
 	for _, c := range []struct {
 		name string
 		apex *tdns.OwnerData
 		want string
 	}{
-		{"HSYNC3 without HSYNCPARAM", noParam, "HSYNC3 without HSYNCPARAM"},
 		{"HSYNCPARAM without serial=", noSerial, "HSYNCPARAM without serial="},
 	} {
 		in, err := ReadInstructions(c.apex)
@@ -250,6 +248,43 @@ func TestBothRecordsDroppedWithTwoProvidersIsAnOwnerError(t *testing.T) {
 	st := status(t, s, storeZone)
 	if st.Phase != PhaseOwnerError || !strings.Contains(st.OwnerError, "lists 2 providers") || st.Active.Serial != 7 {
 		t.Errorf("phase %s error %q active %s", st.Phase, st.OwnerError, serialOf(st.Active))
+	}
+}
+
+// No HSYNCPARAM is no intent, with HSYNC3 or without, and has no serial to
+// keep (the project owner, 2026-11-06). After a serial that gives no role the
+// zone's serials end, whatever it lists: HSYNC3 records left are read as they
+// stand, so a group with no roles stays organized. After one that gives roles
+// to two providers it is an owner error, as both records dropped are. At a
+// first load HSYNC3 alone keeps nothing.
+func TestNoHSYNCPARAMEndsTheSerialsOfAZoneThatGivesNoRole(t *testing.T) {
+	noRoles := readOf(t, withParam(`serial="7" nsmgmt="agent"`)...)
+	records := readOf(t, instrBase[:3]...)
+	for _, c := range []struct {
+		name string
+		copy *Instructions
+	}{{"HSYNC3 kept", records}, {"both records gone", nil}} {
+		s := newStore(t)
+		noteKnown(t, s, storeZone, noRoles)
+		s.Note(storeZone, c.copy, nil)
+		if s.keeps(storeZone) {
+			t.Errorf("%s after a serial that gives no role: the serials are kept: %+v", c.name, s.Status(storeZone))
+		}
+		s.Note(storeZone, c.copy, nil)
+		if s.keeps(storeZone) {
+			t.Errorf("%s, noted again: the serials are kept", c.name)
+		}
+	}
+	s := newStore(t)
+	noteKnown(t, s, storeZone, at(t, 7, "alpha,beta"))
+	s.Note(storeZone, records, nil)
+	if st := status(t, s, storeZone); st.Phase != PhaseOwnerError || st.OwnerError != "HSYNCPARAM dropped while serial 7 lists 2 providers" || st.Active.Serial != 7 {
+		t.Errorf("HSYNC3 kept after a serial that gives roles: phase %s error %q active %s", st.Phase, st.OwnerError, serialOf(st.Active))
+	}
+	first := newStore(t)
+	first.Note(storeZone, records, nil)
+	if first.keeps(storeZone) {
+		t.Errorf("HSYNC3 alone at a first load: serials kept: %+v", first.Status(storeZone))
 	}
 }
 

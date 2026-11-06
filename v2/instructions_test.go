@@ -198,17 +198,22 @@ func TestTheDigestSeesEveryFieldTheCodeActsOn(t *testing.T) {
 	}
 }
 
-// HSYNC3 without HSYNCPARAM is an owner error (#308): the legacy reading,
-// in which every ON record voted, is gone. HSYNC3 with an HSYNCPARAM that
-// names no role reads, and nobody has a role in it.
-func TestHSYNC3WithoutHSYNCPARAMIsAnOwnerError(t *testing.T) {
+// HSYNC3 without HSYNCPARAM is no error (the project owner, 2026-11-06): it
+// reads as the records with no parameters, no serial and no role, the group
+// the providers named organize before any role is given. Its digest is not
+// the digest of the same records with an HSYNCPARAM of no roles, which reads
+// with nobody voting either.
+func TestHSYNC3WithoutHSYNCPARAMReadsAsTheRecordsAlone(t *testing.T) {
 	hsync3 := hsync3RR(core.HsyncStateON, "alpha", "agent.alpha.example.", ".")
 	in, err := ReadInstructions(apexOfRRs(hsync3))
-	if !errors.Is(err, errNoHsyncparam) || in != nil {
-		t.Fatalf("reading %v, error %v; want the owner error %v", in, err, errNoHsyncparam)
+	if err != nil || in == nil || in.HasParam || in.Serial != 0 || len(in.Records) != 1 || in.Records[0].Identity != "agent.alpha.example." {
+		t.Fatalf("reading %+v, error %v; want the record alone", in, err)
 	}
-	if err.Error() != "HSYNC3 without HSYNCPARAM" {
-		t.Errorf("error %q", err)
+	if in.NSmgmt != core.HsyncNSmgmtOWNER || in.ParentSync != core.HsyncParentSyncOwner || in.Servers != nil || in.Signers != nil {
+		t.Errorf("the parameters %+v: want the owner's and no lists", in)
+	}
+	if givesRoles(in) || zoneStanding(in, "agent.alpha.example.") != standingNoRole {
+		t.Errorf("standing %v: want a member with no role", zoneStanding(in, "agent.alpha.example."))
 	}
 	empty := &dns.PrivateRR{
 		Hdr:  dns.RR_Header{Name: instrZone, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
@@ -218,8 +223,11 @@ func TestHSYNC3WithoutHSYNCPARAMIsAnOwnerError(t *testing.T) {
 	if err != nil || param == nil || !param.HasParam {
 		t.Fatalf("HSYNC3 with an HSYNCPARAM of no roles: reading %v, error %v", param, err)
 	}
-	if _, voting, _ := participantsOf(param); len(voting) != 0 {
-		t.Errorf("voting %v, want nobody", voting)
+	if givesRoles(param) {
+		t.Errorf("an HSYNCPARAM of no roles gives roles: %+v", param)
+	}
+	if param.Digest() == in.Digest() {
+		t.Errorf("the same digest with an HSYNCPARAM and without: %s", in.Digest())
 	}
 }
 
@@ -518,9 +526,9 @@ func TestMplistShowsTheCopysSerialAndDigest(t *testing.T) {
 		t.Errorf("servers %v nsmgmt %s: the lists are as before", info.Servers, info.NSmgmt)
 	}
 
-	legacy := MPZoneInfoFromMPZoneData(instrTestZone(t, "legacy.example.", instrBase[:3]...))
-	if legacy.OwnerError != "HSYNC3 without HSYNCPARAM" || legacy.Digest != "" {
-		t.Errorf("HSYNC3 without HSYNCPARAM: owner error %q digest %q; want the owner error, no digest", legacy.OwnerError, legacy.Digest)
+	records := MPZoneInfoFromMPZoneData(instrTestZone(t, "records.example.", instrBase[:3]...))
+	if records.OwnerError != "" || records.Digest == "" || len(records.Servers) != 0 {
+		t.Errorf("HSYNC3 without HSYNCPARAM: owner error %q digest %q servers %v; want no error, a digest, no lists", records.OwnerError, records.Digest, records.Servers)
 	}
 
 	twice := instrTestZone(t, "twice.example.", instrBase...)

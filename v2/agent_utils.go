@@ -179,7 +179,7 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 
 	in := activeOr(zd.ZoneName, apex)
 	if !hasHSYNC3(in) {
-		lgAgent.Warn("zone has no HSYNC3 RRset", "zone", zonename)
+		lgAgent.Debug("zone has no HSYNC3 RRset", "zone", zonename)
 		return nil, fmt.Errorf("zone %q has no HSYNC3 RRset", zonename)
 	}
 
