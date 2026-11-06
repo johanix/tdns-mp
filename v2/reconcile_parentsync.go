@@ -496,10 +496,10 @@ func (conf *Config) offerTakenUpKey(zone string) bool {
 // middle of the take-up makes a new one only when the key it holds is older
 // than the hand-back (the project owner, 2026-11-06). The key is kept as the
 // take-up's (MPSig0TakeUp) before its KEY goes out, and the key rounds hand
-// that on with it. A roll under way ends first. Under the zone's key-setup
-// lock.
-func (conf *Config) takeUpKey(kdb *tdns.KeyDB, zone ZoneName, zk *zoneKey, made bool) (*sig0Row, error) {
-	serial, _ := conf.InternalMp.Instructions.takenAt(string(zone), parentSyncTakeUpKey)
+// that on with it, with serial, that of the instructions that took the sync
+// up, as the caller read the step. A roll under way ends first. Under the
+// zone's key-setup lock.
+func (conf *Config) takeUpKey(kdb *tdns.KeyDB, zone ZoneName, zk *zoneKey, made bool, serial uint32) (*sig0Row, error) {
 	k, err := conf.pickTakeUpKey(kdb, zone, zk, made, serial)
 	if err != nil {
 		return nil, err
