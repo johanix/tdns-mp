@@ -528,33 +528,7 @@ func (gst *GossipStateTable) CheckGroupState(groupHash string, expectedMembers [
 	}
 	gst.mu.Lock()
 
-	groupStates := gst.States[groupHash]
-	allOperational := true
-
-	if len(groupStates) < len(expectedMembers) {
-		allOperational = false
-	} else {
-		for _, member := range expectedMembers {
-			ms, ok := groupStates[member]
-			if !ok {
-				allOperational = false
-				break
-			}
-			for _, peer := range expectedMembers {
-				if peer == member {
-					continue
-				}
-				state, ok := ms.PeerStates[peer]
-				if !ok || state != AgentStateToString[AgentStateOperational] {
-					allOperational = false
-					break
-				}
-			}
-			if !allOperational {
-				break
-			}
-		}
-	}
+	allOperational := len(gst.notOperationalLocked(groupHash, expectedMembers)) == 0
 
 	wasOperational := gst.operationalGroups[groupHash]
 	gst.operationalGroups[groupHash] = allOperational
@@ -575,6 +549,48 @@ func (gst *GossipStateTable) CheckGroupState(groupHash string, expectedMembers [
 			onDeg(groupHash)
 		}
 	}
+}
+
+// notOperationalLocked names the cells of the group's NxN matrix that are not
+// OPERATIONAL among expectedMembers: what keeps the group out of mutual
+// OPERATIONAL. Empty when it is mutually OPERATIONAL. Caller holds gst.mu.
+func (gst *GossipStateTable) notOperationalLocked(groupHash string, expectedMembers []string) []string {
+	groupStates := gst.States[groupHash]
+	var cells []string
+	for _, member := range expectedMembers {
+		ms, ok := groupStates[member]
+		if !ok {
+			cells = append(cells, member+" has no row here")
+			continue
+		}
+		for _, peer := range expectedMembers {
+			if peer == member {
+				continue
+			}
+			state, ok := ms.PeerStates[peer]
+			if !ok {
+				cells = append(cells, member+" tells nothing of "+peer)
+			} else if state != AgentStateToString[AgentStateOperational] {
+				cells = append(cells, member+" reads "+peer+" "+state)
+			}
+		}
+	}
+	return cells
+}
+
+// notOperational is notOperationalLocked for the status, by the gate's own
+// members: a leaving voting member excused from the thaw is left out while it
+// is not heard (CheckGroupState).
+func (gst *GossipStateTable) notOperational(groupHash string, expectedMembers []string) []string {
+	gst.mu.RLock()
+	excused := gst.gateExcused
+	gst.mu.RUnlock()
+	if excused != nil {
+		expectedMembers = withoutExcused(expectedMembers, excused(groupHash))
+	}
+	gst.mu.RLock()
+	defer gst.mu.RUnlock()
+	return gst.notOperationalLocked(groupHash, expectedMembers)
 }
 
 // RefreshLocalStates updates our local state entries for all groups
