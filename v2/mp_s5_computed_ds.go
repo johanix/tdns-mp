@@ -342,11 +342,11 @@ func (conf *Config) inDSSigners(zone string) bool {
 // zone that lacked it. A provider that is not in the step's DSSigners is not
 // asked: its DS leaves at its DS step, by the set (plan S13).
 //
-// A key is held by its record once its provider has sent it, by its tag
-// before. A row of this provider's own never holds another's key: the signer
-// keeps no copy of a key under a tag of its own (syncForeignDNSKEYs), and the
-// row would stand in for the missing one, or, outside the step's DSSigners,
-// leave the set with it.
+// A key is held by its record, not its tag: another key under the tag would
+// stand in for it, our own (the signer keeps no copy of a key under a tag of
+// its own, syncForeignDNSKEYs) or a third provider's. Until its provider's
+// record has arrived nothing holds it, as the computed set waits for it too.
+// A row of this provider's own never holds another's key.
 func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) string {
 	zone = dns.Fqdn(zone)
 	tm := conf.InternalMp.MPTransport
@@ -368,16 +368,16 @@ func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) 
 	if matched, label, err := mpzd.matchHsyncIdentity(ourHsyncIdentities(conf.MpConfig())); err == nil && matched {
 		ourLabel = trimDot(label)
 	}
-	held := map[uint16][]*dns.DNSKEY{}
+	var held []*dns.DNSKEY
 	for _, it := range inv {
 		if it.State != KeyStateForeign || it.Flags&dns.SEP == 0 || it.DS == nil || !*it.DS {
 			continue
 		}
-		var dk *dns.DNSKEY
 		if rr, err := dns.NewRR(it.KeyRR); err == nil {
-			dk, _ = rr.(*dns.DNSKEY)
+			if dk, ok := rr.(*dns.DNSKEY); ok {
+				held = append(held, dk)
+			}
 		}
-		held[it.KeyTag] = append(held[it.KeyTag], dk)
 	}
 	shares := tm.foreignSharesFor(ZoneName(zone))
 	agents := make([]string, 0, len(shares))
@@ -407,27 +407,25 @@ func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) 
 				}
 			}
 			want, decided := foreignDSFor(foreignSaid{Provider: label, State: st.State, DS: st.DS}, sep, signing)
-			if !decided || !want || holdsKey(held[st.KeyTag], record) {
+			if !decided || !want {
 				continue
 			}
 			who := label
 			if id := mpzd.identitiesByLabel()[label]; id != "" {
 				who = id
 			}
+			if record == nil {
+				return fmt.Sprintf("provider %s holds its key %d %s with its DS at the parent, and this agent has no record of that key yet",
+					who, st.KeyTag, st.State)
+			}
+			if slices.ContainsFunc(held, func(dk *dns.DNSKEY) bool { return sameDNSKEYRdata(dk, record) }) {
+				continue
+			}
 			return fmt.Sprintf("provider %s holds its key %d %s with its DS at the parent, and the signer's inventory does not have that DS",
 				who, st.KeyTag, st.State)
 		}
 	}
 	return ""
-}
-
-// holdsKey: one of rows, an inventory's records under a key's tag, is the
-// key's record; with the record not known, any row under the tag.
-func holdsKey(rows []*dns.DNSKEY, record *dns.DNSKEY) bool {
-	if record == nil {
-		return len(rows) > 0
-	}
-	return slices.ContainsFunc(rows, func(dk *dns.DNSKEY) bool { return sameDNSKEYRdata(dk, record) })
 }
 
 // dnskeyRecordKnown reports whether any record carries the key tag.
