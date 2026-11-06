@@ -775,6 +775,7 @@ func (conf *Config) startHandovers(ctx context.Context, tm *MPTransportBridge) {
 		t.toSigner, t.onHeld = true, conf.askThaw
 		conf.InternalMp.SignerHandover = t
 		trackers = append(trackers, t)
+		go conf.watchRolloverMarks(ctx, tm)
 	}
 	for _, t := range trackers {
 		go t.run(ctx)
