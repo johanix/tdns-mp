@@ -243,6 +243,37 @@ func TestARefusedDNSKEYDistributionIsNotRecordedAsSent(t *testing.T) {
 	}
 }
 
+// The HSYNCPARAM dropped while the active serial lists several providers is
+// an owner error that keeps that serial (design 7): a refresh's key
+// distribution is judged by it, not by the HSYNC3 records the copy has left,
+// which give nobody a role.
+func TestAnHSYNCPARAMDroppedFromSeveralProvidersKeepsTheirKeysGoing(t *testing.T) {
+	asMPAgent(t)
+	yes := true
+	r := newLeaderSyncRig(t, "dropped.dnskey.example.")
+	r.mpzd.Ready = true
+	z := r.mpzd.ZoneName
+	recs := []h3rec{{usAgent, true}, {otherAgent, true}}
+	servedMembers(t, r.mpzd, recs, []string{usAgent, otherAgent})
+	served, err := r.mpzd.OwnerForAnalysis(z)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := ReadInstructions(served)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newStore(t)
+	withStore(t, s)
+	knownAs(t, s, z, in)
+	r.mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: z, Inventory: []KeyInventoryItem{invItem(t, z, 257, KeyStateActive, &yes)}, Received: time.Now()})
+	dropped := incomingApex(t, z, recs, []string{usAgent, otherAgent})
+	dropped.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{})
+	if _, _, err := r.mpzd.LocalDnskeysFromKeystate(usAgent, dropped); errors.Is(err, errNoRoleInZone) {
+		t.Errorf("a refresh that drops HSYNCPARAM while the active serial gives this provider a role: %v", err)
+	}
+}
+
 // refresh-keys says that a provider with no role distributes no keys, in
 // place of "Key inventory refreshed".
 func TestRefreshKeysReportsTheRefusal(t *testing.T) {

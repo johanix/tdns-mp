@@ -347,6 +347,8 @@ func TestBothRecordsDroppedWithNoActiveSerialKnownIsAnOwnerError(t *testing.T) {
 	}{
 		{"the newest lists two providers", []*Instructions{at(t, 7, "alpha,beta")}, 7},
 		{"the newest lists one provider", []*Instructions{at(t, 7, "alpha,beta"), one}, 8},
+		// the active serial, not held here, may give the roles
+		{"the newest gives no role", []*Instructions{readOf(t, withParam(`serial="7" nsmgmt="agent"`)...)}, 7},
 	} {
 		s := newStore(t)
 		for _, in := range c.held {

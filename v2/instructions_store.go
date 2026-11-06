@@ -505,10 +505,12 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 				gone, copyErr = "HSYNCPARAM", "no HSYNCPARAM"
 			}
 			switch {
-			case z.Active == nil && slices.ContainsFunc(z.Held, func(h heldSerial) bool { return givesRoles(h.Reading) }):
+			case z.Active == nil && len(z.Held) > 0:
 				// with no active serial known the end of service cannot
-				// be judged: the newest held may list one provider while
-				// the active one lists more (design 7, S9)
+				// be judged: the serials held may give no role, or list
+				// one provider, while the active one, not held here,
+				// gives roles to more (design 7, S9, decision 12); and
+				// the end cannot be undone
 				z.Copy, z.CopyError = SerialDigest{}, copyErr
 				z.ownerError(zone, gone+" dropped while the active serial is not known")
 				return nil
