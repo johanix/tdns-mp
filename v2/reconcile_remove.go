@@ -29,6 +29,7 @@ package tdnsmp
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"slices"
@@ -246,7 +247,7 @@ func (l leaver) steps(p planView) []plannedStep {
 				logRemovalStep(zone, id, "3 (its DS)", "")
 			},
 			wait: func(conf *Config, zone string, _ time.Time) string {
-				return conf.removalDSWait(zone, id)
+				return conf.removalDSWait(zone, label, id)
 			},
 		}, plannedStep{
 			key: removalKey(label, "dnskey"), what: head + ", step 4 (its DNSKEY)", provider: id, keys: true,
@@ -649,7 +650,7 @@ func (b *reconcileBook) stepTaken(zone string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if zr := b.zones[zone]; zr != nil {
-		zr.stepSync, zr.syncAt = false, time.Time{}
+		zr.stepSync, zr.syncAt, zr.watching = false, time.Time{}, ""
 	}
 }
 
@@ -658,18 +659,22 @@ func (b *reconcileBook) stepTaken(zone string) {
 // removalNSWait is what the leaving provider's NS step waits for: under
 // nsmgmt=agent the withdrawal's confirmations; then until the parent's NS
 // RRset no longer names the stored names, and from then the larger of the
-// parent's and the zone's NS TTL, plus the propagation delay. "" once passed.
+// parent's and the zone's NS TTL, plus the propagation delay. The leader's
+// operator's word ends the watch, not what follows it. "" once passed.
 func (conf *Config) removalNSWait(zone, label, id string, agentNS bool) string {
 	if agentNS && !conf.removalWithdrawn(zone, id, "NS") {
 		return "for the withdrawal of its NS to be confirmed"
 	}
-	seen, ok := conf.parentNow(zone)
-	if !ok {
-		conf.askStepSync(zone, "a removal's NS step")
-		return "until the parent's NS RRset is known"
-	}
 	rb := &conf.InternalMp.reconciles
 	key := canonicalName(zone)
+	step := removalKey(label, "ns")
+	word := conf.InternalMp.Instructions.parentWord(zone, step)
+	seen, ok := conf.parentNow(zone)
+	if !ok && !word {
+		conf.askStepSync(zone, "a removal's NS step")
+		rb.watches(key, step)
+		return "until the parent's NS RRset is known"
+	}
 	wait := "ns " + label
 	rm, _ := conf.InternalMp.Instructions.removal(zone, label, "")
 	var named []string
@@ -679,15 +684,17 @@ func (conf *Config) removalNSWait(zone, label, id string, agentNS bool) string {
 		}
 	}
 	zoneNames, zoneTTL := zoneNSOf(zone)
-	if len(named) > 0 {
+	if len(named) > 0 && !word {
 		conf.askStepSync(zone, "a removal's NS step")
 		rb.forgetWait(key, wait)
+		rb.watches(key, step)
 		text := "until the parent no longer names " + strings.Join(named, ", ")
 		if !agentNS && slices.ContainsFunc(named, func(n string) bool { return slices.Contains(zoneNames, canonicalName(n)) }) {
 			text += " (the owner's NS RRset still names it)"
 		}
-		return removalWaitSaid(conf, zone, id, "2 (its NS)", text)
+		return removalWaitSaid(conf, zone, id, "2 (its NS)", text+conf.parentRefusalNote(zone, id, step))
 	}
+	rb.watches(key, "")
 	delay, largest := conf.delegationNotifyWait(zone)
 	since := rb.sinceFirst(key, wait, time.Now())
 	until := since.Add(time.Duration(max(seen.nsTTL, zoneTTL))*time.Second + delay)
@@ -704,24 +711,30 @@ func (conf *Config) removalNSWait(zone, label, id string, agentNS bool) string {
 
 // removalDSWait is what the leaving provider's DS step waits for: its CDS
 // withdrawn, then until the parent no longer serves its DS, and from then the
-// parent's DS TTL, as last served, and the DNSKEY TTL. "" once passed.
-func (conf *Config) removalDSWait(zone, id string) string {
+// parent's DS TTL, as last served, and the DNSKEY TTL. The leader's operator's
+// word ends the watch, not what follows it. "" once passed.
+func (conf *Config) removalDSWait(zone, label, id string) string {
 	if !conf.removalWithdrawn(zone, id, "CDS") {
 		return "for the withdrawal of its CDS to be confirmed"
 	}
-	seen, ok := conf.parentNow(zone)
-	if !ok {
-		conf.askStepSync(zone, "a removal's DS step")
-		return "until the parent's DS RRset is known"
-	}
 	rb := &conf.InternalMp.reconciles
 	key := canonicalName(zone)
+	step := removalKey(label, "ds")
+	word := conf.InternalMp.Instructions.parentWord(zone, step)
+	seen, ok := conf.parentNow(zone)
+	if !ok && !word {
+		conf.askStepSync(zone, "a removal's DS step")
+		rb.watches(key, step)
+		return "until the parent's DS RRset is known"
+	}
 	wait := "ds " + id
-	if !dsLeft(conf, zone, seen) {
+	if !word && !dsLeft(conf, zone, seen) {
 		conf.askStepSync(zone, "a removal's DS step")
 		rb.forgetWait(key, wait)
-		return removalWaitSaid(conf, zone, id, "3 (its DS)", "until the parent no longer serves its DS")
+		rb.watches(key, step)
+		return removalWaitSaid(conf, zone, id, "3 (its DS)", "until the parent no longer serves its DS"+conf.parentRefusalNote(zone, id, step))
 	}
+	rb.watches(key, "")
 	ttl := removalTTLUnknown
 	if seen.dsTTL != 0 {
 		ttl = time.Duration(seen.dsTTL) * time.Second
@@ -803,6 +816,128 @@ func removalWaitSaid(conf *Config, zone, id, step, until string) string {
 }
 
 func removalTime(t time.Time) string { return t.UTC().Format("2006-01-02 15:04") + " UTC" }
+
+// --- A parent that does not move ---
+
+// refusalWarnEvery is how often a watch on a parent that refuses the zone's key
+// warns, past leaving-timeout.
+const refusalWarnEvery = time.Hour
+
+// watches notes the step held that watches the parent, "" for none.
+func (b *reconcileBook) watches(zone, step string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.zone(zone).watching = step
+}
+
+// parentRefusalNote is what a watch on the parent adds to the step's status
+// while the parent refuses the zone's key: no UPDATE goes (design 6), so the
+// parent moves by another route or the leader's operator gives the word. Past
+// leaving-timeout it also warns, once an hour. "" with the key not refused.
+func (conf *Config) parentRefusalNote(zone, id, step string) string {
+	rb := &conf.InternalMp.reconciles
+	key := canonicalName(zone)
+	wait := "refused " + step
+	keyid, state, refused := conf.parentRefusesKey(ZoneName(zone))
+	if !refused {
+		rb.forgetWait(key, wait)
+		return ""
+	}
+	now := time.Now()
+	since := rb.sinceFirst(key, wait, now)
+	if now.Sub(since) >= leavingTimeoutFor(conf.MpConfig()) && rb.warnDue(key, now) {
+		lg.Warn("a removal's step waits for a parent that refuses the zone's SIG(0) key: the parent must move by another route, or the leader's operator gives the word (agent parentsync go-on)",
+			"zone", zone, "provider", id, "step", step, "keyid", keyid, "state", state, "since", since.UTC().Format(time.RFC3339))
+	}
+	return fmt.Sprintf(" (the parent refuses the zone's SIG(0) key %d (%s), so no UPDATE goes: it must move by another route, or the leader's operator gives the word: agent parentsync go-on)", keyid, state)
+}
+
+// warnDue: refusalWarnEvery has passed since the zone's last warning.
+func (b *reconcileBook) warnDue(zone string, now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	zr := b.zone(zone)
+	if now.Sub(zr.warnedAt) < refusalWarnEvery {
+		return false
+	}
+	zr.warnedAt = now
+	return true
+}
+
+// giveParentWord keeps the leader's operator's word for a step's watch, the
+// zone named in any case.
+func (s *InstructionStore) giveParentWord(zone, step string) error {
+	s.mu.Lock()
+	name, _ := s.zoneLocked(zone)
+	s.mu.Unlock()
+	if name == "" {
+		return fmt.Errorf("zone %s: no serials kept", zone)
+	}
+	return s.update(name, func(z *zoneSerials) error {
+		if !z.reconciling() || slices.Contains(z.ParentWords, step) {
+			return errToldUnchanged
+		}
+		z.ParentWords = append(z.ParentWords, step)
+		return nil
+	})
+}
+
+// parentWord: the leader's operator gave the word for the step's watch, the
+// zone named in any case.
+func (s *InstructionStore) parentWord(zone, step string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, z := s.zoneLocked(zone)
+	return z != nil && slices.Contains(z.ParentWords, step)
+}
+
+// goOnPastParent is the word of the operator of this agent, the zone's leader
+// (agent parentsync go-on, decision 110): the step held, which watches a parent
+// that does not move, stops watching it. What follows the watch runs as ever,
+// its TTLs counted from now. Refused unless a step here watches the parent.
+func (conf *Config) goOnPastParent(zone string) (string, error) {
+	rb := &conf.InternalMp.reconciles
+	key := canonicalName(zone)
+	rb.mu.Lock()
+	step := rb.zone(key).watching
+	rb.mu.Unlock()
+	if step == "" {
+		return "", fmt.Errorf("no removal's step here watches the parent of zone %s", zone)
+	}
+	if err := conf.InternalMp.Instructions.giveParentWord(zone, step); err != nil && !errors.Is(err, errToldUnchanged) {
+		return "", fmt.Errorf("zone %s: the word for step %q could not be kept: %w", zone, step, err)
+	}
+	rb.watches(key, "")
+	seen, _ := conf.parentNow(zone)
+	lg.Warn("the leader's operator gave the word: a removal's step no longer watches the parent", "zone", zone, "step", step, "parent_ns", seen.ns, "parent_ds", seen.ds)
+	conf.askThaw(zone)
+	return fmt.Sprintf("Zone %s: step %q no longer watches the parent, which may still hold what leaves; its TTLs are counted from now", zone, step), nil
+}
+
+// safeToRemoveSaid is the status's "safe to remove", with this provider's NS
+// names the parent still serves, as far as it has been read: the word of the
+// leader's operator may have gone on past them.
+func (conf *Config) safeToRemoveSaid(zone string) string {
+	seen, ok := conf.parentNow(zone)
+	if !ok {
+		return "safe to remove (what the parent names has not been read yet)"
+	}
+	var named []string
+	if mp := conf.MpConfig(); mp != nil {
+		for _, n := range mp.Local.Nameservers {
+			if slices.Contains(seen.ns, canonicalName(n)) {
+				named = append(named, n)
+			}
+		}
+	}
+	if len(named) > 0 {
+		return "safe to remove, though the parent still names " + strings.Join(named, ", ")
+	}
+	return "safe to remove"
+}
 
 // --- Other readers ---
 

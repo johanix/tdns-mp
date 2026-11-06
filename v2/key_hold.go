@@ -38,6 +38,10 @@ import (
 // The held sync is owed, and asked for when the hold ends: when the last
 // poll of the zone's key ends (keyPollEnded), when the key is retired to one,
 // and from the 30 s ticker (retestKeyHolds).
+//
+// All of that is for the UPDATE. A NOTIFY needs no key, so a parent that takes
+// one is told by it, alone, while the hold stands (sendDelegationSync, decision
+// 110).
 
 // trustWord is a key the parent said it trusts, and the lead that heard it.
 type trustWord struct {
@@ -591,17 +595,26 @@ func (conf *Config) zoneKeyLine(ctx context.Context, zone ZoneName) string {
 // bootstrapped: it marks the sync owed for the key, logs why (when the reason
 // is new, and then once an hour), and reports that nothing is to be sent. The
 // syncher calls it after the hold for the catch-up, in both arms; the
-// explicit arm answers its caller at once. Never waits.
+// explicit arm answers its caller at once. Never waits. A parent that takes a
+// NOTIFY holds nothing: that sync needs no key (sendDelegationSync).
 func (conf *Config) holdForZoneKey(ctx context.Context, ds tdns.DelegationSyncRequest) (held bool, why string) {
 	if !mpLeaderSync(conf, ds) {
 		return false, ""
 	}
 	zone := ZoneName(ds.ZoneName)
-	uses, why := conf.keyHold(ctx, zone)
-	if uses && why == "" && !conf.signingKeyCached(zone) {
-		why = "signing key differs"
-	}
+	why = conf.syncKeyHold(ctx, zone)
 	if why == "" {
+		return false, ""
+	}
+	if parentNotifyTarget(ctx, conf, ds.ZoneData) != nil {
+		if conf.InternalMp.reconciles.sayOnce(canonicalName(string(zone)), "notify passes the key's hold "+why) {
+			lgAgent.Info("an UPDATE waits for the zone's SIG(0) key; the sync goes by NOTIFY, which needs no key", "zone", zone, "reason", why)
+		}
+		return false, ""
+	}
+	// That look asks the parent, and the hold can end during it. A release then
+	// finds nothing owed, so read the hold again before owing the sync.
+	if why = conf.syncKeyHold(ctx, zone); why == "" {
 		return false, ""
 	}
 	if t := conf.InternalMp.CatchUp; t != nil {
@@ -627,6 +640,83 @@ func (conf *Config) holdForZoneKey(ctx context.Context, ds tdns.DelegationSyncRe
 		lgAgent.Info("the sync with the parent waits for the zone's SIG(0) key", "zone", zone, "reason", why)
 	}
 	return true, why
+}
+
+// syncKeyHold says why an UPDATE of the leader's waits for the zone's key, or
+// "". Called on the syncher's goroutine only (signingKeyCached).
+func (conf *Config) syncKeyHold(ctx context.Context, zone ZoneName) string {
+	uses, why := conf.keyHold(ctx, zone)
+	if uses && why == "" && !conf.signingKeyCached(zone) {
+		why = "signing key differs"
+	}
+	return why
+}
+
+// parentNotifyTarget is where the parent takes a NOTIFY for the zone, in the
+// plan tdns's own walk of the schemes reads, so parentsync.schemes has its say:
+// nil if it offers none. A test stands in for it.
+var parentNotifyTarget = func(ctx context.Context, conf *Config, zd *tdns.ZoneData) *tdns.DsyncTarget {
+	if zd == nil || conf.Config == nil || conf.Config.Internal.ImrEngine == nil {
+		return nil
+	}
+	plan, err := zd.BuildParentSyncPlan(ctx, conf.zoneKeyDB(ZoneName(zd.ZoneName)), conf.Config.Internal.ImrEngine, tdns.SyncRoleChild)
+	if err != nil {
+		return nil
+	}
+	for _, cand := range plan.Candidates {
+		if cand.Scheme == "NOTIFY" {
+			return cand.Target
+		}
+	}
+	return nil
+}
+
+// sendDelegationSync is tdns's walk of the schemes. While the zone's key holds
+// an UPDATE, the only sync that passed the hold is a NOTIFY (holdForZoneKey),
+// and it goes alone: the walk would sign an UPDATE with that key first, and a
+// BADKEY starts a bootstrap of it. With no target now (the hold came after
+// holdForZoneKey, or this look failed) nothing goes: the sync fails, is asked
+// again, and holdForZoneKey decides again.
+func (conf *Config) sendDelegationSync(ctx context.Context, kdb *tdns.KeyDB, notifyq chan tdns.NotifyRequest, ds tdns.DelegationSyncRequest,
+	syncstate tdns.DelegationSyncStatus, imr *tdns.Imr) (string, uint8, tdns.UpdateResult, error) {
+	zd := ds.ZoneData
+	if !syncstate.InSync && mpLeaderSync(conf, ds) {
+		why := conf.syncKeyHold(ctx, ZoneName(ds.ZoneName))
+		// with several KEYs at the apex, only a key the parent trusts now
+		// signs an UPDATE (trustBeforeSigning); a NOTIFY needs none
+		if why == "" {
+			if err := conf.trustBeforeSigning(ctx, ds); err != nil {
+				why = err.Error()
+			}
+		}
+		if why != "" {
+			target := parentNotifyTarget(ctx, conf, zd)
+			if target == nil {
+				return "", 0, tdns.UpdateResult{}, fmt.Errorf("the zone's SIG(0) key holds an UPDATE (%s) and the parent gave no NOTIFY target", why)
+			}
+			msg, rcode, err := zd.SyncZoneDelegationViaNotify(ctx, kdb, notifyq, syncstate, target)
+			return msg, rcode, tdns.UpdateResult{}, err
+		}
+	}
+	return zd.SyncZoneDelegation(ctx, kdb, notifyq, syncstate, imr)
+}
+
+// parentRefusesKey: the parent's last word on the key this agent holds as the
+// zone's is a refusal: which key, and the word. It reads the keystore only.
+func (conf *Config) parentRefusesKey(zone ZoneName) (uint16, string, bool) {
+	kdb := conf.zoneKeyDB(zone)
+	if kdb == nil {
+		return 0, "", false
+	}
+	zk, err := readZoneKey(kdb, zone)
+	if err != nil || zk.held == nil {
+		return 0, "", false
+	}
+	switch zk.held.parentState {
+	case edns0.KeyStateRefused, edns0.KeyStateInvalid:
+		return zk.held.keyid, edns0.KeyStateToString(zk.held.parentState), true
+	}
+	return 0, "", false
 }
 
 // signingKeyCached: the key tdns signs the zone's UPDATE with, read through

@@ -546,6 +546,9 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 			if lem.IsLeader(amp.Zone) {
 				if why := conf.keyHoldReason(ctx, amp.Zone); why != "" {
 					status.KeyHold = "held until the zone's SIG(0) key is held and bootstrapped (" + why + ")"
+					if parentNotifyTarget(ctx, conf, zd.ZoneData) != nil {
+						status.KeyHold = "an UPDATE is held until the zone's SIG(0) key is held and bootstrapped (" + why + "); the sync goes by NOTIFY"
+					}
 				}
 				status.ZoneKey = conf.zoneKeyLine(ctx, amp.Zone)
 			}
@@ -680,6 +683,26 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 			// at shutdown.
 			conf.launchKeyPoll(ctx, nil, amp.Zone, string(amp.Zone), keyid, algorithm)
 			resp.Msg = fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", amp.Zone, keyid)
+
+		case "parentsync-go-on":
+			lem := conf.InternalMp.LeaderElectionManager
+			if lem == nil {
+				resp.Error = true
+				resp.ErrorMsg = "leader election manager not initialized"
+				return
+			}
+			if !lem.IsLeader(amp.Zone) {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("this agent is not the delegation sync leader for %s", amp.Zone)
+				return
+			}
+			msg, err := conf.goOnPastParent(string(amp.Zone))
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			resp.Msg = msg
 
 		case "imr-query":
 			imr := &Imr{tdns.Globals.ImrEngine}
