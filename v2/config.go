@@ -60,10 +60,7 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 	// A zone that leaves the configuration takes its serials with it
 	// (design rule 3): at the start, and after every zone reload, which
 	// has removed it from tdns's zones by now.
-	conf.InternalMp.Instructions.Prune(func(zone string) bool {
-		zd, ok := tdns.Zones.Get(zone)
-		return ok && zd.Options[tdns.OptMultiProvider]
-	})
+	conf.pruneInstructions()
 	for _, zoneName := range conf.InternalMp.MPZoneNames {
 		if conf.InternalMp.refreshRegistered[zoneName] {
 			continue
@@ -105,6 +102,24 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 					}
 				}
 			})
+	}
+}
+
+// pruneInstructions drops the serials of every zone that has left the
+// configuration (Prune), and the restart rule's wait for it, which Prune,
+// the store's, cannot reach: a zone added again in the same run waits
+// afresh, not on the time of a wait from before it left.
+func (conf *Config) pruneInstructions() {
+	var left []string
+	conf.InternalMp.Instructions.Prune(func(zone string) bool {
+		if zd, ok := tdns.Zones.Get(zone); ok && zd.Options[tdns.OptMultiProvider] {
+			return true
+		}
+		left = append(left, zone)
+		return false
+	})
+	for _, zone := range left {
+		conf.InternalMp.thaws.restartWaitDone(zone)
 	}
 }
 

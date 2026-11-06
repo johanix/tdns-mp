@@ -127,6 +127,155 @@ func TestAMemberWithNoRecordTakesOnlyTheLeadersWord(t *testing.T) {
 	}
 }
 
+// An HSYNCPARAM that gives no role, the way in's step 1: no voting member
+// under the newest serial, so nobody leads it or tells it, and its active
+// serial was never known. It is taken at once, with nothing frozen (the
+// project owner, 2026-11-06). A member that tells another active serial with a
+// voting member still has the rule's word: an agent that lost its record does
+// not leave a fleet whose active serial gives roles.
+func TestASerialWithNoVotingMemberIsKnownAtOnce(t *testing.T) {
+	r := newThawRig(t, "novoter.restart.example.", "")
+	none := freezeAt(t, 91, "none", "", "")
+	r.noRecord(none)
+	r.conf.thawTurn(r.zone)
+	if r.known() != 91 {
+		t.Fatalf("a serial with no voting member is not known: %q", r.conf.thawLine(r.zone))
+	}
+	if why := r.conf.zoneFrozen(r.zone); len(why) > 0 {
+		t.Errorf("frozen: %v", why)
+	}
+
+	f := newThawRig(t, "fleet.restart.example.", roleB)
+	f.noRecord(f.n, freezeAt(t, 92, "none", "", ""))
+	f.leadGroup(f.n, roleB)
+	f.hear(roleB, tells(f.n, f.n), true)
+	f.conf.thawTurn(f.zone)
+	if f.known() != 41 {
+		t.Fatalf("b leads 41, which gives roles, and tells it: known %d", f.known())
+	}
+
+	// a start with nothing heard yet, 41, which gives roles, held below:
+	// the fleet's word is waited for, the leaving timeout at the most, and
+	// not taken from the newest before it speaks
+	c := newThawRig(t, "cold.restart.example.", "")
+	c.noRecord(c.n, freezeAt(t, 92, "none", "", ""))
+	c.conf.thawTurn(c.zone)
+	if c.known() != 0 {
+		t.Fatalf("nothing heard, a serial that gives roles held: known %d", c.known())
+	}
+	if line := c.conf.thawLine(c.zone); !strings.Contains(line, "waiting for the word of a member, as a serial held gives roles") {
+		t.Errorf("the status while it waits: %q", line)
+	}
+	// the fleet's leader speaks after the first turn: its word is taken
+	c.leadGroup(c.n, roleB)
+	c.hear(roleB, tells(c.n, c.n), true)
+	c.conf.thawTurn(c.zone)
+	if c.known() != 41 {
+		t.Errorf("the leader of 41 tells it after the first turn: known %d", c.known())
+	}
+	cb := &c.conf.InternalMp.thaws
+	cb.mu.Lock()
+	_, kept := cb.restartWaits[canonicalName(c.zone)]
+	cb.mu.Unlock()
+	if kept {
+		t.Error("the wait is kept once the leader's word is known")
+	}
+	// the serials forgotten, then a newer one with no voting member, at a
+	// turn a leaving timeout after the first wait: the rule waits afresh, and
+	// does not take the newest on the first wait's time
+	c.noRecord(c.n, freezeAt(t, 93, "none", "", ""))
+	later := time.Now().Add(leavingTimeoutFor(c.conf.MpConfig()) + time.Second)
+	if v, _ := c.conf.restartView(c.zone, later); v.take != nil || len(v.waits) == 0 {
+		t.Errorf("after a forget, the first wait's time counts: take %v, waits %q", v.take, v.waits)
+	}
+	// nobody speaks: the leaving timeout bounds the wait
+	q := newThawRig(t, "quiet.restart.example.", "")
+	q.noRecord(q.n, freezeAt(t, 92, "none", "", ""))
+	q.conf.thawTurn(q.zone)
+	b := &q.conf.InternalMp.thaws
+	b.mu.Lock()
+	b.restartWaits[canonicalName(q.zone)] = time.Now().Add(-leavingTimeoutFor(q.conf.MpConfig()))
+	b.mu.Unlock()
+	q.conf.thawTurn(q.zone)
+	if q.known() != 92 {
+		t.Errorf("the leaving timeout passed with no word: known %d", q.known())
+	}
+
+	// the leader's stamp of 41, heard longer ago than the leaving timeout,
+	// counts for nothing: a member that tells the newest now is taken
+	s := newThawRig(t, "stale.restart.example.", "")
+	stale := freezeAt(t, 92, "none", "", "")
+	s.noRecord(s.n, stale)
+	s.leadGroup(s.n, roleB)
+	s.hear(roleB, tells(s.n, s.n), true)
+	s.stamps.mu.Lock()
+	m := s.stamps.kept[canonicalName(roleB)]
+	m.Heard = time.Now().Add(-2 * leavingTimeoutFor(s.conf.MpConfig()))
+	for z := range m.ZoneHeard {
+		m.ZoneHeard[z] = m.Heard
+	}
+	s.stamps.mu.Unlock()
+	s.hear(roleN, tells(stale, stale), true)
+	s.conf.thawTurn(s.zone)
+	if s.known() != 92 {
+		t.Errorf("the leader's stamp of 41 is stale, a member tells 92: known %d", s.known())
+	}
+
+	// the leader tells the newest active while another member, not the
+	// leader, still tells 41: nobody leads the newest, and the member behind
+	// vetoes nothing
+	l := newThawRig(t, "lagging.restart.example.", "")
+	newest := freezeAt(t, 92, "none", "", "")
+	l.noRecord(l.n, newest)
+	l.leadGroup(l.n, roleB)
+	l.hear(roleB, tells(newest, newest), true)
+	l.hear(roleN, tells(l.n, l.n), true)
+	l.conf.thawTurn(l.zone)
+	if l.known() != 92 {
+		t.Errorf("the leader tells the newest, a member still 41: known %d", l.known())
+	}
+
+	// a member tells a serial this agent does not hold: nobody votes in the
+	// newest, so it is fetched from that member
+	u := newThawRig(t, "unheld.restart.example.", "")
+	u.noRecord(freezeAt(t, 91, "none", "", ""))
+	other := freezeAt(t, 93, "other", "", "")
+	u.hear(roleB, tells(other, other), true)
+	view, _ := u.conf.restartView(u.zone, time.Now())
+	if len(view.fetch) != 1 || view.fetch[0].member != roleB || view.fetch[0].sd.Serial != 93 {
+		t.Errorf("a serial told that is not held: fetch %+v", view.fetch)
+	}
+}
+
+// A zone that leaves the configuration and comes back in the same run
+// (pruneInstructions): the restart rule's wait it had ends with its serials,
+// and the rule waits afresh, not on the time of the wait from before.
+func TestAZoneAddedAgainWaitsAfresh(t *testing.T) {
+	p := newThawRig(t, "pruned.restart.example.", "")
+	p.noRecord(p.n, freezeAt(t, 92, "none", "", ""))
+	p.conf.thawTurn(p.zone)
+	if p.known() != 0 {
+		t.Fatalf("precondition: a serial that gives roles held, nothing heard: known %d", p.known())
+	}
+	zd, ok := tdns.Zones.Get(p.zone)
+	if !ok {
+		t.Fatal("the zone is not among tdns's zones")
+	}
+	was := zd.Options[tdns.OptMultiProvider]
+	zd.Options[tdns.OptMultiProvider] = false // the zone left the configuration
+	p.conf.pruneInstructions()
+	zd.Options[tdns.OptMultiProvider] = was
+	if p.store.keeps(p.zone) {
+		t.Fatal("the serials of a zone that left the configuration are kept")
+	}
+	p.store.Note(p.zone, p.n, nil)
+	p.store.Note(p.zone, freezeAt(t, 92, "none", "", ""), nil)
+	later := time.Now().Add(leavingTimeoutFor(p.conf.MpConfig()) + time.Second)
+	if v, _ := p.conf.restartView(p.zone, later); v.take != nil || len(v.waits) == 0 {
+		t.Errorf("added again, a leaving timeout after the first wait: take %v, waits %q", v.take, v.waits)
+	}
+}
+
 // A member with no record does not take another member's active serial:
 // only the leader's.
 func TestAMemberWithNoRecordIgnoresAnotherMembersActive(t *testing.T) {
