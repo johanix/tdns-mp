@@ -202,8 +202,14 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 	}
 
 	// No voting member under N: each voting member under V makes V active
-	// when every voting member under V tells V (design 3.2).
+	// when every voting member under V tells V (design 3.2). With none under
+	// V either, nobody is there to tell V or to wait for: every agent makes V
+	// active at once (the project owner, 2026-11-06).
 	if len(votersN) == 0 {
+		if len(votersV) == 0 {
+			v.leads = true
+			return v, true
+		}
 		v.leads = isAmong(votersV, AgentId(local))
 		if !v.leads {
 			return v, true
