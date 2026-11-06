@@ -21,352 +21,352 @@ import (
 // DDNS to the parent) and peer notification after successful syncs.
 // The base DelegationSyncher in tdns handles the non-MP case (no
 // leader election, no peer notification).
+//
+// Each request runs as handleDelegationSyncRequest on tdns's per-parent
+// queues (tdns.RunDelegationSyncLanes, tdns #1002): a parent that does not
+// answer holds up only the syncs of the zones under it, and a zone's own
+// requests run one at a time, in order.
 func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.DelegationSyncRequest, notifyq chan tdns.NotifyRequest, conf *Config) error {
 
 	lg.Info("DelegationSyncher: starting")
+	return tdns.RunDelegationSyncLanes(ctx, delsyncq, func(ctx context.Context, ds tdns.DelegationSyncRequest) {
+		hdb.handleDelegationSyncRequest(ctx, notifyq, conf, ds)
+	})
+}
+
+// handleDelegationSyncRequest runs one request: the syncher's body. Requests
+// for zones under different parents run at the same time.
+func (hdb *HsyncDB) handleDelegationSyncRequest(ctx context.Context, notifyq chan tdns.NotifyRequest, conf *Config, ds tdns.DelegationSyncRequest) {
 	imr := func() *Imr {
 		return &Imr{conf.Config.Internal.ImrEngine}
 	}
-	var err error
-	for {
-		select {
-		case <-ctx.Done():
-			lg.Info("DelegationSyncher: terminating due to context cancelled")
-			return nil
-		case ds, ok := <-delsyncq:
-			if !ok {
-				lg.Info("DelegationSyncher: delsyncq closed, terminating")
-				return nil
-			}
-			zd := ds.ZoneData
-			dss := ds.SyncStatus
+	zd := ds.ZoneData
+	dss := ds.SyncStatus
 
-			switch ds.Command {
+	switch ds.Command {
 
-			case "DELEGATION-SYNC-SETUP":
-				// a multi-provider zone's SIG(0) key is the leader's key
-				// set-up's alone (step 7b): tdns's setup would make a key
-				// when none is held, or publish another beside the zone's
-				if !setupArmRuns(zd) {
-					lg.Info("DelegationSyncher: a multi-provider zone's SIG(0) key is the leader's key set-up's, skipping the setup", "zone", ds.ZoneName)
-					continue
-				}
-				err = zd.DelegationSyncSetup(ctx, hdb.KeyDB)
-				if err != nil {
-					lg.Error("DelegationSyncher: error from DelegationSyncSetup, ignoring sync request", "zone", ds.ZoneName, "err", err)
-					continue
-				}
+	case "DELEGATION-SYNC-SETUP":
+		// a multi-provider zone's SIG(0) key is the leader's key
+		// set-up's alone (step 7b): tdns's setup would make a key
+		// when none is held, or publish another beside the zone's
+		if !setupArmRuns(zd) {
+			lg.Info("DelegationSyncher: a multi-provider zone's SIG(0) key is the leader's key set-up's, skipping the setup", "zone", ds.ZoneName)
+			return
+		}
+		err := zd.DelegationSyncSetup(ctx, hdb.KeyDB)
+		if err != nil {
+			lg.Error("DelegationSyncher: error from DelegationSyncSetup, ignoring sync request", "zone", ds.ZoneName, "err", err)
+			return
+		}
 
-			case "INITIAL-KEY-UPLOAD":
-				lg.Info("DelegationSyncher: request for initial key upload", "zone", zd.ZoneName)
-				lg.Info("DelegationSyncher: initial key upload complete", "zone", ds.ZoneName)
-				continue
+	case "INITIAL-KEY-UPLOAD":
+		lg.Info("DelegationSyncher: request for initial key upload", "zone", zd.ZoneName)
+		lg.Info("DelegationSyncher: initial key upload complete", "zone", ds.ZoneName)
+		return
 
-			case "DELEGATION-STATUS":
-				lg.Info("DelegationSyncher: request for delegation status", "zone", zd.ZoneName)
+	case "DELEGATION-STATUS":
+		lg.Info("DelegationSyncher: request for delegation status", "zone", zd.ZoneName)
 
-				syncstate, err := zd.AnalyseZoneDelegation(imr().Imr)
-				if err != nil {
-					lg.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
-					syncstate.Error = true
-					syncstate.ErrorMsg = err.Error()
-				}
-				if ds.Response != nil {
-					ds.Response <- syncstate
-				}
-				continue
+		syncstate, err := zd.AnalyseZoneDelegation(imr().Imr)
+		if err != nil {
+			lg.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
+			syncstate.Error = true
+			syncstate.ErrorMsg = err.Error()
+		}
+		if ds.Response != nil {
+			ds.Response <- syncstate
+		}
+		return
 
-			case "SYNC-DELEGATION":
-				lg.Info("DelegationSyncher: request for delegation sync",
-					"zone", ds.ZoneName,
-					"ns_removes", len(dss.NsRemoves), "ns_adds", len(dss.NsAdds),
-					"a_removes", len(dss.ARemoves), "a_adds", len(dss.AAdds),
-					"aaaa_removes", len(dss.AAAARemoves), "aaaa_adds", len(dss.AAAAAdds))
+	case "SYNC-DELEGATION":
+		lg.Info("DelegationSyncher: request for delegation sync",
+			"zone", ds.ZoneName,
+			"ns_removes", len(dss.NsRemoves), "ns_adds", len(dss.NsAdds),
+			"a_removes", len(dss.ARemoves), "a_adds", len(dss.AAdds),
+			"aaaa_removes", len(dss.AAAARemoves), "aaaa_adds", len(dss.AAAAAdds))
 
-				// No agent the zone no longer has sends to its parent: the owner
-				// removed it in the refresh that queued this (stillParticipates).
-				// Asked first: such an agent may have the option off too, and the
-				// owner's reason would then be the wrong one.
-				if ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] && !conf.stillParticipates(ds.ZoneName) {
-					lg.Info("DelegationSyncher: this agent no longer participates in the zone, skipping DDNS", "zone", ds.ZoneName)
-					conf.delegationSyncNotLeading(ds.ZoneName, false)
-					continue
-				}
-				// No agent sends to the parent of a zone whose owner syncs its
-				// delegation; the request was queued before the owner took
-				// the sync over
-				if ownerSyncsDelegation(ds.ZoneData) {
-					lg.Info("DelegationSyncher: the zone's owner syncs its delegation, skipping DDNS", "zone", ds.ZoneName)
-					conf.delegationSyncOwnerSyncs(ds.ZoneName)
-					continue
-				}
+		// No agent the zone no longer has sends to its parent: the owner
+		// removed it in the refresh that queued this (stillParticipates).
+		// Asked first: such an agent may have the option off too, and the
+		// owner's reason would then be the wrong one.
+		if ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] && !conf.stillParticipates(ds.ZoneName) {
+			lg.Info("DelegationSyncher: this agent no longer participates in the zone, skipping DDNS", "zone", ds.ZoneName)
+			conf.delegationSyncNotLeading(ds.ZoneName, false)
+			return
+		}
+		// No agent sends to the parent of a zone whose owner syncs its
+		// delegation; the request was queued before the owner took
+		// the sync over
+		if ownerSyncsDelegation(ds.ZoneData) {
+			lg.Info("DelegationSyncher: the zone's owner syncs its delegation, skipping DDNS", "zone", ds.ZoneName)
+			conf.delegationSyncOwnerSyncs(ds.ZoneName)
+			return
+		}
 
-				// Only the elected leader of a multi-provider zone sends to the
-				// parent; a zone this daemon is primary for alone (its
-				// identity zone) has no election to wait for.
-				if lem := conf.InternalMp.LeaderElectionManager; lem != nil && ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] {
-					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
-						lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
-						// a chain left from a term this agent led is over
-						conf.delegationSyncNotLeading(ds.ZoneName, false)
-						continue
-					}
-				}
-				// Nothing goes to the parent of a zone that is not caught up:
-				// the sync is owed, and the answer that completes the
-				// catch-up asks for it (design 5.6)
-				if held, _ := conf.holdLeaderSync(ds); held {
-					continue
-				}
-				// Nor while the zone's SIG(0) key is not held, not the one
-				// tdns signs with, or being bootstrapped (step 7b): owed, and
-				// asked for when the key's hold ends
-				if held, _ := conf.holdForZoneKey(ctx, ds); held {
-					continue
-				}
-				// Nor while the zone is frozen (plan S6), unless the DS set
-				// is what differs: owed, and asked for when the transition
-				// is done
-				if held, why := conf.syncHeld(ds.ZoneName, syncCauseOf(ds.SyncStatus)); held {
-					lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", ds.ZoneName, "phase", why)
-					continue
-				}
-
-				// The refresh's request has nobody that asks again: a leader's
-				// sync of a multi-provider zone that fails here is owed or
-				// retried as the explicit arm's is (#247), unless this agent
-				// no longer takes part in the zone or leads it by then. The
-				// retry is an explicit sync, which compares with the parent,
-				// not with what this refresh changed.
-				retried := func() bool {
-					return mpLeaderSync(conf, ds) && conf.stillParticipates(ds.ZoneName) && conf.stillLeads(ds.ZoneName)
-				}
-				zd := ds.ZoneData
-				if p := zd.GetParent(); p == "" || p == "." {
-					parent, perr := imr().Imr.ParentZone(zd.ZoneName)
-					if perr != nil {
-						if !retried() {
-							lg.Error("DelegationSyncher: error from ParentZone, ignoring sync request", "zone", ds.ZoneName, "err", perr)
-						} else if logIt, since := conf.InternalMp.CatchUp.oweAfterFailedAnalysis(ZoneName(ds.ZoneName), perr); logIt {
-							lg.Error("DelegationSyncher: the zone's parent cannot be found; the sync is owed, and asked for again every 30 s while the zone is caught up",
-								"zone", ds.ZoneName, "since", since.UTC().Format(time.RFC3339), "err", perr)
-						}
-						continue
-					}
-					zd.SetParent(parent)
-				}
-
-				msg, rcode, ur, pending, err := hdb.syncDelegation(ctx, conf, notifyq, ds, ds.SyncStatus, imr().Imr)
-				if err != nil {
-					if !retried() {
-						lg.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
-						continue
-					}
-					lg.Error("DelegationSyncher: error from SyncZoneDelegation", "zone", ds.ZoneName, "err", err)
-					conf.leaderSyncFailed(ctx, ds, err)
-					continue
-				}
-				ds.SyncStatus.UpdateResult = ur
-				lg.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
-				if pending {
-					// A sync sent as a NOTIFY is not done, and the peers
-					// are told nothing, until the parent is seen in sync
-					continue
-				}
-				// Notify peer agents that parent sync is done
-				go notifyPeersParentSyncDone(conf, ds.ZoneName, dns.RcodeToString[int(rcode)], msg)
-
-			case "EXPLICIT-SYNC-DELEGATION":
-				lg.Info("DelegationSyncher: request for explicit delegation sync", "zone", ds.ZoneName)
-
-				// The reasons to send nothing come before the parent is
-				// asked, the hold among them: a leader's sync of a zone that
-				// is not caught up is owed, whether the parent answers or
-				// not (design 5.6). Their answer to the operator is the
-				// reason; the analysis is not made.
-				skipped := tdns.DelegationSyncStatus{ZoneName: ds.ZoneName, Time: time.Now()}
-				skip := func(msg string) {
-					skipped.Msg = msg
-					if ds.Response != nil {
-						ds.Response <- skipped
-					}
-				}
-				// An agent the zone no longer has first, as above
-				if ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] && !conf.stillParticipates(ds.ZoneName) {
-					lg.Info("DelegationSyncher: this agent no longer participates in the zone, skipping DDNS", "zone", ds.ZoneName)
-					conf.delegationSyncNotLeading(ds.ZoneName, false)
-					skip("this agent no longer participates in the zone, skipping DDNS")
-					continue
-				}
-				// No agent sends to the parent of a zone whose owner syncs its
-				// delegation; the request was queued before the owner took
-				// the sync over
-				if ownerSyncsDelegation(ds.ZoneData) {
-					lg.Info("DelegationSyncher: the zone's owner syncs its delegation, skipping DDNS", "zone", ds.ZoneName)
-					conf.delegationSyncOwnerSyncs(ds.ZoneName)
-					skip("the zone's owner syncs its delegation, skipping DDNS")
-					continue
-				}
-				// Only the elected leader of a multi-provider zone sends to the
-				// parent; a zone this daemon is primary for alone (its
-				// identity zone) has no election to wait for.
-				if lem := conf.InternalMp.LeaderElectionManager; lem != nil && ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] {
-					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
-						lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
-						// a chain left from a term this agent led is over
-						conf.delegationSyncNotLeading(ds.ZoneName, false)
-						skip("not the delegation sync leader, skipping DDNS")
-						continue
-					}
-				}
-				// Held while the zone is not caught up: the operator is told
-				// so, with no error
-				if held, waiting := conf.holdLeaderSync(ds); held {
-					skip(fmt.Sprintf("the sync with the parent is held until the zone is caught up; waiting for %s", waiting))
-					continue
-				}
-				// Held for the zone's SIG(0) key (step 7b): answered at once,
-				// also when it is the key poll's own sync after the parent
-				// trusts the key, sent while the poll still counts as running
-				if held, why := conf.holdForZoneKey(ctx, ds); held {
-					skip("the sync with the parent waits for the zone's SIG(0) key (" + why + ")")
-					continue
-				}
-
-				syncstate, err := zd.AnalyseZoneDelegation(imr().Imr)
-				if err != nil {
-					syncstate.Error = true
-					syncstate.ErrorMsg = err.Error()
-					if ds.Response != nil {
-						ds.Response <- syncstate
-					}
-					// The leader's sync of a multi-provider zone that could
-					// not ask the parent is owed, and asked again every 30 s
-					// while it is owed and the zone is caught up, until the
-					// parent answers. That is its retry: it does not count
-					// as a failed sync, so an outage does not grow the
-					// backoff that the first real failure after it would
-					// wait (the rig's parent-unreach). One line an hour says
-					// the parent does not answer, not one per try.
-					//
-					// A sync that was stopped because this agent no longer
-					// takes part in the zone (followParentSyncParam) is not a
-					// failure to ask again for.
-					if mpLeaderSync(conf, ds) && conf.stillParticipates(ds.ZoneName) {
-						if logIt, since := conf.InternalMp.CatchUp.oweAfterFailedAnalysis(ZoneName(ds.ZoneName), err); logIt {
-							lg.Error("DelegationSyncher: the parent's delegation cannot be analysed; the sync is owed, and asked for again every 30 s while the zone is caught up",
-								"zone", ds.ZoneName, "since", since.UTC().Format(time.RFC3339), "err", err)
-						}
-					} else {
-						lg.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
-					}
-					continue
-				}
-				if was, since := conf.InternalMp.CatchUp.parentAnswered(ZoneName(ds.ZoneName)); was {
-					lg.Info("DelegationSyncher: the parent's delegation can be analysed again", "zone", ds.ZoneName,
-						"down_since", since.UTC().Format(time.RFC3339))
-				}
-
-				if syncstate.InSync {
-					// With no DS set to compare, for a zone that names a
-					// signer, NS and glue being in step is not "in sync"
-					if waiting, unknown := conf.dsSetUnknown(ds); unknown {
-						lg.Info("DelegationSyncher: NS and glue are in sync with the parent, the DS set is unknown",
-							"zone", syncstate.ZoneName, "waiting_for", waiting)
-						syncstate.Msg = fmt.Sprintf("NS and glue are in sync with the parent; the DS set is unknown, waiting for %s", waiting)
-						conf.delegationSyncInSync(ds.ZoneName, false)
-						if ds.Response != nil {
-							ds.Response <- syncstate
-						}
-						continue
-					}
-					lg.Info("DelegationSyncher: delegation data in parent is in sync with child, no action needed",
-						"zone", syncstate.ZoneName, "parent", syncstate.Parent)
-					// This ends the zone's retries. It is also what a sync
-					// that went out as a NOTIFY waits for: the peers are
-					// told of that sync now
-					conf.delegationSyncInSync(ds.ZoneName, true)
-					if ds.Response != nil {
-						ds.Response <- syncstate
-					}
-					continue
-				}
-
-				// Not in sync. While the zone is frozen the sync goes only
-				// when the DS set differs, which a rollover under way or an
-				// emergency one changes (plan S6); it carries the whole
-				// delegation by the sets the parts hold. Any other is owed
-				// until the transition is done. Asked after the analysis,
-				// which only reads, since it tells the two apart.
-				if held, why := conf.syncHeld(ds.ZoneName, syncCauseOf(syncstate)); held {
-					lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", ds.ZoneName, "phase", why)
-					syncstate.Msg = fmt.Sprintf("the sync with the parent is held during the transition (%s); it is sent when the transition is done", why)
-					if ds.Response != nil {
-						ds.Response <- syncstate
-					}
-					continue
-				}
-				msg, rcode, ur, pending, err := hdb.syncDelegation(ctx, conf, notifyq, ds, syncstate, imr().Imr)
-				if err != nil {
-					lg.Error("DelegationSyncher: error from SyncZoneDelegation", "zone", ds.ZoneName, "err", err)
-					syncstate.Error = true
-					syncstate.ErrorMsg = err.Error()
-					syncstate.UpdateResult = ur
-					// a refusal that passes by itself (a SIG(0) key the parent
-					// has not finished verifying) must not leave the parent
-					// without the DS set until the keys change again
-					//
-					// A sync that was stopped because this agent no longer
-					// takes part in the zone (followParentSyncParam), or no
-					// longer leads it (the zone left the group it led, step
-					// 8), is not a failure to ask again for.
-					conf.leaderSyncFailed(ctx, ds, err)
-				} else {
-					lg.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
-					// A sync sent as a NOTIFY is not done, and the peers
-					// are told nothing, until the parent is seen in sync
-					if !pending {
-						conf.delegationSyncSucceeded(ds.ZoneName)
-						// Notify peer agents that parent sync is done
-						go notifyPeersParentSyncDone(conf, ds.ZoneName, dns.RcodeToString[int(rcode)], msg)
-					}
-				}
-				syncstate.Msg = msg
-				syncstate.Rcode = rcode
-
-				if ds.Response != nil {
-					ds.Response <- syncstate
-				}
-				continue
-
-			case "SYNC-DNSKEY-RRSET":
-				lg.Info("DelegationSyncher: request for DNSKEY RRset sync", "zone", ds.ZoneName)
-				if zd.Options[tdns.OptMultiProvider] {
-					lg.Info("DelegationSyncher: multisigner zone, notifying controller", "zone", ds.ZoneName)
-					notifyq <- tdns.NotifyRequest{
-						ZoneName: zd.ZoneName,
-						ZoneData: zd,
-						RRtype:   dns.TypeDNSKEY,
-						Targets:  zd.MultiSigner.Controller.Notify.Targets,
-						Urgent:   true,
-					}
-				}
-
-				// Publish CDS records from current DNSKEYs if zone has delegation
-				// sync; not for an owned zone, whose CDS is its DS set's, served
-				// by the signer's DS engine (S5, arrow 1)
-				if syncherPublishesDNSKEYCDS(conf, zd) {
-					if err := zd.PublishCdsRRs(); err != nil {
-						lg.Error("DelegationSyncher: error publishing CDS", "zone", zd.ZoneName, "err", err)
-					} else {
-						lg.Info("DelegationSyncher: published CDS from DNSKEYs", "zone", zd.ZoneName)
-					}
-				}
-
-			default:
-				lg.Warn("DelegationSyncher: unknown command, ignoring", "zone", ds.ZoneName, "command", ds.Command)
+		// Only the elected leader of a multi-provider zone sends to the
+		// parent; a zone this daemon is primary for alone (its
+		// identity zone) has no election to wait for.
+		if lem := conf.InternalMp.LeaderElectionManager; lem != nil && ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] {
+			if !lem.IsLeader(ZoneName(ds.ZoneName)) {
+				lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
+				// a chain left from a term this agent led is over
+				conf.delegationSyncNotLeading(ds.ZoneName, false)
+				return
 			}
 		}
+		// Nothing goes to the parent of a zone that is not caught up:
+		// the sync is owed, and the answer that completes the
+		// catch-up asks for it (design 5.6)
+		if held, _ := conf.holdLeaderSync(ds); held {
+			return
+		}
+		// Nor while the zone's SIG(0) key is not held, not the one
+		// tdns signs with, or being bootstrapped (step 7b): owed, and
+		// asked for when the key's hold ends
+		if held, _ := conf.holdForZoneKey(ctx, ds); held {
+			return
+		}
+		// Nor while the zone is frozen (plan S6), unless the DS set
+		// is what differs: owed, and asked for when the transition
+		// is done
+		if held, why := conf.syncHeld(ds.ZoneName, syncCauseOf(ds.SyncStatus)); held {
+			lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", ds.ZoneName, "phase", why)
+			return
+		}
+
+		// The refresh's request has nobody that asks again: a leader's
+		// sync of a multi-provider zone that fails here is owed or
+		// retried as the explicit arm's is (#247), unless this agent
+		// no longer takes part in the zone or leads it by then. The
+		// retry is an explicit sync, which compares with the parent,
+		// not with what this refresh changed.
+		retried := func() bool {
+			return mpLeaderSync(conf, ds) && conf.stillParticipates(ds.ZoneName) && conf.stillLeads(ds.ZoneName)
+		}
+		zd := ds.ZoneData
+		if p := zd.GetParent(); p == "" || p == "." {
+			parent, perr := imr().Imr.ParentZone(zd.ZoneName)
+			if perr != nil {
+				if !retried() {
+					lg.Error("DelegationSyncher: error from ParentZone, ignoring sync request", "zone", ds.ZoneName, "err", perr)
+				} else if logIt, since := conf.InternalMp.CatchUp.oweAfterFailedAnalysis(ZoneName(ds.ZoneName), perr); logIt {
+					lg.Error("DelegationSyncher: the zone's parent cannot be found; the sync is owed, and asked for again every 30 s while the zone is caught up",
+						"zone", ds.ZoneName, "since", since.UTC().Format(time.RFC3339), "err", perr)
+				}
+				return
+			}
+			zd.SetParent(parent)
+		}
+
+		msg, rcode, ur, pending, err := hdb.syncDelegation(ctx, conf, notifyq, ds, ds.SyncStatus, imr().Imr)
+		if err != nil {
+			if !retried() {
+				lg.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
+				return
+			}
+			lg.Error("DelegationSyncher: error from SyncZoneDelegation", "zone", ds.ZoneName, "err", err)
+			conf.leaderSyncFailed(ctx, ds, err)
+			return
+		}
+		ds.SyncStatus.UpdateResult = ur
+		lg.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
+		if pending {
+			// A sync sent as a NOTIFY is not done, and the peers
+			// are told nothing, until the parent is seen in sync
+			return
+		}
+		// Notify peer agents that parent sync is done
+		go notifyPeersParentSyncDone(conf, ds.ZoneName, dns.RcodeToString[int(rcode)], msg)
+
+	case "EXPLICIT-SYNC-DELEGATION":
+		lg.Info("DelegationSyncher: request for explicit delegation sync", "zone", ds.ZoneName)
+
+		// The reasons to send nothing come before the parent is
+		// asked, the hold among them: a leader's sync of a zone that
+		// is not caught up is owed, whether the parent answers or
+		// not (design 5.6). Their answer to the operator is the
+		// reason; the analysis is not made.
+		skipped := tdns.DelegationSyncStatus{ZoneName: ds.ZoneName, Time: time.Now()}
+		skip := func(msg string) {
+			skipped.Msg = msg
+			if ds.Response != nil {
+				ds.Response <- skipped
+			}
+		}
+		// An agent the zone no longer has first, as above
+		if ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] && !conf.stillParticipates(ds.ZoneName) {
+			lg.Info("DelegationSyncher: this agent no longer participates in the zone, skipping DDNS", "zone", ds.ZoneName)
+			conf.delegationSyncNotLeading(ds.ZoneName, false)
+			skip("this agent no longer participates in the zone, skipping DDNS")
+			return
+		}
+		// No agent sends to the parent of a zone whose owner syncs its
+		// delegation; the request was queued before the owner took
+		// the sync over
+		if ownerSyncsDelegation(ds.ZoneData) {
+			lg.Info("DelegationSyncher: the zone's owner syncs its delegation, skipping DDNS", "zone", ds.ZoneName)
+			conf.delegationSyncOwnerSyncs(ds.ZoneName)
+			skip("the zone's owner syncs its delegation, skipping DDNS")
+			return
+		}
+		// Only the elected leader of a multi-provider zone sends to the
+		// parent; a zone this daemon is primary for alone (its
+		// identity zone) has no election to wait for.
+		if lem := conf.InternalMp.LeaderElectionManager; lem != nil && ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] {
+			if !lem.IsLeader(ZoneName(ds.ZoneName)) {
+				lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
+				// a chain left from a term this agent led is over
+				conf.delegationSyncNotLeading(ds.ZoneName, false)
+				skip("not the delegation sync leader, skipping DDNS")
+				return
+			}
+		}
+		// Held while the zone is not caught up: the operator is told
+		// so, with no error
+		if held, waiting := conf.holdLeaderSync(ds); held {
+			skip(fmt.Sprintf("the sync with the parent is held until the zone is caught up; waiting for %s", waiting))
+			return
+		}
+		// Held for the zone's SIG(0) key (step 7b): answered at once,
+		// also when it is the key poll's own sync after the parent
+		// trusts the key, sent while the poll still counts as running
+		if held, why := conf.holdForZoneKey(ctx, ds); held {
+			skip("the sync with the parent waits for the zone's SIG(0) key (" + why + ")")
+			return
+		}
+
+		syncstate, err := zd.AnalyseZoneDelegation(imr().Imr)
+		if err != nil {
+			syncstate.Error = true
+			syncstate.ErrorMsg = err.Error()
+			if ds.Response != nil {
+				ds.Response <- syncstate
+			}
+			// The leader's sync of a multi-provider zone that could
+			// not ask the parent is owed, and asked again every 30 s
+			// while it is owed and the zone is caught up, until the
+			// parent answers. That is its retry: it does not count
+			// as a failed sync, so an outage does not grow the
+			// backoff that the first real failure after it would
+			// wait (the rig's parent-unreach). One line an hour says
+			// the parent does not answer, not one per try.
+			//
+			// A sync that was stopped because this agent no longer
+			// takes part in the zone (followParentSyncParam) is not a
+			// failure to ask again for.
+			if mpLeaderSync(conf, ds) && conf.stillParticipates(ds.ZoneName) {
+				if logIt, since := conf.InternalMp.CatchUp.oweAfterFailedAnalysis(ZoneName(ds.ZoneName), err); logIt {
+					lg.Error("DelegationSyncher: the parent's delegation cannot be analysed; the sync is owed, and asked for again every 30 s while the zone is caught up",
+						"zone", ds.ZoneName, "since", since.UTC().Format(time.RFC3339), "err", err)
+				}
+			} else {
+				lg.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
+			}
+			return
+		}
+		if was, since := conf.InternalMp.CatchUp.parentAnswered(ZoneName(ds.ZoneName)); was {
+			lg.Info("DelegationSyncher: the parent's delegation can be analysed again", "zone", ds.ZoneName,
+				"down_since", since.UTC().Format(time.RFC3339))
+		}
+
+		if syncstate.InSync {
+			// With no DS set to compare, for a zone that names a
+			// signer, NS and glue being in step is not "in sync"
+			if waiting, unknown := conf.dsSetUnknown(ds); unknown {
+				lg.Info("DelegationSyncher: NS and glue are in sync with the parent, the DS set is unknown",
+					"zone", syncstate.ZoneName, "waiting_for", waiting)
+				syncstate.Msg = fmt.Sprintf("NS and glue are in sync with the parent; the DS set is unknown, waiting for %s", waiting)
+				conf.delegationSyncInSync(ds.ZoneName, false)
+				if ds.Response != nil {
+					ds.Response <- syncstate
+				}
+				return
+			}
+			lg.Info("DelegationSyncher: delegation data in parent is in sync with child, no action needed",
+				"zone", syncstate.ZoneName, "parent", syncstate.Parent)
+			// This ends the zone's retries. It is also what a sync
+			// that went out as a NOTIFY waits for: the peers are
+			// told of that sync now
+			conf.delegationSyncInSync(ds.ZoneName, true)
+			if ds.Response != nil {
+				ds.Response <- syncstate
+			}
+			return
+		}
+
+		// Not in sync. While the zone is frozen the sync goes only
+		// when the DS set differs, which a rollover under way or an
+		// emergency one changes (plan S6); it carries the whole
+		// delegation by the sets the parts hold. Any other is owed
+		// until the transition is done. Asked after the analysis,
+		// which only reads, since it tells the two apart.
+		if held, why := conf.syncHeld(ds.ZoneName, syncCauseOf(syncstate)); held {
+			lg.Info("DelegationSyncher: the sync with the parent is held during the transition", "zone", ds.ZoneName, "phase", why)
+			syncstate.Msg = fmt.Sprintf("the sync with the parent is held during the transition (%s); it is sent when the transition is done", why)
+			if ds.Response != nil {
+				ds.Response <- syncstate
+			}
+			return
+		}
+		msg, rcode, ur, pending, err := hdb.syncDelegation(ctx, conf, notifyq, ds, syncstate, imr().Imr)
+		if err != nil {
+			lg.Error("DelegationSyncher: error from SyncZoneDelegation", "zone", ds.ZoneName, "err", err)
+			syncstate.Error = true
+			syncstate.ErrorMsg = err.Error()
+			syncstate.UpdateResult = ur
+			// a refusal that passes by itself (a SIG(0) key the parent
+			// has not finished verifying) must not leave the parent
+			// without the DS set until the keys change again
+			//
+			// A sync that was stopped because this agent no longer
+			// takes part in the zone (followParentSyncParam), or no
+			// longer leads it (the zone left the group it led, step
+			// 8), is not a failure to ask again for.
+			conf.leaderSyncFailed(ctx, ds, err)
+		} else {
+			lg.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
+			// A sync sent as a NOTIFY is not done, and the peers
+			// are told nothing, until the parent is seen in sync
+			if !pending {
+				conf.delegationSyncSucceeded(ds.ZoneName)
+				// Notify peer agents that parent sync is done
+				go notifyPeersParentSyncDone(conf, ds.ZoneName, dns.RcodeToString[int(rcode)], msg)
+			}
+		}
+		syncstate.Msg = msg
+		syncstate.Rcode = rcode
+
+		if ds.Response != nil {
+			ds.Response <- syncstate
+		}
+		return
+
+	case "SYNC-DNSKEY-RRSET":
+		lg.Info("DelegationSyncher: request for DNSKEY RRset sync", "zone", ds.ZoneName)
+		if zd.Options[tdns.OptMultiProvider] {
+			lg.Info("DelegationSyncher: multisigner zone, notifying controller", "zone", ds.ZoneName)
+			notifyq <- tdns.NotifyRequest{
+				ZoneName: zd.ZoneName,
+				ZoneData: zd,
+				RRtype:   dns.TypeDNSKEY,
+				Targets:  zd.MultiSigner.Controller.Notify.Targets,
+				Urgent:   true,
+			}
+		}
+
+		// Publish CDS records from current DNSKEYs if zone has delegation
+		// sync; not for an owned zone, whose CDS is its DS set's, served
+		// by the signer's DS engine (S5, arrow 1)
+		if syncherPublishesDNSKEYCDS(conf, zd) {
+			if err := zd.PublishCdsRRs(); err != nil {
+				lg.Error("DelegationSyncher: error publishing CDS", "zone", zd.ZoneName, "err", err)
+			} else {
+				lg.Info("DelegationSyncher: published CDS from DNSKEYs", "zone", zd.ZoneName)
+			}
+		}
+
+	default:
+		lg.Warn("DelegationSyncher: unknown command, ignoring", "zone", ds.ZoneName, "command", ds.Command)
 	}
 }
 
