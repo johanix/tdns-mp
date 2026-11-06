@@ -1102,6 +1102,41 @@ func TestALeaderOwesTheRollOwedThatItHolds(t *testing.T) {
 	}
 }
 
+// A roll that a pass ends as the leader's turn reads the debt is not owed
+// again: the turn looks under the zone's key setup, where the pass notes the
+// roll done and forgets it.
+func TestARollEndedAsTheTurnLooksIsNotOwedAgain(t *testing.T) {
+	r := newRollRig(t, "debt.race.roll.example.")
+	s := debtStore(t, r.conf)
+	if err := s.noteRollDebt(string(r.zone), time.Now().Add(-time.Minute), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveRoll(r.mpzd.KeyDB, &sig0Roll{zone: r.zone, phase: rollActivated, started: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	turned := make(chan struct{})
+	_ = r.conf.keySetupLocked(r.zone, func() error {
+		// the pass's end, the roll forgotten before its done is noted, with
+		// the turn under way meanwhile
+		if err := deleteRoll(r.mpzd.KeyDB, r.zone); err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			defer close(turned)
+			r.conf.rollDebtTurn(string(r.zone))
+		}()
+		time.Sleep(100 * time.Millisecond)
+		if err := s.noteRollDebt(string(r.zone), time.Time{}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	})
+	<-turned
+	if ro := r.roll(t); ro != nil {
+		t.Errorf("the roll ended was owed again: %+v", ro)
+	}
+}
+
 // A roll owed for more than twice roll-retry is warned of, once an hour.
 func TestARollOwedTooLongIsWarnedOf(t *testing.T) {
 	r := newRollRig(t, "debt.warn.roll.example.")
