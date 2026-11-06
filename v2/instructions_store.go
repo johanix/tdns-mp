@@ -504,7 +504,12 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 	// No HSYNCPARAM, with HSYNC3 records or without: the owner expresses no
 	// intent, and there is no serial to keep (the project owner, 2026-11-06).
 	noIntent := readErr == nil && (in == nil || !in.HasParam)
-	if noIntent {
+	// An HSYNCPARAM without serial= that gives no role is a benign owner
+	// error: reported, and holding nothing while no serial held gives roles
+	// either (the project owner, 2026-11-06).
+	var ns noSerialError
+	benign := errors.As(readErr, &ns) && !ns.roles
+	if noIntent || benign {
 		s.mu.Lock()
 		_, kept := s.zones[zone]
 		s.mu.Unlock()
@@ -514,6 +519,12 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 	}
 	err := s.update(zone, func(z *zoneSerials) error {
 		switch {
+		case benign && !givesRoles(activeOrHeld(z)):
+			if z.CopyError != readErr.Error() {
+				lg.Warn("a benign owner error in the zone's instructions: no role is given, and nothing is held", "zone", zone, "error", readErr.Error())
+			}
+			z.Copy, z.CopyError = SerialDigest{}, readErr.Error()
+			return nil
 		case readErr != nil:
 			z.Copy, z.CopyError = SerialDigest{}, readErr.Error()
 			z.ownerError(zone, readErr.Error())
@@ -599,6 +610,21 @@ var errEndOfService = errors.New("the zone's instructions are gone")
 // participantsOf counts the voting members.
 func givesRoles(in *Instructions) bool {
 	return in != nil && len(identities(in.providers(slices.Concat(in.Servers, in.Signers)))) > 0
+}
+
+// activeOrHeld is a reading that gives roles among the zone's active serial
+// or, with none known, the serials it holds, if any does; the active reading
+// or nil otherwise. Called inside update.
+func activeOrHeld(z *zoneSerials) *Instructions {
+	if z.Active != nil {
+		return z.Active.Reading
+	}
+	for i := range z.Held {
+		if givesRoles(z.Held[i].Reading) {
+			return z.Held[i].Reading
+		}
+	}
+	return nil
 }
 
 // Activate makes the thaw's target the zone's active serial (S7). It
