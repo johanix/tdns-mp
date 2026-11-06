@@ -751,6 +751,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				// names its records as ignored (#288).
 				if detail.Status == "SUCCESS" || detail.Status == "ok" {
 					zdr.noteCombinerConfirmed(detail.Zone, detail.DistributionID, time.Now())
+					conf.leaderKEYConfirmed(zdr, detail.Zone, detail.DistributionID)
 				} else {
 					all, ignored := combinerIgnoredTypes(detail)
 					zdr.noteCombinerFailed(detail.Zone, detail.DistributionID, all, ignored)
