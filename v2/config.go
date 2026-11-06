@@ -393,4 +393,7 @@ type InternalMpConf struct {
 	// transfers: the agent's transfer confirmations for a server role's
 	// step (server_role.go).
 	transfers transferBook
+	// upstreamXfrs: the XFR addresses the agent's upstreams named, for its
+	// operator's hint (server_role.go).
+	upstreamXfrs upstreamXfrBook
 }
