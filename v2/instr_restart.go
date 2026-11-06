@@ -244,9 +244,8 @@ func (conf *Config) restartRule(zone string, now time.Time) (restartView, bool) 
 		t = tm.stamps
 	}
 	told := t.firstHand(canonicalName(name))
-	if len(voters) == 0 && noVoterWord(s, name, newest.SerialDigest, told) {
-		sd := newest.SerialDigest
-		v.take, v.by, v.from = &sd, local, knownFromNoVoter
+	if len(voters) == 0 {
+		conf.noVoterWord(&v, newest, told, now)
 		return v, true
 	}
 	switch {
@@ -323,26 +322,84 @@ func (conf *Config) restartRule(zone string, now time.Time) (restartView, bool) 
 	return v, true
 }
 
-// noVoterWord: the newest serial, which has no voting member, is taken at once
-// (the project owner, 2026-11-06): nobody leads it or tells it. Not while a
-// member tells another active serial that has a voting member, or that this
-// agent does not hold: an agent that lost its record takes the word of a fleet
-// whose active serial gives roles, as leadersWord has it.
-func noVoterWord(s *InstructionStore, zone string, newest SerialDigest, told map[string]toldStamp) bool {
-	for _, st := range told {
-		if !st.Known || st.ActiveDigest == "" {
-			continue
-		}
-		sd := SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}
-		if sd == newest {
-			continue
-		}
-		in := s.readingAt(zone, sd)
-		if in == nil || len(identities(in.providers(slices.Concat(in.Servers, in.Signers)))) > 0 {
-			return false
+// noVoterWord is the restart rule for a newest serial with no voting member
+// (the project owner, 2026-11-06): nobody leads it. Only stamps heard within
+// the leaving timeout count, so a member gone silent holds nothing. The
+// leader's word of a serial it leads under is taken as ever, and a serial a
+// member tells that this agent does not hold is fetched from that member
+// (leadersWord); a member that does not lead the serial it tells vetoes
+// nothing. Otherwise the newest is taken: when a member tells it active;
+// when no serial held gives a role, so there was no fleet with roles to hear;
+// or once the leaving timeout has passed since the rule first waited for
+// that fleet's word.
+func (conf *Config) noVoterWord(v *restartView, newest *heldSerial, told map[string]toldStamp, now time.Time) {
+	timeout := leavingTimeoutFor(conf.MpConfig())
+	fresh := map[string]toldStamp{}
+	for k, st := range told {
+		if now.Sub(st.heard) <= timeout {
+			fresh[k] = st
 		}
 	}
-	return true
+	conf.leadersWord(v, newest, fresh)
+	if v.take != nil || len(v.fetch) > 0 {
+		return
+	}
+	take := !conf.InternalMp.Instructions.rolesHeld(v.zone)
+	for _, st := range fresh {
+		if st.Known && (SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}) == newest.SerialDigest {
+			take = true
+		}
+	}
+	if !take {
+		until := conf.InternalMp.thaws.restartWaitSince(v.zone, now).Add(timeout)
+		if now.Before(until) {
+			v.waits = append(v.waits, "the word of a member, as a serial held gives roles, until "+until.Format(time.TimeOnly))
+			return
+		}
+	}
+	sd := newest.SerialDigest
+	v.take, v.by, v.from = &sd, dns.Fqdn(conf.MpConfig().Identity), knownFromNoVoter
+}
+
+// rolesHeld: a serial held of zone gives a voting role.
+func (s *InstructionStore) rolesHeld(zone string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, z := s.zoneLocked(zone)
+	if z == nil {
+		return false
+	}
+	return slices.ContainsFunc(z.Held, func(h heldSerial) bool {
+		return h.Reading != nil && len(identities(h.Reading.providers(slices.Concat(h.Reading.Servers, h.Reading.Signers)))) > 0
+	})
+}
+
+// restartWaitSince is when the restart rule first waited for zone's fleet,
+// now if it has not.
+func (b *thawBook) restartWaitSince(zone string, now time.Time) time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.restartWaits == nil {
+		b.restartWaits = map[string]time.Time{}
+	}
+	since, ok := b.restartWaits[canonicalName(zone)]
+	if !ok {
+		since = now
+		b.restartWaits[canonicalName(zone)] = since
+	}
+	return since
+}
+
+// restartWaitDone forgets that wait: the active serial is known (know), by
+// whatever word. The rule runs only while it is not, and Forget is refused
+// then, so the next time it runs it waits afresh.
+func (b *thawBook) restartWaitDone(zone string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.restartWaits, canonicalName(zone))
 }
 
 // leadersWord is the rule of a member with no record, and of the auditor:
@@ -350,7 +407,8 @@ func noVoterWord(s *InstructionStore, zone string, newest SerialDigest, told map
 // from the agent that leads the zone's group under that serial, by the
 // election records heard first hand (plan 7.2). A serial told that this agent
 // does not hold is fetched from the zone's leader or a voting member under
-// its newest serial.
+// its newest serial; or, with no voting member under the newest, from the
+// member that tells it.
 func (conf *Config) leadersWord(v *restartView, newest *heldSerial, told map[string]toldStamp) {
 	s := conf.InternalMp.Instructions
 	var leader string
@@ -358,6 +416,8 @@ func (conf *Config) leadersWord(v *restartView, newest *heldSerial, told map[str
 		l, _ := lem.ZoneLeader(ZoneName(v.zone))
 		leader = string(l)
 	}
+	in := newest.Reading
+	anyone := len(identities(in.providers(slices.Concat(in.Servers, in.Signers)))) == 0
 	for _, key := range slices.Sorted(maps.Keys(told)) {
 		st := told[key]
 		id := st.identity
@@ -367,7 +427,7 @@ func (conf *Config) leadersWord(v *restartView, newest *heldSerial, told map[str
 		sd := SerialDigest{Serial: st.Active, Digest: st.ActiveDigest}
 		reading := s.readingAt(v.zone, sd)
 		if reading == nil {
-			if core.EqualNames(id, leader) || votesIn(newest.Reading, AgentId(id)) {
+			if core.EqualNames(id, leader) || votesIn(newest.Reading, AgentId(id)) || anyone {
 				v.fetch = append(v.fetch, restartFetch{sd: sd, member: id, why: "a member tells it active"})
 			}
 			continue
@@ -573,12 +633,13 @@ func (conf *Config) knowActive(zone string) {
 }
 
 // know makes sd the zone's active serial (Know), and runs what follows: the
-// catch-up's answer time runs again (activeChanged); the readers moved from
-// the newest serial to the active one (onActiveChanged), the sets handed to
-// the parts (onSetsChanged), a provider put in a list it was not in asked
-// for its state (enteredLists), every voting member this agent never asked
-// is asked (askUnasked), and the zone's turn asked again, for a newer serial
-// it may agree on now. The end of the freeze
+// restart rule's wait ends (restartWaitDone); the catch-up's answer time runs
+// again (activeChanged); the readers moved from the newest serial to the
+// active one (onActiveChanged), the sets handed to the parts
+// (onSetsChanged), a provider put in a list it was not in asked for its
+// state (enteredLists), every voting member this agent never asked is asked
+// (askUnasked), and the zone's turn asked again, for a newer serial it may
+// agree on now. The end of the freeze
 // releases what was owed (onFreeze), and S8 what was kept.
 func (conf *Config) know(zone string, sd SerialDigest, th *Thaw, reconciling bool, by, from string) {
 	s := conf.InternalMp.Instructions
@@ -588,6 +649,7 @@ func (conf *Config) know(zone string, sd SerialDigest, th *Thaw, reconciling boo
 		return
 	}
 	lg.Info("the zone's active instructions are known", "zone", zone, "serial", sd.Serial, "from", from, "by", by)
+	conf.InternalMp.thaws.restartWaitDone(zone)
 	conf.InternalMp.CatchUp.activeChanged(ZoneName(zone))
 	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil && mpzd.Ready {
 		after := s.activeReading(zone)
