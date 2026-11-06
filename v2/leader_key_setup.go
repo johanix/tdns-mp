@@ -175,8 +175,11 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 	// tdns's bootstrap uploads the first active key: while another one is
 	// active, the key is neither published nor polled. The take-up's new
 	// key, not active yet, is the zone's key beside the old one, which stays
-	// active until the new one is (takeUpKey)
-	takingUp := zk.rolling && conf.parentSyncTakenUp(string(zone))
+	// active until the new one is (takeUpKey). The step is read once: its
+	// serial is kept with the take-up's key, and a transition done after
+	// this read does not leave the key with none
+	serial, takenUp := conf.InternalMp.Instructions.takenAt(string(zone), parentSyncTakeUpKey)
+	takingUp := zk.rolling && takenUp
 	if only, err := retireOthers(kdb, zone, zk); !takingUp && (err != nil || !only) {
 		lgAgent.Warn("an active SIG(0) key that is not the zone's key could not be retired; the key is not published, and the sync with the parent waits", "zone", zone, "keyid", zk.held.keyid, "err", err)
 		return errOtherKeysActive
@@ -187,8 +190,8 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 	// As the step that takes the parent sync up, every recipient's word on
 	// the KEY comes before its offer: the step offers it (plan S20). The
 	// KEY is the take-up's new key's
-	if conf.parentSyncTakenUp(string(zone)) {
-		key, err := conf.takeUpKey(kdb, zone, zk, made)
+	if takenUp {
+		key, err := conf.takeUpKey(kdb, zone, zk, made, serial)
 		if err != nil {
 			return err
 		}

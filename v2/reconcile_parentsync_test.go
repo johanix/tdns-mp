@@ -1213,6 +1213,34 @@ func TestANewLeaderInATakeUpKeepsAKeyMadeSinceTheHandBack(t *testing.T) {
 	}
 }
 
+// The take-up's key is kept with the serial the set-up read the step with: a
+// transition done after that read leaves the key's serial as it was, not
+// none, which a later leader in a take-up would take for an older key's.
+func TestATransitionDoneInTheTakeUpsSetUpKeepsItsKeysSerial(t *testing.T) {
+	r := takeUpRig(t, "done.takeup.example.")
+	k := r.madeElsewhere(t)
+	r.publish(t, k)
+	serial := r.takeUpSerial(t)
+	r.decide(map[AgentId]keyReply{r.them: takeUpAnswer(k, strconv.FormatUint(uint64(serial), 10))})
+	if err := r.conf.InternalMp.Instructions.update(r.mpzd.ZoneName, func(z *zoneSerials) error {
+		z.Taken = nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	zk, err := readZoneKey(r.mpzd.KeyDB, r.zone)
+	if err != nil || zk.held == nil || zk.held.keyid != k.keyid {
+		t.Fatalf("the zone's key: %+v (%v), want %d", zk, err, k.keyid)
+	}
+	key, err := r.conf.takeUpKey(r.mpzd.KeyDB, r.zone, zk, false, serial)
+	if err != nil || key.keyid != k.keyid {
+		t.Fatalf("the take-up's key: %+v (%v), want %d", key, err, k.keyid)
+	}
+	if keyid, at, ok := loadTakeUpKey(r.mpzd.KeyDB, r.zone); !ok || keyid != k.keyid || at != serial {
+		t.Errorf("the take-up's key here: %d at %d (%v), want %d at %d", keyid, at, ok, k.keyid, serial)
+	}
+}
+
 // LM1S: the parent sync is handed back; india, leading, finds no key and
 // makes one; the lead moves to hotel, which takes the key and makes no second
 // one; then back to india, which still holds the key and can roll it. Here
