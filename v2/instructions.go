@@ -471,8 +471,11 @@ func readingOf(apex *tdns.OwnerData) *Instructions {
 	noReading.Delete(zone)
 	// A copy that reads, with instructions or with none (the end of
 	// multi-provider service), is the zone's last good reading: a later copy
-	// that does not read keeps that, never the instructions from before.
-	if in != nil {
+	// that does not read keeps that, never the instructions from before. A
+	// copy with no HSYNCPARAM expresses no intent and is not one: whether it
+	// ends the zone's serials is the store's to judge, and a later copy that
+	// does not read keeps nothing.
+	if in != nil && in.HasParam {
 		lastGood.Store(zone, in)
 	} else {
 		lastGood.Delete(zone)
