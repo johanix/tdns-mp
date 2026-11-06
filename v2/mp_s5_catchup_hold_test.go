@@ -768,3 +768,106 @@ func TestADroppedNotifyEndsWhatTheChainHadOut(t *testing.T) {
 	h.notified(t, "the owed sync's NOTIFY", dns.TypeCDS)
 	h.quiet(t, 300*time.Millisecond, "after the owed sync's NOTIFY")
 }
+
+// An explicit sync clears the owed sync it answers (#267), whatever asked
+// for it: one that found the parent in step, and one whose UPDATE the parent
+// took. The room ticker then asks for nothing more, and the status no longer
+// says the sync is owed.
+func TestAnExplicitSyncClearsTheOwedSyncItAnswers(t *testing.T) {
+	explicit := func(t *testing.T, h *holdRig) tdns.DelegationSyncStatus {
+		t.Helper()
+		resp := make(chan tdns.DelegationSyncStatus, 1)
+		h.q <- tdns.DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: h.mpzd.ZoneName, ZoneData: h.mpzd.ZoneData, Response: resp}
+		got, ok := recvWithin(resp, 5*time.Second)
+		if !ok {
+			t.Fatalf("the explicit sync gave no answer\n%s", h.log.String())
+		}
+		return got
+	}
+
+	t.Run("the parent in step", func(t *testing.T) {
+		h := newHoldRig(t, "instep.answered.example.", "NOTIFY", false, repeat(time.Hour, 4)...)
+		z := ZoneName(h.mpzd.ZoneName)
+		h.parent.holdsDS()
+		h.inventory(h.ksk) // the DS set changes: the sync is held, and owed
+		h.waitOwed(t, "the DS change")
+		h.caughtUp()
+		h.tr.oweForRoom(z) // and the full queue's mark
+		h.parent.holdsDS(h.ds)
+		if got := explicit(t, h); !got.InSync {
+			t.Fatalf("the parent is not found in step: %+v", got)
+		}
+		if h.owed() {
+			t.Error("the parent is in step, and the sync is still owed")
+		}
+	})
+
+	t.Run("an UPDATE the parent took", func(t *testing.T) {
+		h := newHoldRig(t, "update.answered.example.", "UPDATE", false, repeat(time.Hour, 4)...)
+		z := h.mpzd.ZoneName
+		if _, err := h.mpzd.KeyDB.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "generate", Zone: z,
+			Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
+			t.Fatalf("the zone's SIG(0) key: %v", err)
+		}
+		trustActiveKeys(t, h.mpzd.KeyDB, z)
+		h.parent.holdsNS("ns1."+z, h.oldNS) // the parent has an NS the zone no longer lists
+		h.caughtUp()
+		h.tr.oweForRoom(ZoneName(z))
+		got := explicit(t, h)
+		if h.parent.updatesSeen() == 0 || got.Error {
+			t.Fatalf("no UPDATE was taken: %+v\n%s", got, h.log.String())
+		}
+		if h.owed() {
+			t.Error("the parent took the UPDATE, and the sync is still owed")
+		}
+	})
+}
+
+// Only a mark noted before the explicit sync's analysis began is answered by
+// it (#267). One noted since, also an older mark noted again, stays: the sync
+// may not carry what it was owed for. So does one the freeze holds: a sync
+// during a transition carries the delegation by the sets the parts hold.
+func TestAnExplicitSyncAnswersOnlyWhatWasOwedBeforeItsAnalysis(t *testing.T) {
+	z := ZoneName("answered.owed.example.")
+	owed := func(tr *catchUpTracker) bool {
+		o, _ := tr.owedState(z)
+		return o
+	}
+
+	t.Run("noted before the analysis", func(t *testing.T) {
+		tr := newCatchUpTracker("a.agent.example.", nil, time.Hour)
+		tr.oweForRoom(z)
+		analysed := time.Now().Add(time.Millisecond)
+		if !tr.syncedSince(z, analysed) || owed(tr) {
+			t.Error("a mark noted before the analysis is not answered")
+		}
+	})
+
+	t.Run("noted during the sync", func(t *testing.T) {
+		tr := newCatchUpTracker("a.agent.example.", nil, time.Hour)
+		analysed := time.Now()
+		tr.oweForRoom(z)
+		if tr.syncedSince(z, analysed) || !owed(tr) {
+			t.Error("a mark noted after the analysis began is taken as answered")
+		}
+	})
+
+	t.Run("an older mark noted again during the sync", func(t *testing.T) {
+		tr := newCatchUpTracker("a.agent.example.", nil, time.Hour)
+		tr.owe(z)
+		analysed := time.Now()
+		tr.oweForRoom(z)
+		if tr.syncedSince(z, analysed) || !owed(tr) {
+			t.Error("a mark noted again after the analysis began is taken as answered")
+		}
+	})
+
+	t.Run("held by the freeze", func(t *testing.T) {
+		tr := newCatchUpTracker("a.agent.example.", nil, time.Hour)
+		tr.oweForFreeze(z)
+		analysed := time.Now().Add(time.Millisecond)
+		if tr.syncedSince(z, analysed) || !owed(tr) {
+			t.Error("a sync the freeze holds is taken as answered")
+		}
+	})
+}
