@@ -319,6 +319,16 @@ func TestANoSerialCopyThatGivesNoRoleHoldsNothing(t *testing.T) {
 	if st := status(t, other, storeZone); st.Phase != PhaseOwnerError || st.OwnerError != "two HSYNCPARAM records" {
 		t.Errorf("a copy that gives no role after another owner error: phase %s error %q", st.Phase, st.OwnerError)
 	}
+	// and so does one whose message a copy without serial= that gives a role
+	// overwrote: the hold is the first error's (ErrorFrom)
+	under := newStore(t)
+	noteKnown(t, under, storeZone, noRoles)
+	under.Note(storeZone, nil, errors.New("two HSYNCPARAM records"))
+	under.Note(storeZone, withRole, roleErr)
+	under.Note(storeZone, in, err)
+	if st := status(t, under, storeZone); st.Phase != PhaseOwnerError {
+		t.Errorf("another owner error under the message of a copy without serial=: phase %s error %q", st.Phase, st.OwnerError)
+	}
 	held := newStore(t)
 	noteKnown(t, held, storeZone, at(t, 7, "alpha,beta"))
 	held.Note(storeZone, in, err)

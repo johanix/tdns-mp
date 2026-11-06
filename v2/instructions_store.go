@@ -75,10 +75,13 @@ type zoneSerials struct {
 	LastFrom *heldSerial `json:"last_from,omitempty"`
 	// OwnerError holds the zone (design 3.6) until a copy above ErrorAt is
 	// noted; ErrorAt nil: nothing was held when it was noted. Conflict is
-	// the digests seen at ErrorAt for "one serial, two digests".
+	// the digests seen at ErrorAt for "one serial, two digests". ErrorFrom
+	// is the owner error the hold began with: a later one overwrites
+	// OwnerError, and the hold stays the first one's.
 	OwnerError string   `json:"owner_error,omitempty"`
 	ErrorAt    *uint32  `json:"error_at,omitempty"`
 	Conflict   []string `json:"conflict,omitempty"`
+	ErrorFrom  string   `json:"error_from,omitempty"`
 	// Step and Sets are the reconciliation's step and the sets the parts
 	// hold at it, each provider by label and identity, as Roles in JSON
 	// (S12): nil at rest, and while this agent holds no step's sets
@@ -455,6 +458,9 @@ func (z *zoneSerials) ownerError(zone, msg string) {
 	if z.OwnerError != msg {
 		lg.Warn("owner error in the zone's instructions", "zone", zone, "error", msg)
 	}
+	if z.OwnerError == "" {
+		z.ErrorFrom = msg
+	}
 	z.OwnerError = msg
 	if z.ErrorAt == nil {
 		if h := z.highest(); h != nil {
@@ -495,14 +501,15 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 		case benign && !givesRoles(activeOrHeld(z)):
 			// the hold an earlier copy without serial= that gave a role
 			// started ends with it. Any other owner error ends only at a
-			// serial above it (design 3.6), a conflict too, whose message
-			// a later owner error overwrites while its Conflict stays.
-			ended := z.OwnerError == readErr.Error() && len(z.Conflict) == 0
+			// serial above it (design 3.6), a conflict too: one whose
+			// message a copy without serial= overwrote keeps its hold
+			// (ErrorFrom).
+			ended := z.ErrorFrom == readErr.Error() && z.OwnerError == readErr.Error() && len(z.Conflict) == 0
 			if z.CopyError != readErr.Error() || ended {
 				lg.Warn("a benign owner error in the zone's instructions: no role is given, and nothing is held", "zone", zone, "error", readErr.Error())
 			}
 			if ended {
-				z.OwnerError, z.ErrorAt = "", nil
+				z.OwnerError, z.ErrorAt, z.ErrorFrom = "", nil, ""
 				if z.Active == nil && len(z.Held) == 0 {
 					// the copy that started it came at a first load: nothing
 					// is kept, as for a first load of this copy
@@ -571,7 +578,7 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 		// A newer serial. An owner error ends at a serial above the one it
 		// was noted at.
 		if z.OwnerError != "" && (z.ErrorAt == nil || CompareSerial(in.Serial, *z.ErrorAt) > 0) {
-			z.OwnerError, z.ErrorAt, z.Conflict = "", nil, nil
+			z.OwnerError, z.ErrorAt, z.Conflict, z.ErrorFrom = "", nil, nil, ""
 		}
 		h := heldSerial{SerialDigest: cp, Reading: in, Since: time.Now()}
 		// With no active serial known the copy is held, unjudged, until the
