@@ -35,6 +35,7 @@ type DnsSyncPayload struct {
 	CatchUp        *CatchUp                 `json:"catch_up,omitempty"`
 	Acting         *ActingHandover          `json:"acting,omitempty"` // a hand-over, on an update to the combiner (S10)
 	Instr          *MsgStamp                `json:"instr,omitempty"`  // the sender's stamp (S5b)
+	Withdraw       *Withdraw                `json:"withdraw,omitempty"`
 }
 
 // CatchUp travels on an RFI SYNC, a request for the zone's state, and on

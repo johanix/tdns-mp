@@ -446,7 +446,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		}
 	}
 
-	if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Operations, req.Records); refusal != nil {
+	if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Operations, req.Records); refusal != nil && !req.Removal {
 		refusal.DistributionID, refusal.Timestamp = resp.DistributionID, resp.Timestamp
 		return refusal
 	}
@@ -571,6 +571,16 @@ func (mpzd *MPZoneData) combinerApplyPublishInstruction(req *CombinerSyncRequest
 	instr := req.Publish
 	zone := req.Zone
 	senderID := req.SenderID
+
+	// An instruction older than the sender's last KEY is not applied, as the
+	// replace that came with it was not: it would put an older KEY back, or
+	// take the newer one away, and be kept in the newer one's place
+	if stale, applied := staleCombinerReplace(req, zone, dns.TypeKEY); stale {
+		lgCombiner.Warn("ignored a stale publish instruction: older than the KEY applied", "zone", zone, "sender", senderID,
+			"this", req.Timestamp.UTC().Format(time.RFC3339Nano), "thisDistrib", req.DistributionID,
+			"applied", applied.Time.UTC().Format(time.RFC3339Nano), "appliedDistrib", applied.DistID)
+		return
+	}
 
 	var storedInstr *StoredPublishInstruction
 	if hdb != nil {
@@ -1248,7 +1258,7 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 		// Non-signer combiners persist DNSKEYs without this check. Only
 		// what an origin adds is judged: its removal of its own keys is
 		// not (S10).
-		if rrtype == dns.TypeDNSKEY && !isProvider && policy.canApply(rrtype) && (op.Operation == "add" || (op.Operation == "replace" && len(op.Records) > 0)) {
+		if rrtype == dns.TypeDNSKEY && !isProvider && !req.Removal && policy.canApply(rrtype) && (op.Operation == "add" || (op.Operation == "replace" && len(op.Records) > 0)) {
 			reject, reason := mpzd.checkDNSKEYPolicy(req.SenderID)
 			if reject {
 				for _, rec := range op.Records {
@@ -1324,10 +1334,19 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 					"zone", zonename, "sender", req.SenderID, "rrtype", op.RRtype,
 					"this", req.Timestamp.UTC().Format(time.RFC3339Nano), "thisDistrib", req.DistributionID,
 					"applied", applied.Time.UTC().Format(time.RFC3339Nano), "appliedDistrib", applied.DistID)
+				// A KEY's drop skipped so has dropped nothing: it is refused,
+				// not told as done, and the agent asks again, later than the
+				// KEY that overtook it (keyPurge, plan S17a)
+				if req.Removal && rrtype == dns.TypeKEY {
+					rejectedItems = append(rejectedItems, RejectedItem{
+						Record: fmt.Sprintf("(replace %s)", op.RRtype),
+						Reason: "the drop is older than the KEY applied here: not made",
+					})
+				}
 				continue
 			}
 
-			if (rrtype == dns.TypeKEY || rrtype == dns.TypeCDS) && len(parsedRRs) > 0 {
+			if (rrtype == dns.TypeKEY || rrtype == dns.TypeCDS) && len(parsedRRs) > 0 && !req.Removal {
 				senderIsLocal := localAgents[req.SenderID]
 				if existingSender, existingRRs := mpzd.findExistingContribution(zonename, rrtype, req.SenderID); existingSender != "" {
 					existingIsLocal := localAgents[existingSender]
@@ -1819,22 +1838,21 @@ var combinerReplaceOrigins = struct {
 }{m: map[string]replaceOrigin{}}
 
 // staleCombinerReplace answers whether a REPLACE is older than the one last
-// applied for the same (zone, sender, rrtype) -- an earlier time, or the same
-// time and a lower distribution id -- and records it as the newest when it
-// is not. A request without a time is never stale.
+// applied for the same (zone, sender, rrtype), by the active serial its
+// agent stamped at the send, then by the time (olderThan), and records it
+// as the newest when it is not. A request without a time is never stale.
 func staleCombinerReplace(req *CombinerSyncRequest, zonename string, rrtype uint16) (bool, replaceOrigin) {
 	if req.Timestamp.IsZero() {
 		return false, replaceOrigin{}
 	}
 	key := zonename + "|" + req.SenderID + "|" + dns.TypeToString[rrtype]
+	origin := originOf(req.Timestamp, req.DistributionID, req.Instr)
 	combinerReplaceOrigins.mu.Lock()
 	defer combinerReplaceOrigins.mu.Unlock()
-	if cur, ok := combinerReplaceOrigins.m[key]; ok {
-		if cur.Time.After(req.Timestamp) || (cur.Time.Equal(req.Timestamp) && cur.DistID > req.DistributionID) {
-			return true, cur
-		}
+	if cur, ok := combinerReplaceOrigins.m[key]; ok && origin.olderThan(cur) {
+		return true, cur
 	}
-	combinerReplaceOrigins.m[key] = replaceOrigin{Time: req.Timestamp, DistID: req.DistributionID}
+	combinerReplaceOrigins.m[key] = origin
 	return false, replaceOrigin{}
 }
 

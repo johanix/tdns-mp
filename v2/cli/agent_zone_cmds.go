@@ -273,6 +273,11 @@ func newAgentZoneDsyncRollKeyCmd(kind string) *cobra.Command {
 		Use:   "roll-sig0-key",
 		Short: "Send dsync rollover command to tdns-auth",
 		Run: func(cmd *cobra.Command, args []string) {
+			// Other commands bind the same global with no default, and
+			// whichever flag is defined last sets it at start-up
+			if f := cmd.Flag("algorithm"); f != nil && !f.Changed {
+				tdns.Globals.Algorithm = f.DefValue
+			}
 			tdnscli.PrepArgs("zonename", "algorithm", "rollaction")
 
 			api, err := GetApiClientForCmd(cmd, true)
