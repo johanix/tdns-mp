@@ -735,6 +735,30 @@ func takeUpRig(t *testing.T, zone string) *rollRig {
 	return r
 }
 
+// serveTakeUpKey is the take-up's new key (takeUpKey), which the zone's copy
+// then serves, as the combiner's publication of it has it.
+func (r *rollRig) serveTakeUpKey(t *testing.T) sig0Row {
+	t.Helper()
+	ro := r.roll(t)
+	if ro == nil || ro.phase != rollTakeUp {
+		t.Fatalf("the take-up made no key of its own: %+v", ro)
+	}
+	k := r.row(t, tdns.Sig0StatePublished, ro.newKeyid)
+	r.publish(t, k)
+	return k
+}
+
+// offerTakeUp is the step's wait once its KEY is confirmed and served: the
+// new key made active in the background, then offered.
+func (r *rollRig) offerTakeUp(t *testing.T) string {
+	t.Helper()
+	if w := r.conf.takeUpWait(string(r.zone)); w != "the zone's key to be offered" {
+		return w
+	}
+	r.conf.InternalMp.parentSyncs.wait()
+	return r.conf.takeUpWait(string(r.zone))
+}
+
 // Every nameserver serves the KEY before it is offered: the poll, which
 // bootstraps the key at the parent, runs only after every recipient of the
 // take-up's KEY has confirmed it, whoever asks for it, and once for the step.
@@ -763,11 +787,15 @@ func TestTheTakeUpsKEYIsOfferedOnlyAfterEveryMemberConfirmedIt(t *testing.T) {
 		t.Fatalf("the key was offered before the KEY was confirmed: %d polls", len(r.polls))
 	}
 	r.confirmAll(t)
-	if w := r.conf.takeUpWait(zone); w != "" {
+	if w := r.conf.takeUpWait(zone); w != "the zone's key to be offered" {
+		t.Fatalf("every recipient has confirmed, the copy does not serve the KEY yet, and the step waits for %q", w)
+	}
+	k := r.serveTakeUpKey(t)
+	if w := r.offerTakeUp(t); w != "" {
 		t.Fatalf("every recipient has confirmed, and the step waits for %q", w)
 	}
-	if keyid := r.polled(t, "after the KEY's confirmations"); keyid != r.old.keyid {
-		t.Errorf("the poll is of key %d, want %d", keyid, r.old.keyid)
+	if keyid := r.polled(t, "after the KEY's confirmations"); keyid != k.keyid {
+		t.Errorf("the poll is of key %d, want the take-up's %d", keyid, k.keyid)
 	}
 	if w := r.conf.takeUpWait(zone); w != "" {
 		t.Errorf("the step waits again for %q", w)
@@ -793,10 +821,11 @@ func TestATakeUpsKeyThatCannotBeOfferedHoldsTheStep(t *testing.T) {
 	})
 	r.conf.InternalMp.parentSyncs.wait()
 	r.confirmAll(t)
+	k := r.serveTakeUpKey(t)
 	setState := func(state string) {
 		t.Helper()
 		if err := sig0KeyChange(r.mpzd.KeyDB, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "setstate",
-			Keyname: dns.Fqdn(zone), Keyid: r.old.keyid, State: state}); err != nil {
+			Keyname: dns.Fqdn(zone), Keyid: k.keyid, State: state}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -808,12 +837,12 @@ func TestATakeUpsKeyThatCannotBeOfferedHoldsTheStep(t *testing.T) {
 	if len(r.polls) != 0 {
 		t.Fatal("something was offered with no key held")
 	}
-	setState(tdns.Sig0StateActive)
-	if w := r.conf.takeUpWait(zone); w != "" {
+	setState(tdns.Sig0StatePublished)
+	if w := r.offerTakeUp(t); w != "" {
 		t.Fatalf("the key is back, and the step waits for %q", w)
 	}
-	if keyid := r.polled(t, "once the key can be read"); keyid != r.old.keyid {
-		t.Errorf("the poll is of key %d, want %d", keyid, r.old.keyid)
+	if keyid := r.polled(t, "once the key can be read"); keyid != k.keyid {
+		t.Errorf("the poll is of key %d, want the take-up's %d", keyid, k.keyid)
 	}
 }
 
@@ -846,7 +875,8 @@ func TestATakeUpsRefusedKEYIsPublishedAgain(t *testing.T) {
 	for _, rcpt := range again.expected {
 		tm.rollKEYs.heard(again.distID, rcpt, "IGNORED", "", false)
 	}
-	if w := r.conf.takeUpWait(zone); w != "" {
+	r.serveTakeUpKey(t)
+	if w := r.offerTakeUp(t); w != "" {
 		t.Errorf("IGNORED by every recipient, and the step waits for %q", w)
 	}
 }
@@ -870,7 +900,8 @@ func TestATakeUpTheParentDoesNotTrustYetIsDoneAndTheSyncOwed(t *testing.T) {
 		})
 		r.conf.InternalMp.parentSyncs.wait()
 		r.confirmAll(t)
-		if w := r.conf.takeUpWait(zone); w != "" {
+		r.serveTakeUpKey(t)
+		if w := r.offerTakeUp(t); w != "" {
 			t.Fatalf("the KEY is confirmed, the parent has not taken it, and the step waits for %q", w)
 		}
 		r.polled(t, "after the KEY's confirmations")
@@ -902,6 +933,173 @@ func TestATakeUpTheParentDoesNotTrustYetIsDoneAndTheSyncOwed(t *testing.T) {
 			t.Error("the zone was not taken up: its sync is not asked for")
 		}
 	})
+}
+
+// The take-up makes a key of its own (the project owner's ruling of
+// 2026-11-06), once: a set-up again, after a refused KEY or a restart,
+// publishes the same key. Until this agent's copy serves its KEY it is the
+// zone's key here beside the old one, which stays active; then it is made
+// active, the old one retired, and it is offered. Its record ends with the
+// step.
+func TestATakeUpMakesAKeyOfItsOwnOnce(t *testing.T) {
+	r := takeUpRig(t, "newkey.takeup.example.")
+	zone := string(r.zone)
+	tm := r.conf.InternalMp.MPTransport
+	r.lem.SetOnZoneJoined(func(z ZoneName) error {
+		return r.conf.leaderKeySetup(r.ctx, z, false)
+	})
+	r.conf.takeUpWait(zone)
+	waitUntil(t, "the KEY is not booked", func() bool {
+		_, ok := tm.rollKEYs.state(r.zone)
+		return ok
+	})
+	r.conf.InternalMp.parentSyncs.wait()
+	ro := r.roll(t)
+	if ro == nil || ro.phase != rollTakeUp || ro.oldKeyid != r.old.keyid || ro.newKeyid == r.old.keyid {
+		t.Fatalf("the take-up's record: %+v, want a new key in place of %d", ro, r.old.keyid)
+	}
+	newKey := r.row(t, tdns.Sig0StatePublished, ro.newKeyid)
+	heldHere := func(what string) {
+		t.Helper()
+		zk, err := readZoneKey(r.mpzd.KeyDB, r.zone)
+		if err != nil || zk.held == nil || zk.held.keyid != newKey.keyid {
+			t.Fatalf("%s: the zone's key here is %+v (%v), want the take-up's %d", what, zk.held, err, newKey.keyid)
+		}
+	}
+	heldHere("made")
+	if got := r.active(t); !slices.Equal(got, []uint16{r.old.keyid}) {
+		t.Errorf("active before the new key is served: %v, want the old key %d", got, r.old.keyid)
+	}
+
+	// a set-up again, with the booking forgotten as at a restart
+	tm.rollKEYs.forget(r.zone)
+	if err := r.conf.leaderKeySetup(r.ctx, r.zone, false); err != nil {
+		t.Fatalf("the set-up again: %v", err)
+	}
+	if _, ok := tm.rollKEYs.state(r.zone); !ok {
+		t.Fatal("the set-up again did not publish the KEY")
+	}
+	var keys int
+	if err := r.mpzd.KeyDB.QueryRow(`SELECT COUNT(*) FROM Sig0KeyStore WHERE zonename=?`, dns.Fqdn(zone)).Scan(&keys); err != nil {
+		t.Fatal(err)
+	}
+	if keys != 2 {
+		t.Errorf("the keystore holds %d keys, want the old one and the take-up's", keys)
+	}
+	heldHere("published again")
+
+	r.confirmAll(t)
+	if w := r.conf.takeUpWait(zone); w != "the zone's key to be offered" {
+		t.Fatalf("the copy serves no new KEY, and the step waits for %q", w)
+	}
+	r.conf.InternalMp.parentSyncs.wait()
+	if st := r.keyState(t, newKey.keyid); st != tdns.Sig0StatePublished {
+		t.Errorf("the new key is %s before the copy serves it", st)
+	}
+	r.notPolled(t, "before the copy serves the new KEY")
+	r.publish(t, newKey)
+	if w := r.offerTakeUp(t); w != "" {
+		t.Fatalf("the new KEY is served, and the step waits for %q", w)
+	}
+	if keyid := r.polled(t, "once the new KEY is served"); keyid != newKey.keyid {
+		t.Errorf("the poll is of key %d, want the take-up's %d", keyid, newKey.keyid)
+	}
+	if st := r.keyState(t, newKey.keyid); st != tdns.Sig0StateActive {
+		t.Errorf("the new key is %s once offered", st)
+	}
+	if st := r.keyState(t, r.old.keyid); st != tdns.Sig0StateRetired {
+		t.Errorf("the old key is %s once the new one is offered", st)
+	}
+
+	if ro := r.roll(t); ro == nil {
+		t.Fatal("the take-up's record went before the step was over")
+	}
+	if err := r.conf.InternalMp.Instructions.update(r.mpzd.ZoneName, func(z *zoneSerials) error {
+		z.Taken = nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.pass(t, syncOther)
+	if ro := r.roll(t); ro != nil {
+		t.Errorf("the step is over, and the take-up's record stays: %+v", ro)
+	}
+	if st := r.keyState(t, newKey.keyid); st != tdns.Sig0StateActive {
+		t.Errorf("the new key is %s once the record ends", st)
+	}
+}
+
+// The owner suite's sequence: the hand-over deletes the agents' key at the
+// parent, which refuses it from then on, as tdns #999's parent does; the
+// take-up makes a new key, the parent trusts it, and the syncs go out again.
+// The key the hand-over deleted is never offered.
+func TestATakeUpAfterAHandOverOffersANewKeyAndTheSyncsResume(t *testing.T) {
+	r := newRollRig(t, "handback.takeup.example.")
+	zone := string(r.zone)
+	deleted := func(keyid uint16) bool {
+		return slices.ContainsFunc(r.parent.updates(), func(u rollTestUpdate) bool {
+			return u.what == "delete" && u.keyid == keyid && u.rcode == dns.RcodeSuccess
+		})
+	}
+	r.conf.InternalMp.keyPoll = func(_ context.Context, _ ZoneName, keyName string, keyid uint16, _ uint8) {
+		state := uint8(edns0.KeyStateRefused)
+		if !deleted(keyid) {
+			state = edns0.KeyStateTrusted
+			r.parent.mu.Lock()
+			r.parent.trusted[keyid] = true
+			r.parent.mu.Unlock()
+		}
+		tdns.UpdateParentState(r.mpzd.KeyDB, keyName, keyid, state)
+		r.polls <- keyid
+	}
+
+	// the hand-over's step 3
+	r.conf.deleteAgentsKey(r.ctx, r.zone)
+	if !deleted(r.old.keyid) {
+		t.Fatalf("the hand-over did not delete key %d at the parent: %+v", r.old.keyid, r.parent.updates())
+	}
+
+	// the take-up, with the copy serving the old KEY again
+	freezeServed(t, r.conf, r.mpzd)
+	if err := r.conf.InternalMp.Instructions.update(r.mpzd.ZoneName, func(z *zoneSerials) error {
+		z.Taken = []string{parentSyncTakeUpKey}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(r.conf.InternalMp.parentSyncs.wait)
+	r.lem.SetOnZoneJoined(func(z ZoneName) error {
+		return r.conf.leaderKeySetup(r.ctx, z, false)
+	})
+	r.conf.takeUpWait(zone)
+	waitUntil(t, "the KEY is not booked", func() bool {
+		_, ok := r.conf.InternalMp.MPTransport.rollKEYs.state(r.zone)
+		return ok
+	})
+	r.conf.InternalMp.parentSyncs.wait()
+	r.confirmAll(t)
+	newKey := r.serveTakeUpKey(t)
+	if w := r.offerTakeUp(t); w != "" {
+		t.Fatalf("the take-up waits for %q", w)
+	}
+	if keyid := r.polled(t, "the take-up's offer"); keyid != newKey.keyid {
+		t.Fatalf("the take-up offered key %d, want its new key %d", keyid, newKey.keyid)
+	}
+	r.conf.InternalMp.keyPolls.goroutines.Wait()
+	r.notPolled(t, "after the new key's offer")
+	if trusts := r.parent.trusts(); !slices.Equal(trusts, []uint16{newKey.keyid}) {
+		t.Errorf("the parent trusts %v, want the new key %d", trusts, newKey.keyid)
+	}
+	if r.conf.keyPending(r.ctx, r.zone) {
+		t.Error("the parent trusts the new key, and it is still pending")
+	}
+	ds := tdns.DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: zone, ZoneData: r.mpzd.ZoneData}
+	if held, why := r.conf.holdForZoneKey(r.ctx, ds); held {
+		t.Errorf("a sync waits for the zone's key: %s", why)
+	}
+	if got, sent := r.explicitSync(t); !sent {
+		t.Errorf("no sync went out: %q", got)
+	}
 }
 
 // The judge lets a change of parentsync through, both ways, on every agent.

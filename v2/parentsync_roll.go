@@ -65,6 +65,10 @@ const (
 	rollPublished = "published"
 	rollActivated = "activated"
 	rollDone      = "done"
+	// the take-up's new key (plan S20, takeUpKey): made published at the
+	// step that takes the parent sync up, made active once it is served,
+	// then offered; the record goes when the step is no longer taken
+	rollTakeUp = "take-up"
 )
 
 // sig0Roll is one roll, as MPSig0Rolls holds it.
@@ -161,10 +165,10 @@ func rollZones(kdb *tdns.KeyDB) []ZoneName {
 // error: it says nothing of which key is the zone's.
 func rollingKey(kdb *tdns.KeyDB, zone ZoneName) (key *sig0Row, sent bool, err error) {
 	r, err := loadRoll(kdb, zone)
-	if err != nil || r == nil || (r.phase != rollAdded && r.phase != rollPublished) {
+	if err != nil || r == nil || (r.phase != rollAdded && r.phase != rollPublished && r.phase != rollTakeUp) {
 		return nil, false, err
 	}
-	return sig0RowByID(kdb, zone, tdns.Sig0StatePublished, r.newKeyid), r.phase == rollPublished, nil
+	return sig0RowByID(kdb, zone, tdns.Sig0StatePublished, r.newKeyid), r.phase == rollPublished || r.phase == rollTakeUp, nil
 }
 
 func sig0RowByID(kdb *tdns.KeyDB, zone ZoneName, state string, keyid uint16) *sig0Row {
@@ -451,6 +455,16 @@ func makeRolledKey(kdb *tdns.KeyDB, zone ZoneName, alg uint8) (oldKeyid, newKeyi
 	case zk.held.parentState != edns0.KeyStateTrusted:
 		return 0, 0, fmt.Errorf("this agent has no record that the parent trusts the SIG(0) key %d of zone %s", zk.held.keyid, zone)
 	}
+	newKeyid, err = makePublishedKey(kdb, zone, alg, "sig0-roll")
+	if err != nil {
+		return 0, 0, err
+	}
+	return zk.held.keyid, newKeyid, nil
+}
+
+// makePublishedKey makes a new SIG(0) key for the zone, kept published, not
+// active: tdns signs with the first active key.
+func makePublishedKey(kdb *tdns.KeyDB, zone ZoneName, alg uint8, creator string) (uint16, error) {
 	resp, err := sig0KeyMgmtRetried(kdb, tdns.KeystorePost{
 		Command:    "sig0-mgmt",
 		SubCommand: "generate",
@@ -458,7 +472,7 @@ func makeRolledKey(kdb *tdns.KeyDB, zone ZoneName, alg uint8) (oldKeyid, newKeyi
 		Keyname:    string(zone),
 		Algorithm:  alg,
 		State:      tdns.Sig0StatePublished,
-		Creator:    "sig0-roll",
+		Creator:    creator,
 	})
 	if err == nil && resp != nil && resp.Error {
 		err = fmt.Errorf("%s", resp.ErrorMsg)
@@ -467,9 +481,9 @@ func makeRolledKey(kdb *tdns.KeyDB, zone ZoneName, alg uint8) (oldKeyid, newKeyi
 		err = fmt.Errorf("the keystore returned no key")
 	}
 	if err != nil {
-		return 0, 0, fmt.Errorf("the new SIG(0) key of %s: %w", zone, err)
+		return 0, fmt.Errorf("the new SIG(0) key of %s: %w", zone, err)
 	}
-	return zk.held.keyid, resp.GeneratedSig0Key.KeyRR.KeyTag(), nil
+	return resp.GeneratedSig0Key.KeyRR.KeyTag(), nil
 }
 
 // oweRoll keeps the roll of the zone's key as owed, on disk, unless a roll is
@@ -648,6 +662,14 @@ func (conf *Config) rollPass(ctx context.Context, zone ZoneName, cause syncCause
 				if leader, ok := lem.ZoneLeader(zone); ok && !sameName(string(leader), string(conf.localAgentID())) {
 					conf.endRollHere(kdb, r, "another agent leads the zone, "+string(leader))
 				}
+			}
+			return
+		}
+		// the take-up's key is the step's to carry, and its record ends
+		// with the step
+		if r.phase == rollTakeUp {
+			if !conf.parentSyncTakenUp(string(zone)) {
+				conf.endRollHere(kdb, r, "the step that took the parent sync up is over")
 			}
 			return
 		}
@@ -922,22 +944,38 @@ func (conf *Config) endRollHere(kdb *tdns.KeyDB, r *sig0Roll, why string) {
 	zone := r.zone
 	var err error
 	_ = conf.keySetupLocked(zone, func() error {
-		newKey := sig0RowByID(kdb, zone, tdns.Sig0StatePublished, r.newKeyid)
-		pub := publishedKeys(zone)
-		switch {
-		case newKey == nil:
-		case len(pub) == 1 && sameKey(pub[0], newKey.key):
-			err = activateRolledKey(kdb, zone, r.newKeyid, r.oldKeyid)
-		case r.phase == rollMade:
-			err = sig0KeyChange(kdb, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "delete", Zone: string(zone), Keyname: string(zone), Keyid: r.newKeyid})
-		default:
-			err = sig0KeyChange(kdb, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "setstate", Keyname: dns.Fqdn(string(zone)), Keyid: r.newKeyid, State: tdns.Sig0StateRetired})
-		}
-		if err == nil {
-			err = deleteRoll(kdb, zone)
-		}
+		err = endRollLocked(kdb, r)
 		return nil
 	})
+	conf.rollEnded(r, why, err)
+}
+
+// endRollLocked is endRollHere's work in the keystore, under the zone's
+// key-setup lock. A take-up's new key, never offered before it is active,
+// goes as a roll's new key not yet added does.
+func endRollLocked(kdb *tdns.KeyDB, r *sig0Roll) error {
+	zone := r.zone
+	var err error
+	newKey := sig0RowByID(kdb, zone, tdns.Sig0StatePublished, r.newKeyid)
+	pub := publishedKeys(zone)
+	switch {
+	case newKey == nil:
+	case len(pub) == 1 && sameKey(pub[0], newKey.key):
+		err = activateRolledKey(kdb, zone, r.newKeyid, r.oldKeyid)
+	case r.phase == rollMade || r.phase == rollTakeUp:
+		err = sig0KeyChange(kdb, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "delete", Zone: string(zone), Keyname: string(zone), Keyid: r.newKeyid})
+	default:
+		err = sig0KeyChange(kdb, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "setstate", Keyname: dns.Fqdn(string(zone)), Keyid: r.newKeyid, State: tdns.Sig0StateRetired})
+	}
+	if err == nil {
+		err = deleteRoll(kdb, zone)
+	}
+	return err
+}
+
+// rollEnded logs a roll ended here and forgets its KEY's booking.
+func (conf *Config) rollEnded(r *sig0Roll, why string, err error) {
+	zone := r.zone
 	if err != nil {
 		lgAgent.Error("the roll of the zone's SIG(0) key could not be ended here", "zone", zone, "phase", r.phase, "err", err)
 		return
@@ -1021,6 +1059,9 @@ func (conf *Config) rollLine(kdb *tdns.KeyDB, zone ZoneName) string {
 	r, err := loadRoll(kdb, zone)
 	if err != nil || r == nil {
 		return ""
+	}
+	if r.phase == rollTakeUp {
+		return fmt.Sprintf("taking the parent sync up: new key %d in place of key %d", r.newKeyid, r.oldKeyid)
 	}
 	// since when it is owed: the zone's debt, which may be older than this
 	// agent's roll (an earlier leader's)

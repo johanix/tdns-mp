@@ -61,8 +61,9 @@ func (conf *Config) leaderKeySetup(ctx context.Context, zone ZoneName, elected b
 		return fmt.Errorf("onLeaderElected: reading the SIG(0) keys of %s: %v", zone, err)
 	}
 	// While this agent rolls the zone's key, the roll publishes the new
-	// key and retires the old one (plan S17a): no set-up
-	if zk.rolling {
+	// key and retires the old one (plan S17a): no set-up. The take-up's
+	// own key the step publishes through the set-up (takeUpKey)
+	if zk.rolling && !conf.parentSyncTakenUp(string(zone)) {
 		lgAgent.Info("the zone's SIG(0) key is being rolled; the roll publishes the new key", "zone", zone, "keyid", zk.held.keyid)
 		return nil
 	}
@@ -172,8 +173,11 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 		return fmt.Errorf("onLeaderElected: the zone's SIG(0) key is not held after the setup for zone %s (%v)", zone, err)
 	}
 	// tdns's bootstrap uploads the first active key: while another one is
-	// active, the key is neither published nor polled
-	if only, err := retireOthers(kdb, zone, zk); err != nil || !only {
+	// active, the key is neither published nor polled. The take-up's new
+	// key, not active yet, is the zone's key beside the old one, which stays
+	// active until the new one is (takeUpKey)
+	takingUp := zk.rolling && conf.parentSyncTakenUp(string(zone))
+	if only, err := retireOthers(kdb, zone, zk); !takingUp && (err != nil || !only) {
 		lgAgent.Warn("an active SIG(0) key that is not the zone's key could not be retired; the key is not published, and the sync with the parent waits", "zone", zone, "keyid", zk.held.keyid, "err", err)
 		return errOtherKeysActive
 	}
@@ -181,9 +185,14 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 	keyRR := held.key
 	lgAgent.Info("publishing KEY to combiner with PublishInstruction", "zone", zone, "keyid", held.keyid)
 	// As the step that takes the parent sync up, every recipient's word on
-	// the KEY comes before its offer: the step offers it (plan S20)
+	// the KEY comes before its offer: the step offers it (plan S20). The
+	// KEY is the take-up's new key's
 	if conf.parentSyncTakenUp(string(zone)) {
-		return conf.publishRolledKEY(zone, &held)
+		key, err := conf.takeUpKey(kdb, zone, zk, made)
+		if err != nil {
+			return err
+		}
+		return conf.publishRolledKEY(zone, key)
 	}
 	if _, _, _, err := sendZoneKEY(tm, zone, keyRR, ""); err != nil {
 		return err
