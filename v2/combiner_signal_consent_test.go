@@ -351,6 +351,35 @@ func TestAnNSChangeWithdrawsTheSignalKeysOfAZoneWithoutHSYNC3(t *testing.T) {
 	c.wantApexKey("NS change, HSYNC3 removed", cust)
 }
 
+// A combiner that holds a hand-over reads the zone's instructions from it,
+// not from its copy (S10). A later hand-over that keeps pubkey and has no
+// HSYNC3 withdraws the KEY from the signal names, and the apex KEY stays.
+func TestAHandOverWithoutHSYNC3WithdrawsTheSignalKeys(t *testing.T) {
+	const zone = "handover.nohsync3.example."
+	c := newConsentCombiner(t)
+	c.start(consentProviderZone, zone)
+	c.load(consentProviderZone, consentProviderText())
+	cust := c.load(zone, consentCustomerText(zone, true))
+	withActing(t, c.hdb)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.SetMpConfig(c.mp)
+	record := fmt.Sprintf("3600 IN HSYNC3 ON alpha %s .", consentAgent)
+	with := handoverFor(t, zone, record, "3600 IN HSYNCPARAM "+consentParams(true))
+	if resp := handTo(conf, with, consentAgent); resp.Status != "ok" {
+		t.Fatalf("the hand-over with HSYNC3 and pubkey: %s %s", resp.Status, resp.Message)
+	}
+	c.sendKey(zone)
+	c.wantSignalKey("a hand-over with HSYNC3 and pubkey", zone, consentNS1)
+
+	without := handoverFor(t, zone, `3600 IN HSYNCPARAM servers="alpha" nsmgmt="agent" parentsync="agent" serial="2" pubkey`)
+	if resp := handTo(conf, without, consentAgent); resp.Status != "ok" {
+		t.Fatalf("the hand-over with pubkey and no HSYNC3: %s %s", resp.Status, resp.Message)
+	}
+	c.wantNoSignalKey("a hand-over with pubkey and no HSYNC3", zone, consentNS1)
+	c.wantStored("a hand-over with pubkey and no HSYNC3", zone, []string{"at-apex"}, nil)
+	c.wantApexKey("a hand-over with pubkey and no HSYNC3", cust)
+}
+
 // The combiner starts with a stored at-ns instruction for a zone that does
 // not say pubkey. Whichever of the two zones loads first, the startup
 // re-apply ends with the signal name retracted, in the served provider zone,
