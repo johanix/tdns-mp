@@ -1163,9 +1163,10 @@ func (conf *Config) rollLine(kdb *tdns.KeyDB, zone ZoneName) string {
 // name, and the KEY leaves this agent's data once it has: until then the data
 // is the record of what is owed, and the tick asks again (retryKEYPurges).
 // After a restart the combiner's own read gives such a KEY back, so nothing
-// else is kept on disk. This agent's own name is dropOwnKEY's. On the engine's
+// else is kept on disk. This agent's own name is dropOwnKEY's, and at the
+// leader the KEYs under other names are dropLeftoverKEYs'. On the engine's
 // goroutine, which owns the repo.
-func (conf *Config) dropOtherKEYs(zdr *ZoneDataRepo, zone ZoneName, leader AgentId) {
+func (conf *Config) dropOtherKEYs(ctx context.Context, zdr *ZoneDataRepo, zone ZoneName, leader AgentId) {
 	tm := conf.InternalMp.MPTransport
 	if zdr == nil || tm == nil {
 		return
@@ -1174,14 +1175,18 @@ func (conf *Config) dropOtherKEYs(zdr *ZoneDataRepo, zone ZoneName, leader Agent
 	if !ok || ar == nil {
 		return
 	}
+	every := rollRetryFor(conf.MpConfig())
+	self := conf.localAgentID()
+	if self != "" && sameName(string(self), string(leader)) {
+		conf.dropLeftoverKEYs(ctx, zdr, ar, zone, self, every)
+		return
+	}
 	// only once the leader's own KEY is here
 	theirs, ok := ar.Data.Get(leader)
 	if !ok || theirs == nil || theirs.RRtypes == nil || len(theirs.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs) == 0 {
 		return
 	}
-	every := rollRetryFor(conf.MpConfig())
-	self := conf.localAgentID()
-	conf.dropOwnKEY(zdr, zone, self, leader, theirs.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs, every)
+	conf.dropOwnKEY(ctx, zdr, zone, self, leader, theirs.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs, every)
 	// and a drop is asked for only once this agent's combiner holds the
 	// leader's KEY: one that came first would leave the zone with no KEY
 	// until it did (leaderKEYConfirmed)
@@ -1229,8 +1234,12 @@ func (conf *Config) dropOtherKEYs(zdr *ZoneDataRepo, zone ZoneName, leader Agent
 // data need not hold it, and the apex says what is owed: the zone publishes
 // the leader's KEY and another. Until the new leader rolls, the zone publishes
 // the one KEY, and this agent's name may be all that holds it, so nothing is
-// asked. A combiner that publishes no KEY shows nothing to drop here.
-func (conf *Config) dropOwnKEY(zdr *ZoneDataRepo, zone ZoneName, self, leader AgentId, leaderKEY []dns.RR, every time.Duration) {
+// asked. A combiner that publishes no KEY shows nothing to drop here. And it
+// is asked only once the parent trusts the leader's KEY (the project owner,
+// 2026-11-06): a take-up's or a roll's new KEY is published beside the old
+// one before the parent trusts it, and until then this agent's own may be the
+// key the parent trusts, and the one it holds if the lead comes back.
+func (conf *Config) dropOwnKEY(ctx context.Context, zdr *ZoneDataRepo, zone ZoneName, self, leader AgentId, leaderKEY []dns.RR, every time.Duration) {
 	tm := conf.InternalMp.MPTransport
 	if self == "" {
 		return
@@ -1248,6 +1257,10 @@ func (conf *Config) dropOwnKEY(zdr *ZoneDataRepo, zone ZoneName, self, leader Ag
 		}
 		return
 	}
+	w := conf.keyTrustWord(ctx, zone, leaderKEY)
+	if !w.trusted {
+		return
+	}
 	distID, due := tm.keyPurges.due(zone, self, every)
 	if !due {
 		return
@@ -1256,7 +1269,204 @@ func (conf *Config) dropOwnKEY(zdr *ZoneDataRepo, zone ZoneName, self, leader Ag
 		lgEngine.Warn("the combiner could not be asked to drop this agent's own KEY, trying again", "zone", zone, "in", every, "err", err)
 		return
 	}
-	lgEngine.Info("the zone publishes the leader's KEY and another: the combiner is asked to drop this agent's own KEY", "zone", zone, "origin", self, "leader", leader)
+	lgEngine.Info("the zone publishes the leader's KEY, which the parent trusts, and another: the combiner is asked to drop this agent's own KEY",
+		"zone", zone, "origin", self, "leader", leader, "keyids", w.keys)
+}
+
+// dropLeftoverKEYs is dropOtherKEYs at the leader (the project owner,
+// 2026-11-06): a KEY under another agent's name that is no key this agent
+// holds is a leftover, a former leader's or one of a take-up or a roll that
+// ended elsewhere, and its combiner is asked to drop it once the parent
+// trusts the leader's own key, a key it holds that its copy of the zone
+// publishes. A KEY it holds stays under whatever name. Until the drop the
+// apex shows several KEYs, and the leader holds no zone's key to hand over
+// (readZoneKey). What it holds and the parent's word come off this goroutine
+// (keyTrustWord).
+func (conf *Config) dropLeftoverKEYs(ctx context.Context, zdr *ZoneDataRepo, ar *AgentRepo, zone ZoneName, self AgentId, every time.Duration) {
+	tm := conf.InternalMp.MPTransport
+	var others []AgentId
+	for _, id := range ar.Data.Keys() {
+		if sameName(string(id), string(self)) {
+			continue
+		}
+		if od, ok := ar.Data.Get(id); !ok || od == nil || od.RRtypes == nil || len(od.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs) == 0 {
+			tm.keyPurges.forget(zone, id)
+			continue
+		}
+		others = append(others, id)
+	}
+	if len(others) == 0 {
+		return
+	}
+	w := conf.keyTrustWord(ctx, zone, nil)
+	for _, id := range others {
+		od, _ := ar.Data.Get(id)
+		if tm.keyPurges.taken(zone, id) {
+			od.RRtypes.Delete(dns.TypeKEY)
+			zdr.removeTracking(zone, id, dns.TypeKEY)
+			tm.keyPurges.forget(zone, id)
+			lgEngine.Info("a leftover KEY under another agent's name is dropped", "zone", zone, "origin", id)
+			continue
+		}
+		if !w.answered() {
+			continue
+		}
+		if holdsOneOf(w.held, od.RRtypes.GetOnlyRRSet(dns.TypeKEY).RRs) {
+			tm.keyPurges.forget(zone, id)
+			continue
+		}
+		if !w.trusted {
+			continue
+		}
+		distID, due := tm.keyPurges.due(zone, id, every)
+		if !due {
+			continue
+		}
+		if err := sendKEYPurge(tm, zone, id, distID); err != nil {
+			lgEngine.Warn("the combiner could not be asked to drop a leftover KEY, trying again", "zone", zone, "origin", id, "in", every, "err", err)
+			continue
+		}
+		lgEngine.Info("the parent trusts the leader's key: the combiner is asked to drop a leftover KEY under another agent's name",
+			"zone", zone, "origin", id, "keyids", w.keys)
+	}
+}
+
+// keyTrustBook is the parent's word a KEY drop waits for (the project owner,
+// 2026-11-06), per zone: on the leader's KEY at a member, and at the leader on
+// its own key, with the keys it holds. The engine reads it and never waits: a
+// word not heard yet, or older than keyTrustAskEvery, is asked for off its
+// goroutine, and a later pass reads it. A leaf lock.
+type keyTrustBook struct {
+	mu    sync.Mutex
+	words map[ZoneName]*keyTrust
+	asks  sync.WaitGroup
+}
+
+// keyTrust is one word: whether the parent trusts one of keys. At the leader
+// keys are those it holds that its copy publishes, and held every key it
+// holds, active or published.
+type keyTrust struct {
+	leader  bool
+	keys    []uint16
+	held    []*dns.KEY
+	trusted bool
+	at      time.Time // when it was heard; zero until then
+	asking  bool
+}
+
+func (w keyTrust) answered() bool { return !w.at.IsZero() }
+
+// keyTrustWord is the book's word for the zone, on the leader's KEY at a
+// member (leaderKEY), or at the leader (nil). A word on other keys is a new
+// one; a word not heard yet or old is asked for again, and what was heard so
+// far is returned.
+func (conf *Config) keyTrustWord(ctx context.Context, zone ZoneName, leaderKEY []dns.RR) keyTrust {
+	b := &conf.InternalMp.keyTrust
+	leader := leaderKEY == nil
+	keys := keyRRIDs(leaderKEY)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.words == nil {
+		b.words = map[ZoneName]*keyTrust{}
+	}
+	w := b.words[zone]
+	if w == nil || w.leader != leader || !leader && !slices.Equal(w.keys, keys) {
+		w = &keyTrust{leader: leader, keys: keys}
+		b.words[zone] = w
+	}
+	if !w.asking && (!w.answered() || time.Since(w.at) >= keyTrustAskEvery) {
+		w.asking = true
+		b.asks.Add(1)
+		go conf.askKeyTrust(ctx, zone, w, leader, keys)
+	}
+	return *w
+}
+
+// askKeyTrust asks the parent's KeyState for keys, the way the roll does
+// (rollParent); at the leader it first reads the keys it holds and asks for
+// those its copy publishes. An inquiry that fails keeps the earlier word, and
+// is asked again keyTrustAskEvery on.
+func (conf *Config) askKeyTrust(ctx context.Context, zone ZoneName, w *keyTrust, leader bool, keys []uint16) {
+	b := &conf.InternalMp.keyTrust
+	defer b.asks.Done()
+	var held []*dns.KEY
+	var err error
+	if leader {
+		held, keys, err = conf.leaderKeys(zone)
+	}
+	trusted := false
+	for _, id := range keys {
+		if err != nil {
+			break
+		}
+		var state uint8
+		if state, err = conf.rollParentOf().keyState(ctx, zone, id); err == nil && state == edns0.KeyStateTrusted {
+			trusted = true
+			break
+		}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	w.asking, w.at = false, time.Now()
+	if err != nil && !trusted {
+		if conf.InternalMp.keyLogs.due("key trust " + string(zone)) {
+			lgEngine.Warn("the parent's KeyState for a KEY drop could not be asked, trying again", "zone", zone, "keyids", keys, "in", keyTrustAskEvery, "err", err)
+		}
+		return
+	}
+	w.trusted = trusted
+	if leader {
+		w.held, w.keys = held, keys
+	}
+}
+
+// leaderKeys is what this agent holds of the zone's SIG(0) keys, active or
+// published (a roll's or a take-up's new key), and the ids of those its copy
+// of the zone publishes: its own keys as the leader.
+func (conf *Config) leaderKeys(zone ZoneName) ([]*dns.KEY, []uint16, error) {
+	kdb := conf.zoneKeyDB(zone)
+	if kdb == nil {
+		return nil, nil, fmt.Errorf("no keystore for zone %s", zone)
+	}
+	published := publishedKeys(zone)
+	var held []*dns.KEY
+	var own []uint16
+	for _, state := range []string{tdns.Sig0StateActive, tdns.Sig0StatePublished} {
+		rows, err := sig0Rows(kdb, zone, state)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, r := range rows {
+			if r.key == nil {
+				continue
+			}
+			held = append(held, r.key)
+			if slices.ContainsFunc(published, func(k *dns.KEY) bool { return sameKey(k, r.key) }) {
+				own = append(own, r.keyid)
+			}
+		}
+	}
+	return held, own, nil
+}
+
+// keyRRIDs are the key tags of the KEYs among rrs, in order.
+func keyRRIDs(rrs []dns.RR) []uint16 {
+	var out []uint16
+	for _, rr := range rrs {
+		if k, ok := rr.(*dns.KEY); ok {
+			out = append(out, k.KeyTag())
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// holdsOneOf: one of the KEYs among rrs is one of held.
+func holdsOneOf(held []*dns.KEY, rrs []dns.RR) bool {
+	return slices.ContainsFunc(rrs, func(rr dns.RR) bool {
+		k, ok := rr.(*dns.KEY)
+		return ok && slices.ContainsFunc(held, func(h *dns.KEY) bool { return sameKey(h, k) })
+	})
 }
 
 // publishesBeside: the apex of this agent's copy of the zone publishes one of
@@ -1274,7 +1484,7 @@ func publishesBeside(zone ZoneName, keys []dns.RR) bool {
 // retryKEYPurges: the tick's word on the KEYs held under another name than
 // the zone's leader's: those the combiner has dropped go from the data, and
 // the others are asked for again when due. On the engine's goroutine.
-func (conf *Config) retryKEYPurges(zdr *ZoneDataRepo) {
+func (conf *Config) retryKEYPurges(ctx context.Context, zdr *ZoneDataRepo) {
 	lem := conf.InternalMp.LeaderElectionManager
 	if zdr == nil || lem == nil {
 		return
@@ -1296,7 +1506,7 @@ func (conf *Config) retryKEYPurges(zdr *ZoneDataRepo) {
 			continue
 		}
 		if leader, ok := lem.ZoneLeader(zone); ok {
-			conf.dropOtherKEYs(zdr, zone, leader)
+			conf.dropOtherKEYs(ctx, zdr, zone, leader)
 		}
 	}
 }
@@ -1305,7 +1515,7 @@ func (conf *Config) retryKEYPurges(zdr *ZoneDataRepo) {
 // is the hand-over of the zone's leader's KEY, the KEYs held under another
 // name are asked to be dropped now, not at the next tick (dropOtherKEYs). On
 // the engine's goroutine.
-func (conf *Config) leaderKEYConfirmed(zdr *ZoneDataRepo, zone ZoneName, distID string) {
+func (conf *Config) leaderKEYConfirmed(ctx context.Context, zdr *ZoneDataRepo, zone ZoneName, distID string) {
 	lem := conf.InternalMp.LeaderElectionManager
 	if zdr == nil || lem == nil || distID == "" {
 		return
@@ -1317,7 +1527,7 @@ func (conf *Config) leaderKEYConfirmed(zdr *ZoneDataRepo, zone ZoneName, distID 
 	if n := zdr.notes[zone][leader][dns.TypeKEY]; n == nil || n.distID != distID {
 		return
 	}
-	conf.dropOtherKEYs(zdr, zone, leader)
+	conf.dropOtherKEYs(ctx, zdr, zone, leader)
 }
 
 // keyPurge is the drop of origin's KEY at this agent's combiner: an empty
