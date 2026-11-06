@@ -320,7 +320,7 @@ func (conf *Config) combinerTakeHandover(msg *AgentMsgPostPlus, localAgents map[
 		return refuse("this combiner keeps no hand-overs")
 	}
 	// what the combiner acted by before
-	pubkeyBefore := mpzd.hasPubkey()
+	pubkeyBefore := mpzd.pubkeyHere()
 	// Before the hand-over is kept: a stop between the two finds the same
 	// change at the next hand-over, and drops what is left (design 5.4).
 	if store.changesNSmgmt(h) {
@@ -399,7 +399,7 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 			lgCombiner.Error("combining by the hand-over failed", "zone", mpzd.ZoneName, "err", combineErr)
 		}
 	}
-	if mpzd.hasPubkey() != pubkeyBefore {
+	if mpzd.pubkeyHere() != pubkeyBefore {
 		if err := mpzd.withdrawZoneSignalKeysWithoutConsent(NewHsyncDB(mpzd.KeyDB)); err != nil {
 			lgCombiner.Error("failed to load publish instructions; the zone's at-ns publication is not checked against the customer's consent", "zone", mpzd.ZoneName, "err", err)
 		} else if pubkeyBefore {

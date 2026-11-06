@@ -12,14 +12,15 @@ import "github.com/miekg/dns"
 // key bootstrap: the zone's apex always (at-apex), and the RFC 9615 signal
 // names under each of the zone's nameservers (at-ns) only when the sets at
 // the zone's step carry the pubkey flag, not when the copy does (design 3.5,
-// plan S21). The flag is the customer's word that its providers may publish
-// the zone's key in zones of their own; without it the combiners publish
-// nothing there. A parent that requires DNSSEC of a child cannot validate
-// the apex KEY of a zone that has no DS yet, only the signal name in a
-// provider's signed zone, so a customer wanting that parent says pubkey.
+// plan S21), and the zone's instructions carry HSYNC3 (pubkeyHere). The
+// flag is the customer's word that its providers may publish the zone's key
+// in zones of their own; without it the combiners publish nothing there. A
+// parent that requires DNSSEC of a child cannot validate the apex KEY of a
+// zone that has no DS yet, only the signal name in a provider's signed zone,
+// so a customer wanting that parent says pubkey.
 func publishLocations(zone ZoneName) []string {
 	locs := []string{"at-apex"}
-	if mpzd, ok := Zones.Get(dns.Fqdn(string(zone))); ok && mpzd != nil && mpzd.hasPubkey() {
+	if mpzd, ok := Zones.Get(dns.Fqdn(string(zone))); ok && mpzd != nil && mpzd.pubkeyHere() {
 		locs = append(locs, "at-ns")
 	}
 	return locs

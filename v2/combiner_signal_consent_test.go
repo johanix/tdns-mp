@@ -322,6 +322,35 @@ func TestAnNSChangeWithdrawsTheSignalKeysOfAZoneWithoutPubkey(t *testing.T) {
 	c.wantSignalKey("instruction, pubkey again", zone, consentNS1, consentNS2, consentNS3)
 }
 
+// The owner keeps pubkey and removes the zone's HSYNC3 records: the zone is
+// no multi-provider zone any more, and tdns's use-hsyncparam publishes at its
+// signal names, each provider on its own (the project owner, 2026-11-06). The
+// next NS change withdraws the names the instruction published and leaves it
+// apex-only, as when pubkey goes.
+func TestAnNSChangeWithdrawsTheSignalKeysOfAZoneWithoutHSYNC3(t *testing.T) {
+	const zone = "nohsync3.customer.example."
+	c := newConsentCombiner(t)
+	c.start(consentProviderZone, zone)
+	c.load(consentProviderZone, consentProviderText())
+	cust := c.load(zone, consentCustomerText(zone, true))
+	c.sendKey(zone)
+	c.wantSignalKey("instruction, with pubkey and HSYNC3", zone, consentNS1)
+
+	if _, err := cust.ZoneData.StageBatch(func(s tdns.Stager) (bool, error) {
+		s.Delete(cust.ZoneName, core.TypeHSYNC3)
+		return true, nil
+	}); err != nil {
+		t.Fatalf("removing the HSYNC3 records: %v", err)
+	}
+	if in := cust.instructions(); in != nil && (hasHSYNC3(in) || !in.Pubkey) {
+		t.Fatalf("the instructions after the owner's edit: %+v, want pubkey and no HSYNC3", in)
+	}
+	c.addNS(zone, consentNS2)
+	c.wantNoSignalKey("NS change, HSYNC3 removed", zone, consentNS1, consentNS2)
+	c.wantStored("NS change, HSYNC3 removed", zone, []string{"at-apex"}, nil)
+	c.wantApexKey("NS change, HSYNC3 removed", cust)
+}
+
 // The combiner starts with a stored at-ns instruction for a zone that does
 // not say pubkey. Whichever of the two zones loads first, the startup
 // re-apply ends with the signal name retracted, in the served provider zone,
