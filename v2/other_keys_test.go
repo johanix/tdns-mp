@@ -760,6 +760,30 @@ func TestPubcdsOnPublishesTheCDSAtTheSignalNames(t *testing.T) {
 	}
 }
 
+// A zone with no HSYNC3 is not a multi-provider zone: tdns's use-hsyncparam
+// publishes at its _dsboot names, each provider on its own (the project owner,
+// 2026-11-06). Handed pubcds for one, the combiner publishes nothing there;
+// handed the same with HSYNC3, it does.
+func TestNoDsbootNamesForAZoneWithoutHSYNC3(t *testing.T) {
+	const zone = "pubcds.nohsync3.example."
+	const params = `nsmgmt="agent" pubcds`
+	d := newDsbootCombiner(t, zone, params, okCDNSKEY, okCDS)
+	h := handoverFor(t, zone, `3600 IN HSYNCPARAM `+numberedText(params))
+	h.Step, h.Sets.Pubcds = 1, true
+	if resp := handTo(d.conf, h, consentAgent); resp.Status != "ok" {
+		t.Fatalf("the hand-over: %s: %s", resp.Status, resp.Message)
+	}
+	for _, rrtype := range dsbootTypes {
+		if got := d.served(consentNS1, rrtype); got != nil {
+			t.Errorf("a _dsboot %s for a zone without HSYNC3: %v", dns.TypeToString[rrtype], got)
+		}
+	}
+	d.hand(params, 2, false, true)
+	if got := d.served(consentNS1, dns.TypeCDS); len(got) != 1 {
+		t.Errorf("the CDS once the zone has HSYNC3: %v", got)
+	}
+}
+
 // pubcds off: handed the sets, the combiner withdraws the names and publishes
 // the provider zone without them, in the memory, the file and the store a
 // restart loads.

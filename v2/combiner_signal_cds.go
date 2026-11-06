@@ -45,9 +45,12 @@ func dsbootOwnerName(zone, nameserver string) string {
 // dsbootWanted is what the zone's _dsboot names should hold, by owner and
 // type: the apex's CDS and CDNSKEY as served, under each of signalNSTargets;
 // nothing while the sets handed do not say pubcds, or the zone has neither.
+// Nothing for a zone with no HSYNC3 either: it is not a multi-provider zone,
+// and tdns's use-hsyncparam publishes at its names, each provider on its own
+// (the project owner, 2026-11-06).
 func (mpzd *MPZoneData) dsbootWanted(by string) map[string]map[uint16][]dns.RR {
 	want := map[string]map[uint16][]dns.RR{}
-	if !mpzd.hasPubcds() {
+	if !mpzd.hasPubcds() || !hasHSYNC3(mpzd.instructions()) {
 		return want
 	}
 	apex, err := mpzd.GetOwner(mpzd.ZoneName)
