@@ -16,6 +16,7 @@ package tdnsmp
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -335,11 +336,17 @@ func (conf *Config) inDSSigners(zone string) bool {
 // agent, with its DNSKEY distributions, say so (tdns-mp #207). It names a key
 // those key states have standby, active or retired with ds=1 (P3, as
 // foreignDSFor reads the same key states at the signer, where this agent
-// relays them) and that the inventory does not hold as a SEP key with ds=1;
-// empty when there is none. One inventory without the key is not the key
-// states dropping it: the signer may have taken a copy of the zone that
-// lacked it. A provider that is not in the step's DSSigners is not asked:
-// its DS leaves at its DS step, by the set (plan S13).
+// relays them) and that the inventory does not hold as another provider's SEP
+// key with ds=1; empty when there is none. One inventory without the key is
+// not the key states dropping it: the signer may have taken a copy of the
+// zone that lacked it. A provider that is not in the step's DSSigners is not
+// asked: its DS leaves at its DS step, by the set (plan S13).
+//
+// A key is held by its record once its provider has sent it, by its tag
+// before. A row of this provider's own never holds another's key: the signer
+// keeps no copy of a key under a tag of its own (syncForeignDNSKEYs), and the
+// row would stand in for the missing one, or, outside the step's DSSigners,
+// leave the set with it.
 func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) string {
 	zone = dns.Fqdn(zone)
 	tm := conf.InternalMp.MPTransport
@@ -361,11 +368,16 @@ func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) 
 	if matched, label, err := mpzd.matchHsyncIdentity(ourHsyncIdentities(conf.MpConfig())); err == nil && matched {
 		ourLabel = trimDot(label)
 	}
-	held := map[uint16]bool{}
+	held := map[uint16][]*dns.DNSKEY{}
 	for _, it := range inv {
-		if it.Flags&dns.SEP != 0 && it.DS != nil && *it.DS {
-			held[it.KeyTag] = true
+		if it.State != KeyStateForeign || it.Flags&dns.SEP == 0 || it.DS == nil || !*it.DS {
+			continue
 		}
+		var dk *dns.DNSKEY
+		if rr, err := dns.NewRR(it.KeyRR); err == nil {
+			dk, _ = rr.(*dns.DNSKEY)
+		}
+		held[it.KeyTag] = append(held[it.KeyTag], dk)
 	}
 	shares := tm.foreignSharesFor(ZoneName(zone))
 	agents := make([]string, 0, len(shares))
@@ -387,14 +399,15 @@ func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) 
 			// a key whose record has not arrived is taken to be a SEP key:
 			// its provider says its DS belongs at the parent
 			sep := true
+			var record *dns.DNSKEY
 			for _, dk := range share.dnskeys {
 				if dk.KeyTag() == st.KeyTag {
-					sep = dk.Flags&dns.SEP != 0
+					sep, record = dk.Flags&dns.SEP != 0, dk
 					break
 				}
 			}
 			want, decided := foreignDSFor(foreignSaid{Provider: label, State: st.State, DS: st.DS}, sep, signing)
-			if !decided || !want || held[st.KeyTag] {
+			if !decided || !want || holdsKey(held[st.KeyTag], record) {
 				continue
 			}
 			who := label
@@ -406,6 +419,15 @@ func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) 
 		}
 	}
 	return ""
+}
+
+// holdsKey: one of rows, an inventory's records under a key's tag, is the
+// key's record; with the record not known, any row under the tag.
+func holdsKey(rows []*dns.DNSKEY, record *dns.DNSKEY) bool {
+	if record == nil {
+		return len(rows) > 0
+	}
+	return slices.ContainsFunc(rows, func(dk *dns.DNSKEY) bool { return sameDNSKEYRdata(dk, record) })
 }
 
 // dnskeyRecordKnown reports whether any record carries the key tag.
