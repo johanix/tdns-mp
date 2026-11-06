@@ -128,6 +128,34 @@ func TestAMemberWithNoRecordTakesOnlyTheLeadersWord(t *testing.T) {
 	}
 }
 
+// An HSYNCPARAM that gives no role, the way in's step 1: no voting member
+// under the newest serial, so nobody leads it or tells it, and its active
+// serial was never known. It is taken at once, with nothing frozen (the
+// project owner, 2026-11-06). A member that tells another active serial with a
+// voting member still has the rule's word: an agent that lost its record does
+// not leave a fleet whose active serial gives roles.
+func TestASerialWithNoVotingMemberIsKnownAtOnce(t *testing.T) {
+	r := newThawRig(t, "novoter.restart.example.", "")
+	none := freezeAt(t, 91, "none", "", "")
+	r.noRecord(none)
+	r.conf.thawTurn(r.zone)
+	if r.known() != 91 {
+		t.Fatalf("a serial with no voting member is not known: %q", r.conf.thawLine(r.zone))
+	}
+	if why := r.conf.zoneFrozen(r.zone); len(why) > 0 {
+		t.Errorf("frozen: %v", why)
+	}
+
+	f := newThawRig(t, "fleet.restart.example.", roleB)
+	f.noRecord(f.n, freezeAt(t, 92, "none", "", ""))
+	f.leadGroup(f.n, roleB)
+	f.hear(roleB, tells(f.n, f.n), true)
+	f.conf.thawTurn(f.zone)
+	if f.known() != 41 {
+		t.Fatalf("b leads 41, which gives roles, and tells it: known %d", f.known())
+	}
+}
+
 // A member with no record does not take the active serial of a member that
 // neither leads nor votes under it.
 func TestAMemberWithNoRecordIgnoresAnotherMembersActive(t *testing.T) {
