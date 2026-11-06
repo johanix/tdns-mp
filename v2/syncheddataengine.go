@@ -190,7 +190,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			conf.rollsDue(ctx)
 			// a KEY held under another name than the leader's, until the
 			// combiner has dropped it (plan S17a)
-			conf.retryKEYPurges(zdr)
+			conf.retryKEYPurges(ctx, zdr)
 			// what a zone kept, released when its freeze ended and the
 			// engine's queue had no room, or a restart came between
 			conf.releaseUnfrozen(ctx, zdr)
@@ -735,7 +735,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				// names its records as ignored (#288).
 				if detail.Status == "SUCCESS" || detail.Status == "ok" {
 					zdr.noteCombinerConfirmed(detail.Zone, detail.DistributionID, time.Now())
-					conf.leaderKEYConfirmed(zdr, detail.Zone, detail.DistributionID)
+					conf.leaderKEYConfirmed(ctx, zdr, detail.Zone, detail.DistributionID)
 				} else {
 					all, ignored := combinerIgnoredTypes(detail)
 					zdr.noteCombinerFailed(detail.Zone, detail.DistributionID, all, ignored)
@@ -1676,7 +1676,7 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 			// the leader's KEY, and no other (plan S17a), also when the
 			// leader's publication changed nothing here; what came here
 			// is the leader's (refuseCsyncNotFromLeader)
-			conf.dropOtherKEYs(zdr, synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
+			conf.dropOtherKEYs(ctx, zdr, synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
 		}
 		// The operations as they arrived, stale replaces too:
 		// the confirmation to the sender names what the repo
