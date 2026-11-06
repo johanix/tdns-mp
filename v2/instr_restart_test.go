@@ -173,6 +173,21 @@ func TestASerialWithNoVotingMemberIsKnownAtOnce(t *testing.T) {
 	if c.known() != 41 {
 		t.Errorf("the leader of 41 tells it after the first turn: known %d", c.known())
 	}
+	cb := &c.conf.InternalMp.thaws
+	cb.mu.Lock()
+	_, kept := cb.restartWaits[canonicalName(c.zone)]
+	cb.mu.Unlock()
+	if kept {
+		t.Error("the wait is kept once the leader's word is known")
+	}
+	// the serials forgotten, then a newer one with no voting member, at a
+	// turn a leaving timeout after the first wait: the rule waits afresh, and
+	// does not take the newest on the first wait's time
+	c.noRecord(c.n, freezeAt(t, 93, "none", "", ""))
+	later := time.Now().Add(leavingTimeoutFor(c.conf.MpConfig()) + time.Second)
+	if v, _ := c.conf.restartView(c.zone, later); v.take != nil || len(v.waits) == 0 {
+		t.Errorf("after a forget, the first wait's time counts: take %v, waits %q", v.take, v.waits)
+	}
 	// nobody speaks: the leaving timeout bounds the wait
 	q := newThawRig(t, "quiet.restart.example.", "")
 	q.noRecord(q.n, freezeAt(t, 92, "none", "", ""))

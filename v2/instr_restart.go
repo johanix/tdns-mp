@@ -234,15 +234,13 @@ func (conf *Config) noVoterWord(v *restartView, newest *heldSerial, told map[str
 			take = true
 		}
 	}
-	b := &conf.InternalMp.thaws
 	if !take {
-		until := b.restartWaitSince(v.zone, now).Add(timeout)
+		until := conf.InternalMp.thaws.restartWaitSince(v.zone, now).Add(timeout)
 		if now.Before(until) {
 			v.waits = append(v.waits, "the word of a member, as a serial held gives roles, until "+until.Format(time.TimeOnly))
 			return
 		}
 	}
-	b.restartWaitDone(v.zone)
 	sd := newest.SerialDigest
 	v.take, v.by, v.from = &sd, dns.Fqdn(conf.MpConfig().Identity), knownFromNoVoter
 }
@@ -279,7 +277,9 @@ func (b *thawBook) restartWaitSince(zone string, now time.Time) time.Time {
 	return since
 }
 
-// restartWaitDone forgets that wait: the active serial is known.
+// restartWaitDone forgets that wait: the active serial is known (know), by
+// whatever word. The rule runs only while it is not, and Forget is refused
+// then, so the next time it runs it waits afresh.
 func (b *thawBook) restartWaitDone(zone string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -429,7 +429,8 @@ func (conf *Config) knowActive(zone string) {
 }
 
 // know makes sd the zone's active serial (Know), and runs what follows: the
-// catch-up's answer time runs again (activeChanged); the readers moved from
+// restart rule's wait ends (restartWaitDone); the catch-up's answer time runs
+// again (activeChanged); the readers moved from
 // the newest serial to the active one (onActiveChanged),
 // the sets handed to the parts (onSetsChanged), and the zone's turn asked
 // again, for a newer serial it may agree on now. The end of the freeze
@@ -442,6 +443,7 @@ func (conf *Config) know(zone string, sd SerialDigest, th *Thaw, reconciling boo
 		return
 	}
 	lg.Info("the zone's active instructions are known", "zone", zone, "serial", sd.Serial, "from", from, "by", by)
+	conf.InternalMp.thaws.restartWaitDone(zone)
 	conf.InternalMp.CatchUp.activeChanged(ZoneName(zone))
 	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil && mpzd.Ready {
 		if after := s.activeReading(zone); !sameInstructions(before, after) {
