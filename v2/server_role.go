@@ -102,6 +102,12 @@ func serverRoleStatus(conf *Config, zone string, step heldStep, now time.Time) s
 	case !self && conf.toldStepHeld(zone, id, step.InstrStep):
 		return ""
 	}
+	// where no provider signs there is no upstream to name, nor to point
+	// at: the serial alone is checked (servingFromUpstream)
+	in := instructionsFor(ZoneName(zone))
+	if noProviderSigns(in, id) {
+		return fmt.Sprintf("waiting for %s's nameservers to serve the zone at serial %d or later", id, copySerial(zone))
+	}
 	line := fmt.Sprintf("waiting for %s's nameservers to serve the zone from its upstream at serial %d or later", id, copySerial(zone))
 	if self && now.Sub(step.at) >= transferHelpAfter {
 		line += operatorMustPoint(conf, zone, id)
