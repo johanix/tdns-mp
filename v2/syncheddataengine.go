@@ -1805,10 +1805,15 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 			if change {
 				conf.InternalMp.CatchUp.keyCheck(synchedDataUpdate.Zone)
 			}
-			// the leader's KEY, and no other (plan S17a), also when the
-			// leader's publication changed nothing here; what came here
-			// is the leader's (refuseCsyncNotFromLeader)
-			conf.dropOtherKEYs(ctx, zdr, synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
+			// the leader's KEY, and no other (plan S17a), here when the
+			// leader's publication changed nothing; what came here is
+			// the leader's (refuseCsyncNotFromLeader). A change is
+			// handed to the combiner below, and a drop waits for the
+			// combiner's final word on it (leaderKEYConfirmed): one
+			// asked now would come ahead of the new KEY
+			if !change {
+				conf.dropOtherKEYs(ctx, zdr, synchedDataUpdate.Zone, synchedDataUpdate.AgentId)
+			}
 		}
 		// The operations as they arrived, stale replaces too:
 		// the confirmation to the sender names what the repo
