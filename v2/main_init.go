@@ -209,6 +209,14 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 		return fmt.Errorf("the hand-overs held: %w", err)
 	}
 	actingHeld.Store(acting)
+	// What it last acted by with nothing handed (signer_acted.go, until P5),
+	// which the zones' first load reads too.
+	acted, err := loadSignerActed(conf.InternalMp.HsyncDB)
+	if err != nil {
+		return fmt.Errorf("the sets the signer last acted by: %w", err)
+	}
+	signerActed.Store(acted)
+	conf.ForEachMPZone(func(zd *MPZoneData) { zd.restoreSignerActed(mp) })
 	// The zones whose key machine the agent holds (plan S6), kept over a
 	// restart.
 	holds, err := loadSignerHolds(conf.InternalMp.HsyncDB)

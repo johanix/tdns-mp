@@ -14,7 +14,8 @@
  * copy says (from S7). A signer handed nothing acts by its own copy (rule
  * 5): provisional for a copy with no reading (no serial=, #308), which
  * starts no multi-provider work; for one that reads, it waits for its
- * agent, and acts meanwhile by the sets it last acted by.
+ * agent, and acts meanwhile by the sets it last acted by, kept over a restart
+ * (signer_acted.go).
  */
 package tdnsmp
 
@@ -94,6 +95,18 @@ func (conf *Config) signerTakeHandover(sig *KeystateSignalMsg) {
 	if err == nil {
 		refusalLogged.Delete(handoverKey(zone))
 		conf.signerHold(zone, h.Sets.Hold)
+		if _, held := store.get(zone); held {
+			// One refresh or hand-over at a time (mpDataLock): before the
+			// zone's first load actBySignerHandover does not wait for it, and
+			// a load that read nothing held keeps its sets under this lock.
+			mpMu := mpDataLock(zone)
+			mpMu.Lock()
+			err := signerActed.Load().drop(zone)
+			mpMu.Unlock()
+			if err != nil {
+				lgSigner.Error("the sets the signer last acted by were not dropped", "zone", zone, "err", err)
+			}
+		}
 	}
 	if err == nil && h.Refresh {
 		conf.refreshFromUpstream(mpzd, lgSigner)

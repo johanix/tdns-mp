@@ -218,6 +218,15 @@ var HsyncTables = map[string]string{
 		UNIQUE (zonename)
 	)`,
 
+	// MPSignerActed is what a signer handed nothing last acted by for a zone
+	// (signer_acted.go, tdns-mp #357): the sets as JSON, from its first load
+	// until its first hand-over. Temporary: it goes with P5 (tdns-mp #146).
+	"MPSignerActed": `CREATE TABLE IF NOT EXISTS 'MPSignerActed' (
+		zonename TEXT NOT NULL,
+		sets     TEXT NOT NULL DEFAULT '',
+		UNIQUE (zonename)
+	)`,
+
 	// CombinerContributions is a snapshot of the current per-agent contributions.
 	// One row per RR. Used to restore AgentContributions on restart.
 	"CombinerContributions": `CREATE TABLE IF NOT EXISTS 'CombinerContributions' (
