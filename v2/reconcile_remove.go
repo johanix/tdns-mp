@@ -230,7 +230,6 @@ func (l leaver) steps(p planView) []plannedStep {
 				},
 				start: func(conf *Config, zone string) {
 					logRemovalStep(zone, id, "2 (its NS): it leaves the key confirmers", "")
-					conf.lookAgainAtDnskeyWaits(ZoneName(zone))
 				},
 			})
 		}
@@ -375,10 +374,11 @@ type parentSeen struct {
 	at        time.Time
 	ns        []string // the names of its NS RRset, folded
 	nsTTL     uint32
-	nsServer  string   // the parent's server that said so
-	ds        []uint16 // the key tags of its DS RRset
-	dsTTL     uint32   // as last served
-	dnskeyTTL uint32   // the largest seen since the zone's first look; 0 if none
+	nsServer  string    // the parent's server that said so
+	ds        []uint16  // the key tags of its DS RRset
+	dsRRs     []*dns.DS // the same RRset, whole
+	dsTTL     uint32    // as last served
+	dnskeyTTL uint32    // the largest seen since the zone's first look; 0 if none
 }
 
 // parentLook asks the parent what it serves for the zone; a test stands in
@@ -420,6 +420,7 @@ var parentLook = func(conf *Config, zone string) (parentSeen, error) {
 		for _, rr := range dsrrs {
 			if ds, ok := rr.(*dns.DS); ok {
 				seen.ds = append(seen.ds, ds.KeyTag)
+				seen.dsRRs = append(seen.dsRRs, ds)
 				seen.dsTTL = max(seen.dsTTL, ds.Hdr.Ttl)
 			}
 		}
@@ -736,20 +737,30 @@ func (conf *Config) removalDSWait(zone, id string) string {
 // provider's is gone. With the set not known it cannot be told, and the step
 // waits, as the syncher leaves the parent's DS alone then. A test stands in.
 var dsLeft = func(conf *Config, zone string, seen parentSeen) bool {
-	if len(seen.ds) == 0 {
+	if len(seen.dsRRs) == 0 {
 		return true
 	}
 	intent, err := conf.computedDSIntent(zone, dns.SHA256)
 	if err != nil || !intent.Known {
 		return false
 	}
-	tags := map[uint16]bool{}
-	for _, rr := range intent.Set {
-		if ds, ok := rr.(*dns.DS); ok {
-			tags[ds.KeyTag] = true
-		}
-	}
-	return !slices.ContainsFunc(seen.ds, func(tag uint16) bool { return !tags[tag] })
+	return dsAllIntended(seen.dsRRs, intent.Set)
+}
+
+// dsAllIntended: every DS served is one of set. Two providers' keys can share a
+// tag, so a DS of the set's digest type is compared whole. One of another digest
+// type goes by its tag and algorithm: a parent that computes its own may serve
+// it for a key that stays, and nothing would ever end that wait.
+func dsAllIntended(served []*dns.DS, set []dns.RR) bool {
+	return !slices.ContainsFunc(served, func(ds *dns.DS) bool {
+		return !slices.ContainsFunc(set, func(rr dns.RR) bool {
+			want, ok := rr.(*dns.DS)
+			if !ok || want.KeyTag != ds.KeyTag || want.Algorithm != ds.Algorithm {
+				return false
+			}
+			return want.DigestType != ds.DigestType || strings.EqualFold(want.Digest, ds.Digest) // not-a-name: a digest in hex
+		})
+	})
 }
 
 // dnskeyTTLOf is the DNSKEY TTL of the zone: what its servers were seen to
@@ -803,18 +814,29 @@ func stillConfirmsKeys(zone ZoneName, id AgentId) bool {
 	return isAmong(identities(rolesForZone(zone).KeyConfirmers), id)
 }
 
-// lookAgainAtDnskeyWaits has the zone's DNSKEY distributions look again at who
-// they wait for: a step took a provider out of the key confirmers, and a
-// rollover paused on it resumes (design 5.2).
+// lookAgainAtDnskeyWaits has the zone's DNSKEY distributions look again at each
+// provider being removed that is no longer a key confirmer: a rollover paused
+// on it resumes (design 5.2). It runs whenever the step's sets change here
+// (onSetsChanged), at the leader and at a member that takes the step, so
+// whichever step takes the provider out: a signer that serves nothing leaves
+// at the first.
 func (conf *Config) lookAgainAtDnskeyWaits(zone ZoneName) {
-	if tm := conf.InternalMp.MPTransport; tm != nil {
-		tm.lookAgainAtDnskeyPropagations(zone)
+	tm := conf.InternalMp.MPTransport
+	if tm == nil {
+		return
+	}
+	for _, id := range conf.InternalMp.Instructions.removalIdentities(string(zone)) {
+		if !stillConfirmsKeys(zone, AgentId(id)) {
+			tm.lookAgainAtDnskeyPropagations(zone, AgentId(id))
+		}
 	}
 }
 
 // safeToRemove: this agent no longer has a role in the zone, the transition
 // that took its last role away is done, and nothing is under way: its operator
-// may take the zone away (design 5.2).
+// may take the zone away (design 5.2). So too when the last thaw took its
+// record: a leader thaws only after "done", and the thaw's own transition is
+// done here.
 func (conf *Config) safeToRemove(zone string) bool {
 	mp := conf.MpConfig()
 	if mp == nil {
@@ -825,5 +847,20 @@ func (conf *Config) safeToRemove(zone string) bool {
 	if !ok || !in.enforced || in.reconciling {
 		return false
 	}
-	return zoneStanding(in.active.Reading, mp.Identity) == standingNoRole && votesIn(s.lastFromReading(zone), AgentId(mp.Identity))
+	from := s.lastFromReading(zone)
+	switch zoneStanding(in.active.Reading, mp.Identity) {
+	case standingNoRole:
+		// votesIn would say yes with no thaw kept, and of a zone with no records
+		return from != nil && zoneStanding(from, mp.Identity) == standingVoting
+	case standingNone:
+		return from != nil && zoneStanding(from, mp.Identity) != standingNone
+	}
+	return false
+}
+
+// recordGone: safeToRemove because the last thaw took this agent's record. It
+// has no part in what the others agree on next.
+func (conf *Config) recordGone(zone string) bool {
+	mp := conf.MpConfig()
+	return mp != nil && conf.safeToRemove(zone) && zoneStanding(conf.InternalMp.Instructions.activeReading(zone), mp.Identity) == standingNone
 }

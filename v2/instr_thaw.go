@@ -583,6 +583,7 @@ func (conf *Config) thawTurn(zone string) {
 	}
 	conf.activateOnTellings(zone)
 	conf.fetchAgreed(zone)
+	conf.rollDebtTurn(zone)
 }
 
 // thaw makes the serial agreed on active, by this agent's own word: the
@@ -872,7 +873,7 @@ func (conf *Config) thawLine(zone string) string {
 	if line := conf.reconcileLine(zone, now); line != "" {
 		return line
 	}
-	if v, ok := conf.thawView(zone, now); ok {
+	if v, ok := conf.thawView(zone, now); ok && !conf.recordGone(zone) {
 		return v.line()
 	}
 	if st := conf.InternalMp.Instructions.Status(zone); st != nil && st.Active != nil && !st.DoneAt.IsZero() {

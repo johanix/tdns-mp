@@ -915,6 +915,49 @@ func TestAnExcusedLeaversNSStepComesFirstAndItsPausedRolloversResume(t *testing.
 	}
 }
 
+// A signer that serves nothing leaves the key confirmers at the removal's first
+// step. A DNSKEY distribution waiting only for it goes on then, as at the step
+// that takes out a signer that serves too. The look runs whenever the step's
+// sets change here (onSetsChanged), which a member that takes the leader's
+// step also runs, without the step's start (CodeRabbit at 00eb7cb).
+func TestADNSKEYWaitForALeaverEndsWhenTheSetsTakeItOutOfTheKeyConfirmers(t *testing.T) {
+	r := newLeaverRigAt(t, "signeronly.confirmers.remove.example.", removalAt(t, 41, "agent", "a,b", "a,n"), removalAt(t, 42, "agent", "a,b", "a"),
+		parentSeen{ns: []string{"ns1.a.example.", "ns1.b.example."}, nsTTL: 600, ds: []uint16{1, 2}, dsTTL: 900})
+	tm := r.conf.InternalMp.MPTransport
+	tm.noRoleTimeout = time.Hour // the test ends the waits itself
+	zone := ZoneName(r.zone)
+	pending := func(id string) bool {
+		tm.dnskeyPropMu.Lock()
+		defer tm.dnskeyPropMu.Unlock()
+		_, ok := tm.pendingDnskeyPropagations[id]
+		return ok
+	}
+	tm.TrackDnskeyPropagation(t.Context(), zone, "d1", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.ProcessDnskeyConfirmation("d1", roleB, transport.ConfirmSuccess.String(), nil, nil)
+	if !pending("d1") {
+		t.Fatal("the distribution did not wait for n while n confirms keys")
+	}
+	r.next()
+	if !slices.Equal(r.taken(), []string{"names"}) {
+		t.Fatalf("the steps taken: %v", r.taken())
+	}
+	if slices.Contains(providerLabels(r.sets().KeyConfirmers), "n") {
+		t.Fatalf("n confirms on: %+v", r.sets())
+	}
+	if pending("d1") {
+		t.Error("the distribution waits on for a signer that left the key confirmers at the first step")
+	}
+	// a member that takes the step has its sets change, not the step's start
+	tm.TrackDnskeyPropagation(t.Context(), zone, "d2", []uint16{4711}, nil, []AgentId{roleB, roleN})
+	tm.ProcessDnskeyConfirmation("d2", roleB, transport.ConfirmSuccess.String(), nil, nil)
+	if mpzd, ok := Zones.Get(r.zone); ok {
+		r.conf.onSetsChanged(mpzd, true)
+	}
+	if pending("d2") {
+		t.Error("a change of the sets did not end the wait for the leaver")
+	}
+}
+
 func TestALeaverExcusedDuringTheReconciliationIsPlannedAsExcused(t *testing.T) {
 	logs := captureLog(t)
 	r := newLeaverRig(t, "excusedlater.remove.example.", "agent")
@@ -1119,6 +1162,170 @@ func TestTheLeavingProviderIsToldSafeToRemove(t *testing.T) {
 	}
 	if line := r.conf.thawLine(r.zone); !strings.HasSuffix(line, "; safe to remove") {
 		t.Errorf("n's status: %q", line)
+	}
+}
+
+// A member with no role that never voted is not told safe to remove: with no
+// thaw kept, and after a thaw from a serial with no records.
+func TestAMemberThatNeverVotedIsNotToldSafeToRemove(t *testing.T) {
+	for name, from := range map[string]*heldSerial{"no thaw kept": nil, "no records before": {Reading: &Instructions{Serial: 40}}} {
+		t.Run(name, func(t *testing.T) {
+			r := newReconcileRig(t, "never.remove.example.", roleA)
+			if err := r.store.update(r.zone, func(z *zoneSerials) error {
+				z.Enforced, z.LastFrom = true, from
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			mp := r.conf.MpConfig()
+			id := mp.Identity
+			mp.Identity = roleN
+			defer func() { mp.Identity = id }()
+			if st := zoneStanding(r.store.activeReading(r.zone), roleN); st != standingNoRole {
+				t.Fatalf("n's standing: %v", st)
+			}
+			if r.conf.safeToRemove(r.zone) {
+				t.Error("n is told safe to remove")
+			}
+		})
+	}
+}
+
+// What the parent serves is matched by more than the key's tag.
+func TestAParentDSIsMatchedByMoreThanItsTag(t *testing.T) {
+	const a, b = "AAAA", "BBBB"
+	ds := func(tag uint16, alg, digest uint8, text string) *dns.DS {
+		return &dns.DS{KeyTag: tag, Algorithm: alg, DigestType: digest, Digest: text}
+	}
+	set := []dns.RR{ds(1, 15, dns.SHA256, a), ds(2, 15, dns.SHA256, b)}
+	for _, c := range []struct {
+		name   string
+		served []*dns.DS
+		want   bool
+	}{
+		{"nothing served", nil, true},
+		{"the set", []*dns.DS{ds(1, 15, dns.SHA256, a), ds(2, 15, dns.SHA256, b)}, true},
+		{"part of the set", []*dns.DS{ds(2, 15, dns.SHA256, b)}, true},
+		{"the digest in another case", []*dns.DS{ds(1, 15, dns.SHA256, "aaaa")}, true},
+		{"another tag", []*dns.DS{ds(3, 15, dns.SHA256, a)}, false},
+		{"the leaver's, its tag shared", []*dns.DS{ds(1, 15, dns.SHA256, b)}, false},
+		{"another algorithm, the tag shared", []*dns.DS{ds(1, 13, dns.SHA256, a)}, false},
+		{"another digest type of a key that stays", []*dns.DS{ds(1, 15, dns.SHA384, "CCCC")}, true},
+	} {
+		if got := dsAllIntended(c.served, set); got != c.want {
+			t.Errorf("%s: got %v", c.name, got)
+		}
+	}
+}
+
+// withoutN is the owner's edit that takes n's record, the role already gone.
+func withoutN(t *testing.T, serial uint32) *Instructions {
+	t.Helper()
+	return jAt(t, serial, fmt.Sprintf(`servers="a,b" signers="a" nsmgmt="agent" suffix="%d"`, serial), freezeRecords[:2]...)
+}
+
+// The owner takes n's record before "done": the leader says "done" and thaws
+// in one turn, so no stamp of the zone at 42 says it (design 5.2). What the
+// leader's beats tell n after the thaw is what n needs: n follows, is told
+// safe to remove, and holds nothing up. On the real stamps, leader to leaver.
+func TestALeaverOutOfWordOfDoneFollowsTheThawThatTakesItsRecord(t *testing.T) {
+	const zone = "follows.remove.example."
+	a := newLeaverRig(t, zone, "agent")
+	n41, n42, n43 := a.n, a.v, withoutN(t, 43)
+	a.holdUnjudged(n43, time.Now())
+	a.run()
+	a.n, a.v = n42, n43
+	a.thawNow()
+	if a.active() != 43 {
+		t.Fatalf("a is at %d", a.active())
+	}
+	reconciling := a.stamps.entryFor(roleN)
+	if reconciling == nil {
+		t.Fatal("the thaw leaves a nothing to tell n")
+	}
+	st := reconciling.Members[roleA].Instr[zone]
+	if st.Active != 43 || !st.Reconciling || st.Thaw == nil || st.Thaw.From != sd(n42) || st.Thaw.To != sd(n43) {
+		t.Fatalf("what a tells n: %+v", st)
+	}
+	a.stamps.acknowledged(roleN, reconciling)
+	if err := a.store.Done(zone); err != nil {
+		t.Fatal(err)
+	}
+	done := a.stamps.entryFor(roleN)
+	if done == nil || done.Members[roleA].Instr[zone].Reconciling {
+		t.Fatalf("a's word of done to n: %+v", done)
+	}
+
+	n := newLeaverRigAt(t, zone, n41, n42, a.parent)
+	n.stamps.localID = roleN
+	mp := n.conf.MpConfig()
+	id := mp.Identity
+	mp.Identity = roleN
+	defer func() { mp.Identity = id }()
+	n.holdUnjudged(n43, time.Now())
+
+	n.stamps.note(reconciling, roleA, transport.MechanismDNS)
+	n.conf.thawTurn(zone)
+	if n.active() != 43 {
+		t.Fatalf("n stays at %d, told of the thaw", n.active())
+	}
+	if n.conf.safeToRemove(zone) {
+		t.Error("n is told safe to remove with the transition under way")
+	}
+	n.stamps.note(done, roleA, transport.MechanismDNS)
+	n.conf.thawTurn(zone)
+	if st := status(t, n.store, zone); st.Phase != PhaseSteady {
+		t.Fatalf("n after a's word of done: phase %s", st.Phase)
+	}
+	if !n.conf.safeToRemove(zone) {
+		t.Error("n is not told safe to remove")
+	}
+	if line := n.conf.thawLine(zone); !strings.HasSuffix(line, "; safe to remove") {
+		t.Errorf("n's status: %q", line)
+	}
+
+	// the owner's next edit is the others' to agree on
+	n.holdUnjudged(withoutN(t, 44), time.Now())
+	if line := n.conf.thawLine(zone); !strings.HasSuffix(line, "; safe to remove") {
+		t.Errorf("n's status with a serial held above: %q", line)
+	}
+	if _, ok := n.conf.thawView(zone, time.Now()); !ok {
+		t.Error("nothing is agreed on: the status was not put to the test")
+	}
+}
+
+// A provider the owner's records never named is not told safe to remove, and
+// a's stamps go only to whom the last thaw took out, until the next thaw.
+func TestOnlyTheProviderTheThawTookOutIsToldAndSafe(t *testing.T) {
+	const stranger = "x.role.example."
+	r := newLeaverRig(t, "only.remove.example.", "agent")
+	n43, n44 := withoutN(t, 43), withoutN(t, 44)
+	r.holdUnjudged(n43, time.Now())
+	r.run()
+	r.n, r.v = r.v, n43
+	r.thawNow()
+	if r.stamps.entryFor(stranger) != nil {
+		t.Error("a stranger is told")
+	}
+	if r.stamps.entryFor(roleN) == nil {
+		t.Error("n is not told of the thaw that took its record")
+	}
+	if err := r.store.Done(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	mp := r.conf.MpConfig()
+	id := mp.Identity
+	mp.Identity = stranger
+	if r.conf.safeToRemove(r.zone) {
+		t.Error("a stranger is told safe to remove")
+	}
+	mp.Identity = id
+
+	r.holdUnjudged(n44, time.Now())
+	r.n, r.v = n43, n44
+	r.thawNow()
+	if r.stamps.entryFor(roleN) != nil {
+		t.Error("n is told after the next thaw")
 	}
 }
 
