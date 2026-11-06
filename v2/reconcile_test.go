@@ -207,6 +207,32 @@ func TestATransitionWithNoVotingMemberIsDoneAsItTakesEffect(t *testing.T) {
 	}
 }
 
+// A change with no voting member under the active serial nor under the one
+// agreed on: nobody was there to thaw it, and it waited for good (the HSYNC3
+// records removed from a zone with no role, the way out's step b). Every agent
+// makes it active at once, by the judge as ever, and it is done as it takes
+// effect (the project owner, 2026-11-06).
+func TestAChangeWithNoVotingMemberEitherSideIsMadeActiveAtOnce(t *testing.T) {
+	r := newThawRig(t, "novoters.thaw.example.", "")
+	n, gone := freezeAt(t, 81, "n", "", ""), jAt(t, 82, `nsmgmt="agent" suffix="gone"`)
+	if err := r.store.Forget(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	knownAs(t, r.store, r.zone, n)
+	r.store.Note(r.zone, gone, nil)
+	if vw := r.view(); !vw.ready() {
+		t.Fatalf("no voting member either side: the thaw waits for %q", vw.waits)
+	}
+	r.conf.thawTurn(r.zone)
+	if r.active() != 82 {
+		t.Fatalf("82, the records removed, is not active: %d", r.active())
+	}
+	r.conf.reconcileTurn(r.zone, time.Now())
+	if s := status(t, r.store, r.zone); s.Phase != PhaseSteady || s.From != nil || s.DoneAt.IsZero() {
+		t.Fatalf("82 is not done: %+v", s)
+	}
+}
+
 // TestDoneWaitsForEveryVotingMembersParts, with
 // TestAStepIsConfirmedOnlyWhenTheCombinerAndSignerHoldIt: a step is held
 // only once this agent's combiner and signer both hold it, and every other
