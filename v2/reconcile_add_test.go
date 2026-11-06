@@ -2766,6 +2766,66 @@ func TestALookThatSaysNothingAfterAGoodOneHoldsAJoinersKeysStep(t *testing.T) {
 	})
 }
 
+// The wait ends only on a look that reports once it has run out, asked at once: the
+// look due then runs in a goroutine of its own, and may find a nameserver that lost
+// the keys, or nothing.
+func TestAJoinersKeysStepEndsOnlyOnALookAfterItsWait(t *testing.T) {
+	served := func(t *testing.T, zone string, ttl time.Duration) (*keysWait, *[]func()) {
+		w := newKeysWait(t, zone)
+		w.serves(keysNS1, ttl, w.ksk, w.zsk)
+		w.serves(keysNS2, ttl, w.ksk, w.zsk)
+		if got := w.look(); got == "" {
+			t.Fatal("both have just come to serve them, and nothing is waited for")
+		}
+		var looks []func()
+		w.r.conf.InternalMp.signerAdds.start = func(look func()) { looks = append(looks, look) }
+		return w, &looks
+	}
+	t.Run("the look as it runs out says nothing", func(t *testing.T) {
+		w, looks := served(t, "nothing.end.keys.adding.example.", 5*time.Minute)
+		if got := w.after(5 * time.Minute); got == "" || len(*looks) != 1 {
+			t.Fatalf("run out with a look under way: %d looks, it waits for %q, want that look", len(*looks), got)
+		}
+		w.answers[keysNS1] = func() (*core.RRset, error) { return nil, fmt.Errorf("%s: %w", keysNS1, errIMRNotRunning) }
+		(*looks)[0]()
+		if got := w.wait(); !strings.Contains(got, "not known") {
+			t.Fatalf("no IMR at the look after it ran out, it waits for %q, want what is not known", got)
+		}
+	})
+	t.Run("the look as it runs out finds one without them", func(t *testing.T) {
+		w, looks := served(t, "without.end.keys.adding.example.", 5*time.Minute)
+		if got := w.after(5 * time.Minute); got == "" || len(*looks) != 1 {
+			t.Fatalf("run out with a look under way: %d looks, it waits for %q, want that look", len(*looks), got)
+		}
+		w.noData(keysNS2)
+		(*looks)[0]()
+		if got := w.wait(); !strings.Contains(got, keysNS2) {
+			t.Fatalf("NODATA from ns2 at the look after it ran out, it waits for %q, want ns2", got)
+		}
+	})
+	t.Run("a look under way as it runs out", func(t *testing.T) {
+		w, looks := served(t, "underway.end.keys.adding.example.", 5*time.Minute)
+		if got := w.after(5*time.Minute - time.Second); got == "" || len(*looks) != 1 {
+			t.Fatalf("a second short: %d looks, it waits for %q", len(*looks), got)
+		}
+		if got := w.after(2 * time.Second); got == "" || len(*looks) != 1 {
+			t.Fatalf("run out with that look under way: %d looks, it waits for %q, want that look", len(*looks), got)
+		}
+		(*looks)[0]()
+		if got := w.wait(); got != "" {
+			t.Errorf("that look reports them served, and it waits for %q", got)
+		}
+	})
+	t.Run("asked at once", func(t *testing.T) {
+		w, _ := served(t, "once.end.keys.adding.example.", 5*time.Second)
+		w.r.conf.InternalMp.signerAdds.start = func(look func()) { look() }
+		asked := w.asked
+		if got := w.after(5 * time.Second); got != "" || w.asked == asked {
+			t.Errorf("run out short of the time between looks: asked %d more, it waits for %q, want a look at once", w.asked-asked, got)
+		}
+	})
+}
+
 // What was served before the keys came counts: a cache may hold that RRset, without
 // them, for as long as it was served with.
 func TestAnAnswerBeforeTheKeysCountsInAJoinersWait(t *testing.T) {

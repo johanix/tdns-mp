@@ -135,6 +135,8 @@ func exchangeServing(ctx context.Context, m *dns.Msg, addr string) (*dns.Msg, er
 // server does with the name: the RRset, errServesNoRRset when it serves the name
 // without one, or a referral, which is an error of its own as the server does not
 // serve the zone. Otherwise the error says why not, and another address may be asked.
+// The RRset is the name's, and its RRSIGs those over it: another owner's records, or
+// a signature over another type, are no part of it.
 func servedAnswer(r, query *dns.Msg, qtype uint16) (rrset *core.RRset, answered bool, err error) {
 	q := query.Question[0]
 	if len(r.Question) != 1 || !sameName(r.Question[0].Name, q.Name) || r.Question[0].Qtype != q.Qtype || r.Question[0].Qclass != q.Qclass {
@@ -149,11 +151,16 @@ func servedAnswer(r, query *dns.Msg, qtype uint16) (rrset *core.RRset, answered 
 	case dns.RcodeSuccess:
 		served := &core.RRset{}
 		for _, rr := range r.Answer {
+			if !sameName(rr.Header().Name, q.Name) {
+				continue
+			}
 			switch rr.Header().Rrtype {
 			case qtype:
 				served.RRs = append(served.RRs, rr)
 			case dns.TypeRRSIG:
-				served.RRSIGs = append(served.RRSIGs, rr)
+				if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == qtype {
+					served.RRSIGs = append(served.RRSIGs, rr)
+				}
 			}
 		}
 		switch {
