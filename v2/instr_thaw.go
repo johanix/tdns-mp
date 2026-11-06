@@ -42,6 +42,10 @@ type thawBook struct {
 	wake    chan struct{}
 	fetched map[string]time.Time // the instructions RFIs asked, by zone, serial, digest and member
 	gate    map[string]bool      // the excusals from a group's gate logged, by group and member
+	// restartWaits: when the restart rule first waited for the word of a
+	// fleet with roles, for a newest serial that has no voting member, by
+	// zone, folded (noVoterWord)
+	restartWaits map[string]time.Time
 	// turn: one turn at a time, of any zone (thawTurn)
 	turn sync.Mutex
 }
