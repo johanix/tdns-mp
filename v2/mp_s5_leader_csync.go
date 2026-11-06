@@ -551,6 +551,11 @@ func (conf *Config) refuseCsyncNotFromLeader(u *SynchedDataUpdate, msgQs *MsgQs)
 	if known && same(sender, leader) && same(u.AgentId, leader) {
 		return ""
 	}
+	// a sender's take-back of its own KEY, whoever leads: an abandoned
+	// take-up's (plan S20)
+	if keyTakenBack(u) {
+		return ""
+	}
 	u.Update.Publish = nil
 	if !slices.ContainsFunc(u.Update.Operations, leaderOnly) {
 		return ""

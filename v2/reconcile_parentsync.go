@@ -40,6 +40,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -491,9 +492,28 @@ func (conf *Config) offerTakenUpKey(zone string) bool {
 // (readZoneKey) until it is made active: no member's copy of the old key is
 // taken back meanwhile. A key the take-up made already is published again,
 // after a restart too, and so is a key made for this lead (made), the zone's
-// first. A roll under way ends first. Under the zone's key-setup lock.
+// first. A key made since the hand-back is kept too: a new leader in the
+// middle of the take-up makes a new one only when the key it holds is older
+// than the hand-back (the project owner, 2026-11-06). The key is kept as the
+// take-up's (MPSig0TakeUp) before its KEY goes out, and the key rounds hand
+// that on with it. A roll under way ends first. Under the zone's key-setup
+// lock.
 func (conf *Config) takeUpKey(kdb *tdns.KeyDB, zone ZoneName, zk *zoneKey, made bool) (*sig0Row, error) {
-	if made {
+	serial, _ := conf.InternalMp.Instructions.takenAt(string(zone), parentSyncTakeUpKey)
+	k, err := conf.pickTakeUpKey(kdb, zone, zk, made, serial)
+	if err != nil {
+		return nil, err
+	}
+	if err := saveTakeUpKey(kdb, zone, k.keyid, serial); err != nil {
+		return nil, fmt.Errorf("the take-up's SIG(0) key %d of %s could not be kept: %w", k.keyid, zone, err)
+	}
+	return k, nil
+}
+
+// pickTakeUpKey is takeUpKey's choice of the key; serial is that of the
+// instructions that took the sync up.
+func (conf *Config) pickTakeUpKey(kdb *tdns.KeyDB, zone ZoneName, zk *zoneKey, made bool, serial uint32) (*sig0Row, error) {
+	if made || madeSinceHandBack(kdb, zone, zk.held.keyid, serial) {
 		return zk.held, nil
 	}
 	r, err := loadRoll(kdb, zone)
@@ -531,6 +551,48 @@ func (conf *Config) takeUpKey(kdb *tdns.KeyDB, zone ZoneName, zk *zoneKey, made 
 		return nil, fmt.Errorf("the take-up's new SIG(0) key %d of %s cannot be read", newKeyid, zone)
 	}
 	return k, nil
+}
+
+// madeSinceHandBack: keyid is the zone's take-up key (MPSig0TakeUp), made
+// under the instructions that took the sync up, serial, or later ones. A key
+// with no such record is older than the hand-back.
+func madeSinceHandBack(kdb *tdns.KeyDB, zone ZoneName, keyid uint16, serial uint32) bool {
+	tagged, at, ok := loadTakeUpKey(kdb, zone)
+	return ok && tagged == keyid && at >= serial
+}
+
+// loadTakeUpKey reads the zone's take-up key: its id and the serial it was
+// made under; ok false with none.
+func loadTakeUpKey(kdb *tdns.KeyDB, zone ZoneName) (keyid uint16, serial uint32, ok bool) {
+	var id int
+	var at int64
+	if err := kdb.QueryRow(`SELECT keyid, serial FROM MPSig0TakeUp WHERE zonename = ?`, canonicalName(string(zone))).Scan(&id, &at); err != nil {
+		return 0, 0, false
+	}
+	return uint16(id), uint32(at), true
+}
+
+// saveTakeUpKey keeps keyid as the zone's take-up key, made under serial,
+// creating the table on first use.
+func saveTakeUpKey(kdb *tdns.KeyDB, zone ZoneName, keyid uint16, serial uint32) error {
+	hdb := NewHsyncDB(kdb)
+	hdb.Lock()
+	defer hdb.Unlock()
+	if _, err := hdb.DB.Exec(HsyncTables["MPSig0TakeUp"]); err != nil {
+		return fmt.Errorf("the table of take-up keys: %w", err)
+	}
+	_, err := hdb.DB.Exec(`INSERT OR REPLACE INTO MPSig0TakeUp (zonename, keyid, serial) VALUES (?, ?, ?)`,
+		canonicalName(string(zone)), keyid, serial)
+	return err
+}
+
+// takeUpTag is what a key round's answer says of keyid: the serial the
+// take-up that made it ran under, "" when it is no take-up's key.
+func takeUpTag(kdb *tdns.KeyDB, zone ZoneName, keyid uint16) string {
+	if tagged, at, ok := loadTakeUpKey(kdb, zone); ok && tagged == keyid {
+		return strconv.FormatUint(uint64(at), 10)
+	}
+	return ""
 }
 
 // activateTakeUpKey makes the take-up's new key active and retires the old

@@ -2224,6 +2224,18 @@ func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]s
 		return fmt.Errorf("Sig0KeyMgmt add error: %s", resp.ErrorMsg)
 	}
 	lgElect.Info("imported SIG(0) key from peer", "name", keyName, "algorithm", algorithm, "keyid", pkc.KeyId)
+	// A take-up's key is kept as the take-up's here too: as this agent's
+	// lead, it is kept, not made anew (plan S20). Without the record a new
+	// leader in the middle of the take-up makes a key of its own.
+	if tag := configData["takeup"]; tag != "" {
+		serial, err := strconv.ParseUint(tag, 10, 32)
+		if err == nil {
+			err = saveTakeUpKey(hdb.KeyDB, ZoneName(keyName), pkc.KeyId, uint32(serial))
+		}
+		if err != nil {
+			lgElect.Warn("the imported SIG(0) key is not kept as the take-up's", "zone", keyName, "keyid", pkc.KeyId, "takeup", tag, "err", err)
+		}
+	}
 	// One active key per zone (step 7b): with the key added, every other
 	// active key is retired, so that a failed import never leaves the agent
 	// without one. A retire that fails leaves the zone's key not held; it is

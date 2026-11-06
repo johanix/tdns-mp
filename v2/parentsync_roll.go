@@ -985,6 +985,78 @@ func (conf *Config) rollEnded(r *sig0Roll, why string, err error) {
 	}
 	lgAgent.Info("the roll of the zone's SIG(0) key ends here: "+why, "zone", zone, "phase", r.phase,
 		"old", r.oldKeyid, "new", r.newKeyid)
+	// An abandoned take-up's key is gone here, and its KEY, under this
+	// agent's name, goes from every agent's combiner, not only from this
+	// agent's own (plan S20)
+	if r.phase == rollTakeUp && conf.keyGone(zone, r.newKeyid) {
+		conf.takeKEYBack(zone)
+	}
+}
+
+// keyGone: this agent's keystore holds keyid neither published nor active.
+func (conf *Config) keyGone(zone ZoneName, keyid uint16) bool {
+	kdb := conf.zoneKeyDB(zone)
+	return kdb != nil && sig0RowByID(kdb, zone, tdns.Sig0StatePublished, keyid) == nil &&
+		sig0RowByID(kdb, zone, tdns.Sig0StateActive, keyid) == nil
+}
+
+// takeKEYBack takes this agent's own KEY back at its combiner and every
+// agent's (keyTakeBack).
+func (conf *Config) takeKEYBack(zone ZoneName) {
+	tm := conf.InternalMp.MPTransport
+	if tm == nil {
+		return
+	}
+	if err := sendKEYTakeBack(tm, zone); err != nil {
+		lgAgent.Warn("the abandoned take-up's KEY could not be taken back at every agent", "zone", zone, "err", err)
+		return
+	}
+	lgAgent.Info("the abandoned take-up's KEY is taken back at this agent's combiner and every agent's", "zone", zone)
+}
+
+// keyTakeBack is the take-back of the sender's own KEY, sendZoneKEY's
+// undoing: an empty replace, and a publish instruction with no location,
+// which takes the KEY's instruction back with it. Every agent takes it from
+// its sender, whoever leads (keyTakenBack).
+func keyTakeBack(zone ZoneName) *ZoneUpdate {
+	return &ZoneUpdate{
+		Zone:       zone,
+		Operations: []core.RROperation{{Operation: "replace", RRtype: "KEY"}},
+		Publish:    &core.PublishInstruction{},
+	}
+}
+
+// sendKEYTakeBack sends the take-back to this agent's combiner and to the
+// zone's agents, as sendZoneKEY sends the KEY; a test stands in for it.
+var sendKEYTakeBack = func(tm *MPTransportBridge, zone ZoneName) error {
+	distID, err := tm.EnqueueForCombiner(zone, keyTakeBack(zone), "")
+	if err != nil {
+		return err
+	}
+	return tm.EnqueueForZoneAgents(zone, keyTakeBack(zone), distID)
+}
+
+// keyTakenBack: u is its sender's take-back of its own KEY (keyTakeBack):
+// every CSYNC or KEY it carries is an empty replace of KEY, and its publish
+// instruction, if any, publishes nothing.
+func keyTakenBack(u *SynchedDataUpdate) bool {
+	if u == nil || u.Update == nil || u.DeliveredBy == "" || !sameName(string(u.DeliveredBy), string(u.AgentId)) {
+		return false
+	}
+	if p := u.Update.Publish; p != nil && (len(p.KEYRRs) > 0 || len(p.CDSRRs) > 0 || len(p.Locations) > 0) {
+		return false
+	}
+	takenBack := false
+	for _, op := range u.Update.Operations {
+		if !leaderOnlyOp(op) {
+			continue
+		}
+		if !strings.EqualFold(op.RRtype, dns.TypeToString[dns.TypeKEY]) || op.Operation != "replace" || len(op.Records) > 0 { // not-a-name: an RR type
+			return false
+		}
+		takenBack = true
+	}
+	return takenBack
 }
 
 func sig0KeyChange(kdb *tdns.KeyDB, kp tdns.KeystorePost) error {
