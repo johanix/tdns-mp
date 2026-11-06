@@ -28,13 +28,13 @@ import (
 
 // The owner errors of a single copy (design rule 2): the draft allows one
 // HSYNCPARAM record per zone and one HSYNC3 record per label; one identity
-// is under one label (#306); and the instructions carry the owner's serial,
-// so HSYNC3 comes with HSYNCPARAM and HSYNCPARAM with serial= (#308).
+// is under one label (#306); and an HSYNCPARAM carries the owner's serial=
+// (#308). HSYNC3 with no HSYNCPARAM is no error (the project owner,
+// 2026-11-06): the providers named find each other before any role is given.
 var (
 	errTwoHsyncparams    = errors.New("two HSYNCPARAM records")
 	errDuplicateLabel    = errors.New("two HSYNC3 records with the label")
 	errIdentityTwoLabels = errors.New("one identity under two HSYNC3 labels")
-	errNoHsyncparam      = errors.New("HSYNC3 without HSYNCPARAM")
 	errNoSerial          = errors.New("HSYNCPARAM without serial=")
 )
 
@@ -42,10 +42,10 @@ var (
 // records (design rule 2): what the code acts on, and nothing else. Unknown
 // and private-use keys, TTLs and signatures are not in it.
 type Instructions struct {
-	Serial uint32 // the owner's serial= (every reading has one); not in the digest
-	// HasParam is true in every reading: HSYNC3 without HSYNCPARAM is an
-	// owner error (#308). The digest still writes it, so that no digest
-	// changed when the legacy case ended.
+	Serial uint32 // the owner's serial= (every reading with HSYNCPARAM has one); not in the digest
+	// HasParam: the reading has an HSYNCPARAM. Without one it is HSYNC3
+	// records alone: a group with no roles and no serial, the owner's intent
+	// not expressed yet (the project owner, 2026-11-06). The digest writes it.
 	HasParam bool
 	Records  []InstrRecord // ON records, sorted by label
 	Off      []string      // labels of OFF records, sorted
@@ -64,8 +64,9 @@ type Instructions struct {
 type InstrRecord struct{ Label, Identity, Upstream string }
 
 // ReadInstructions reads the instructions from a zone's apex. It returns nil
-// and no error when the apex holds neither HSYNC3 nor HSYNCPARAM, and an owner
-// error when it holds two HSYNCPARAM records, HSYNC3 without HSYNCPARAM, two
+// and no error when the apex holds neither HSYNC3 nor HSYNCPARAM, the records
+// with no parameters (HasParam false, no serial, no role) for HSYNC3 without
+// HSYNCPARAM, and an owner error when it holds two HSYNCPARAM records, two
 // HSYNC3 records with one label (in any state), two ON records with one
 // identity, or HSYNCPARAM without serial=.
 func ReadInstructions(apex *tdns.OwnerData) (*Instructions, error) {
@@ -79,9 +80,6 @@ func ReadInstructions(apex *tdns.OwnerData) (*Instructions, error) {
 	}
 	if len(hps) > 1 {
 		return nil, errTwoHsyncparams
-	}
-	if len(hps) == 0 {
-		return nil, errNoHsyncparam
 	}
 
 	// Empty lists are nil, with HSYNCPARAM and without, as sortedUnique
@@ -130,6 +128,9 @@ func ReadInstructions(apex *tdns.OwnerData) (*Instructions, error) {
 			return nil, fmt.Errorf("%w: %s under %s and %s", errIdentityTwoLabels, r.Identity, first, r.Label)
 		}
 		labelOf[r.Identity] = r.Label
+	}
+	if len(hps) == 0 {
+		return in, nil
 	}
 
 	prr, ok := hps[0].(*dns.PrivateRR)
@@ -466,6 +467,27 @@ func readingOf(apex *tdns.OwnerData) *Instructions {
 			return prev.(*Instructions)
 		}
 		return nil
+	}
+	// A copy with no HSYNCPARAM expresses no intent and is no last good
+	// reading. After one that lists several providers and gives roles it is
+	// the owner error the agent's store makes of it ("dropped while serial N
+	// lists M providers", design 7): that reading stays, as for a copy that
+	// does not read, until a copy with HSYNCPARAM or the agent's hand-over,
+	// so that a part with no hand-over yet keeps its roles. After any other
+	// it is the end of the zone's management: the records read as they
+	// stand, and a later copy that does not read keeps nothing.
+	if in != nil && !in.HasParam {
+		if prev, ok := lastGood.Load(zone); ok {
+			if p := prev.(*Instructions); len(p.Records) > 1 && givesRoles(p) {
+				if _, logged := noReading.LoadOrStore(zone, true); !logged {
+					lg.Warn("the zone's copy has no HSYNCPARAM while its last reading lists several providers with roles, keeping that", "zone", zone)
+				}
+				return p
+			}
+		}
+		noReading.Delete(zone)
+		lastGood.Delete(zone)
+		return in
 	}
 	noReading.Delete(zone)
 	// A copy that reads, with instructions or with none (the end of

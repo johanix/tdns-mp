@@ -13,10 +13,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 )
 
 const storeZone = "store.example."
@@ -213,14 +215,12 @@ func TestAChangeAtSerialZeroIsAConflict(t *testing.T) {
 // held, and no instructions are acted on, until a copy that reads; that
 // copy is held, and its zone's active serial is not known (S9).
 func TestACopyWithNoReadingIsAnOwnerError(t *testing.T) {
-	noParam := apexOf(t, instrBase[:3]...)
 	noSerial := apexOf(t, append(slices.Clone(instrBase[:3]), `3600 IN HSYNCPARAM servers="alpha,beta"`)...)
 	for _, c := range []struct {
 		name string
 		apex *tdns.OwnerData
 		want string
 	}{
-		{"HSYNC3 without HSYNCPARAM", noParam, "HSYNC3 without HSYNCPARAM"},
 		{"HSYNCPARAM without serial=", noSerial, "HSYNCPARAM without serial="},
 	} {
 		in, err := ReadInstructions(c.apex)
@@ -250,6 +250,55 @@ func TestBothRecordsDroppedWithTwoProvidersIsAnOwnerError(t *testing.T) {
 	st := status(t, s, storeZone)
 	if st.Phase != PhaseOwnerError || !strings.Contains(st.OwnerError, "lists 2 providers") || st.Active.Serial != 7 {
 		t.Errorf("phase %s error %q active %s", st.Phase, st.OwnerError, serialOf(st.Active))
+	}
+}
+
+// No HSYNCPARAM is no intent, with HSYNC3 or without, and has no serial to
+// keep (the project owner, 2026-11-06). After a serial that gives no role the
+// zone's serials end, whatever it lists: HSYNC3 records left are read as they
+// stand, so a group with no roles stays organized. After one that gives roles
+// to two providers it is an owner error, as both records dropped are. At a
+// first load HSYNC3 alone keeps nothing.
+func TestNoHSYNCPARAMEndsTheSerialsOfAZoneThatGivesNoRole(t *testing.T) {
+	noRoles := readOf(t, withParam(`serial="7" nsmgmt="agent"`)...)
+	records := readOf(t, instrBase[:3]...)
+	for _, c := range []struct {
+		name string
+		copy *Instructions
+	}{{"HSYNC3 kept", records}, {"both records gone", nil}} {
+		s := newStore(t)
+		noteKnown(t, s, storeZone, noRoles)
+		s.Note(storeZone, c.copy, nil)
+		if s.keeps(storeZone) {
+			t.Errorf("%s after a serial that gives no role: the serials are kept: %+v", c.name, s.Status(storeZone))
+		}
+		s.Note(storeZone, c.copy, nil)
+		if s.keeps(storeZone) {
+			t.Errorf("%s, noted again: the serials are kept", c.name)
+		}
+		// no active serial known, and every serial held gives no role:
+		// the serials end too, with no hang (the project owner,
+		// 2026-11-06, (A))
+		u := newStore(t)
+		u.Note(storeZone, noRoles, nil)
+		if !u.activeUnknown(storeZone) {
+			t.Fatalf("%s: an active serial is known", c.name)
+		}
+		u.Note(storeZone, c.copy, nil)
+		if u.keeps(storeZone) {
+			t.Errorf("%s with no active serial known, a serial that gives no role held: kept, %+v", c.name, u.Status(storeZone))
+		}
+	}
+	s := newStore(t)
+	noteKnown(t, s, storeZone, at(t, 7, "alpha,beta"))
+	s.Note(storeZone, records, nil)
+	if st := status(t, s, storeZone); st.Phase != PhaseOwnerError || st.OwnerError != "HSYNCPARAM dropped while serial 7 lists 2 providers" || st.Active.Serial != 7 {
+		t.Errorf("HSYNC3 kept after a serial that gives roles: phase %s error %q active %s", st.Phase, st.OwnerError, serialOf(st.Active))
+	}
+	first := newStore(t)
+	first.Note(storeZone, records, nil)
+	if first.keeps(storeZone) {
+		t.Errorf("HSYNC3 alone at a first load: serials kept: %+v", first.Status(storeZone))
 	}
 }
 
@@ -726,6 +775,34 @@ func TestStatusShowsActiveNewestCopyAndOwnerError(t *testing.T) {
 	s.fillMPZoneInfo(storeZone, &info)
 	if info.Active.Serial != 7 || info.Newest.Serial != 8 || !strings.HasPrefix(info.OwnerError, "serial 8 with two digests") {
 		t.Errorf("mplist: active %s newest %s owner error %q", serialOf(info.Active), serialOf(info.Newest), info.OwnerError)
+	}
+}
+
+// The zone's copy is read and noted under one lock (noteLocks): a note
+// that waits for another reads the copy as it is once it runs, so an older
+// copy is never noted after a newer one. Here the first load's copy has a
+// serial, and a refresh drops its HSYNCPARAM while a note waits: the store
+// keeps nothing, as for a first load of the copy without HSYNCPARAM.
+func TestACopyIsReadAndNotedUnderOneLock(t *testing.T) {
+	mpzd := instrTestZone(t, "ordered.note.example.", acRecords("", `serial="7" servers="alpha,beta"`)...)
+	s := newStore(t)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.InternalMp.Instructions = s
+	mu, _ := noteLocks.LoadOrStore(canonicalName(mpzd.ZoneName), &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	done := make(chan struct{})
+	go func() { conf.noteInstructions(mpzd); close(done) }()
+	if _, ok := recvWithin(done, 100*time.Millisecond); ok {
+		mu.(*sync.Mutex).Unlock()
+		t.Fatal("the note did not wait for the lock")
+	}
+	setApex(t, mpzd, core.TypeHSYNCPARAM) // the other run's copy: HSYNCPARAM dropped
+	mu.(*sync.Mutex).Unlock()
+	if _, ok := recvWithin(done, 5*time.Second); !ok {
+		t.Fatal("the note did not end")
+	}
+	if s.keeps(mpzd.ZoneName) {
+		t.Errorf("the copy read before the lock was noted after the newer one: %s", status(t, s, mpzd.ZoneName).Line())
 	}
 }
 

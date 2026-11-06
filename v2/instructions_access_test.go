@@ -325,6 +325,64 @@ func TestABrokenCopyAfterTheEndOfServiceKeepsNoInstructions(t *testing.T) {
 	}
 }
 
+// A copy without HSYNCPARAM expresses no intent, and is no last good
+// reading. After one that lists several providers with roles it is the
+// owner error the agent's store makes of it: that reading stays, a broken
+// copy after it keeps it too, and the signer, with no hand-over yet, keeps
+// its roles and waits for its agent's. After one with no role the HSYNC3
+// records read as they stand, the signer waits for nothing (the agent hands
+// nothing for them), and a broken copy after them keeps nothing.
+func TestACopyWithoutHSYNCPARAMIsNoLastGoodReading(t *testing.T) {
+	for _, c := range []struct {
+		name, param string
+		keeps       bool
+	}{
+		{"roles", `serial="7" servers="alpha,beta"`, true},
+		{"noroles", `serial="7" nsmgmt="agent"`, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			mpzd := instrTestZone(t, c.name+".noparam.access.example.", acRecords("", c.param)...)
+			t.Cleanup(func() { lastGood.Delete(mpzd.ZoneName); noReading.Delete(mpzd.ZoneName) })
+			_, hdb := storeDB(t)
+			withActing(t, hdb)
+			apex := func() *tdns.OwnerData {
+				t.Helper()
+				a, err := mpzd.GetOwner(mpzd.ZoneName)
+				if err != nil || a == nil {
+					t.Fatalf("apex: %v", err)
+				}
+				return a
+			}
+			good := readingOf(apex())
+			if good == nil || !good.HasParam {
+				t.Fatalf("the copy with an HSYNCPARAM reads as %+v", good)
+			}
+			if !signerWaits(mpzd.ZoneName, apex()) {
+				t.Error("the signer does not wait for its agent's hand-over for a copy with an HSYNCPARAM")
+			}
+			setApex(t, mpzd, core.TypeHSYNCPARAM)
+			in := readingOf(apex())
+			switch {
+			case c.keeps && (in == nil || in.Digest() != good.Digest()):
+				t.Errorf("HSYNCPARAM dropped after a reading with roles for several providers: reads as %+v, want that reading", in)
+			case !c.keeps && (in == nil || in.HasParam || len(in.Records) != 2):
+				t.Errorf("HSYNC3 records alone after a reading with no role read as %+v", in)
+			}
+			if got := signerWaits(mpzd.ZoneName, apex()); got != c.keeps {
+				t.Errorf("HSYNCPARAM dropped: the signer waits for a hand-over %v, want %v", got, c.keeps)
+			}
+			setApex(t, mpzd, core.TypeHSYNCPARAM, `3600 IN HSYNCPARAM servers="alpha"`, `3600 IN HSYNCPARAM servers="beta"`)
+			in = readingOf(apex())
+			switch {
+			case c.keeps && (in == nil || in.Digest() != good.Digest()):
+				t.Errorf("a broken copy after the drop reads as %+v, want the reading with roles", in)
+			case !c.keeps && in != nil:
+				t.Errorf("a broken copy after HSYNC3 records alone reads as %+v", in)
+			}
+		})
+	}
+}
+
 func TestARestartWithAStoredSerialHasGroupsAndPeersAfterTheFirstLoad(t *testing.T) {
 	saved := tdns.Globals.App.Type
 	tdns.Globals.App.Type = AppTypeMPAuditor

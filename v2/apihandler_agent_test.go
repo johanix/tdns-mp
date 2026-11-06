@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -240,6 +241,42 @@ func TestARefusedDNSKEYDistributionIsNotRecordedAsSent(t *testing.T) {
 	withoutRole := incomingApex(t, z, noRole, []string{otherAgent})
 	if _, _, err := r.mpzd.LocalDnskeysFromKeystate(usAgent, withoutRole); !errors.Is(err, errNoRoleInZone) {
 		t.Errorf("a refresh that takes the role: %v", err)
+	}
+}
+
+// The HSYNCPARAM dropped while the active serial lists several providers is
+// an owner error that keeps that serial (design 7): a refresh's key
+// distribution is judged by it, not by the HSYNC3 records the copy has left,
+// which give nobody a role.
+func TestAnHSYNCPARAMDroppedFromSeveralProvidersKeepsTheirKeysGoing(t *testing.T) {
+	asMPAgent(t)
+	yes := true
+	r := newLeaderSyncRig(t, "dropped.dnskey.example.")
+	r.mpzd.Ready = true
+	z := r.mpzd.ZoneName
+	recs := []h3rec{{usAgent, true}, {otherAgent, true}}
+	servedMembers(t, r.mpzd, recs, []string{usAgent, otherAgent})
+	served, err := r.mpzd.OwnerForAnalysis(z)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, err := ReadInstructions(served)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newStore(t)
+	withStore(t, s)
+	knownAs(t, s, z, in)
+	item := invItem(t, z, 257, KeyStateActive, &yes)
+	r.mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: z, Inventory: []KeyInventoryItem{item}, Received: time.Now()})
+	dropped := incomingApex(t, z, recs, []string{usAgent, otherAgent})
+	dropped.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{})
+	changed, st, err := r.mpzd.LocalDnskeysFromKeystate(usAgent, dropped)
+	if err != nil {
+		t.Fatalf("a refresh that drops HSYNCPARAM while the active serial gives this provider a role: %v", err)
+	}
+	if !changed || st == nil || !slices.ContainsFunc(st.LocalAdds, func(rr dns.RR) bool { return rr.String() == item.KeyRR }) {
+		t.Errorf("the keys distributed: changed %v, status %+v, want the inventory's key %s added", changed, st, item.KeyRR)
 	}
 }
 
