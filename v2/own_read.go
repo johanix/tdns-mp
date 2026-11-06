@@ -75,6 +75,15 @@ func (zdr *ZoneDataRepo) noteCombinerSend(zone ZoneName, agent AgentId, rrtypes 
 	}
 }
 
+// combinerHoldsSet reports whether this agent's combiner holds agent's set of
+// rrtype as the repo last changed it: its final confirmation of that hand-over
+// arrived, or no change of the set was handed over here, and the set came from
+// the combiner's own read.
+func (zdr *ZoneDataRepo) combinerHoldsSet(zone ZoneName, agent AgentId, rrtype uint16) bool {
+	n := zdr.notes[zone][agent][rrtype]
+	return n == nil || n.distID != "" && !n.confirmed.IsZero()
+}
+
 // noteCombinerConfirmed notes the combiner's final confirmation of distID.
 // For a set that an empty replace emptied no record carries the ID, so the
 // note is found by the ID, not through the records.
