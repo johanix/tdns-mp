@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -266,11 +267,16 @@ func TestAnHSYNCPARAMDroppedFromSeveralProvidersKeepsTheirKeysGoing(t *testing.T
 	s := newStore(t)
 	withStore(t, s)
 	knownAs(t, s, z, in)
-	r.mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: z, Inventory: []KeyInventoryItem{invItem(t, z, 257, KeyStateActive, &yes)}, Received: time.Now()})
+	item := invItem(t, z, 257, KeyStateActive, &yes)
+	r.mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: z, Inventory: []KeyInventoryItem{item}, Received: time.Now()})
 	dropped := incomingApex(t, z, recs, []string{usAgent, otherAgent})
 	dropped.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{})
-	if _, _, err := r.mpzd.LocalDnskeysFromKeystate(usAgent, dropped); errors.Is(err, errNoRoleInZone) {
-		t.Errorf("a refresh that drops HSYNCPARAM while the active serial gives this provider a role: %v", err)
+	changed, st, err := r.mpzd.LocalDnskeysFromKeystate(usAgent, dropped)
+	if err != nil {
+		t.Fatalf("a refresh that drops HSYNCPARAM while the active serial gives this provider a role: %v", err)
+	}
+	if !changed || st == nil || !slices.ContainsFunc(st.LocalAdds, func(rr dns.RR) bool { return rr.String() == item.KeyRR }) {
+		t.Errorf("the keys distributed: changed %v, status %+v, want the inventory's key %s added", changed, st, item.KeyRR)
 	}
 }
 
