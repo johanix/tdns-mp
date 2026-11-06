@@ -588,6 +588,50 @@ func TestAKEYPurgeWaitsForTheCombinerToHoldTheLeadersKEY(t *testing.T) {
 	}
 }
 
+// A leader's new KEY that reaches this agent asks for no drop of a KEY under
+// another name before the combiner has it, also when no earlier hand-over of
+// the leader's KEY was noted: the drop waits for the combiner's final word on
+// the new KEY (leaderKEYConfirmed). A drop asked first would come ahead of it.
+func TestALeadersNewKEYAsksNoDropBeforeTheCombinerHasIt(t *testing.T) {
+	r := receivingRig(t, "key.newleader.example.")
+	z := r.mpzd.ZoneName
+	r.us.Registry.S.Set(earlierLeader, NewAgent(earlierLeader))
+	purges := make(chan AgentId, 4)
+	saved := sendKEYPurge
+	sendKEYPurge = func(_ *MPTransportBridge, _ ZoneName, origin AgentId, _ string) error {
+		purges <- origin
+		return nil
+	}
+	t.Cleanup(func() { sendKEYPurge = saved })
+	sends := func(from AgentId, k sig0Row) TrackedRRInfo {
+		t.Helper()
+		op := core.RROperation{Operation: "replace", RRtype: "KEY", Records: []string{k.key.String()}}
+		publish := &core.PublishInstruction{KEYRRs: []string{k.key.String()}, Locations: []string{"at-apex"}}
+		r.receivesPublish(t, string(from), string(from), publish, op)
+		for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+			if got := r.repo(t)[from][dns.TypeKEY]; len(got) == 1 && got[0].RR == k.key.String() {
+				return got[0]
+			}
+		}
+		t.Fatalf("the KEY of %s is not in the repo\n%s", from, r.log)
+		return TrackedRRInfo{}
+	}
+
+	r.leader(earlierLeader)
+	sends(earlierLeader, testSig0Key(t, newMPTestKeyDB(t), z))
+	leader := AgentId(r.peer.Identity)
+	r.leader(leader)
+	k := testSig0Key(t, newMPTestKeyDB(t), z)
+	held := sends(leader, k)
+	if got, ok := recvWithin(purges, 300*time.Millisecond); ok {
+		t.Fatalf("the drop of %s's KEY was asked before the combiner had the leader's", got)
+	}
+	r.confirms(rigCombiner, held.DistributionID, k.key.String())
+	if got, ok := recvWithin(purges, 5*time.Second); !ok || got != earlierLeader {
+		t.Errorf("on the combiner's word on the leader's KEY the drop asked was of %q (asked %v), want %s's", got, ok, earlierLeader)
+	}
+}
+
 // A drop the combiner has not made is asked for again until it has: after a
 // send that failed, a refusal, and a restart that lost the book. Until then
 // the KEY stays in the data, the record of what is owed.
