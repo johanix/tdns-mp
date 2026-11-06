@@ -346,7 +346,10 @@ func (conf *Config) inDSSigners(zone string) bool {
 // stand in for it, our own (the signer keeps no copy of a key under a tag of
 // its own, syncForeignDNSKEYs) or a third provider's. Until its provider's
 // record has arrived nothing holds it, as the computed set waits for it too.
-// A row of this provider's own never holds another's key.
+// A row of this provider's own never holds another's key. Tags are not
+// unique: a provider's distributions may carry two records under one tag,
+// and the computed set makes a DS of each SEP record under it, so each must
+// be held, and a ZSK under the tag does not make the key a ZSK.
 func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) string {
 	zone = dns.Fqdn(zone)
 	tm := conf.InternalMp.MPTransport
@@ -396,16 +399,17 @@ func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) 
 		}
 		share := shares[AgentId(a)]
 		for _, st := range share.states {
-			// a key whose record has not arrived is taken to be a SEP key:
-			// its provider says its DS belongs at the parent
-			sep := true
-			var record *dns.DNSKEY
+			// every record under the tag is the key the state speaks of; a
+			// key whose record has not arrived is taken to be a SEP key: its
+			// provider says its DS belongs at the parent
+			var records []*dns.DNSKEY
 			for _, dk := range share.dnskeys {
 				if dk.KeyTag() == st.KeyTag {
-					sep, record = dk.Flags&dns.SEP != 0, dk
-					break
+					records = append(records, dk)
 				}
 			}
+			isSEP := func(dk *dns.DNSKEY) bool { return dk.Flags&dns.SEP != 0 }
+			sep := len(records) == 0 || slices.ContainsFunc(records, isSEP)
 			want, decided := foreignDSFor(foreignSaid{Provider: label, State: st.State, DS: st.DS}, sep, signing)
 			if !decided || !want {
 				continue
@@ -414,15 +418,17 @@ func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) 
 			if id := mpzd.identitiesByLabel()[label]; id != "" {
 				who = id
 			}
-			if record == nil {
+			if len(records) == 0 {
 				return fmt.Sprintf("provider %s holds its key %d %s with its DS at the parent, and this agent has no record of that key yet",
 					who, st.KeyTag, st.State)
 			}
-			if slices.ContainsFunc(held, func(dk *dns.DNSKEY) bool { return sameDNSKEYRdata(dk, record) }) {
-				continue
+			for _, record := range records {
+				if !isSEP(record) || slices.ContainsFunc(held, func(dk *dns.DNSKEY) bool { return sameDNSKEYRdata(dk, record) }) {
+					continue
+				}
+				return fmt.Sprintf("provider %s holds its key %d %s with its DS at the parent, and the signer's inventory does not have that DS",
+					who, st.KeyTag, st.State)
 			}
-			return fmt.Sprintf("provider %s holds its key %d %s with its DS at the parent, and the signer's inventory does not have that DS",
-				who, st.KeyTag, st.State)
 		}
 	}
 	return ""
