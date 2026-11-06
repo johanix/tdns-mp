@@ -325,6 +325,43 @@ func TestABrokenCopyAfterTheEndOfServiceKeepsNoInstructions(t *testing.T) {
 	}
 }
 
+// A copy without HSYNCPARAM expresses no intent: its HSYNC3 records read as
+// they stand, and are no last good reading, so a broken copy after them
+// keeps nothing. The signer waits for its agent's hand-over only for a copy
+// with an HSYNCPARAM, which carries a serial; the agent hands nothing for
+// HSYNC3 records alone.
+func TestACopyWithoutHSYNCPARAMIsNoLastGoodReading(t *testing.T) {
+	mpzd := instrTestZone(t, "noparam.access.example.", acRecords("", `serial="7" servers="alpha,beta"`)...)
+	t.Cleanup(func() { lastGood.Delete(mpzd.ZoneName); noReading.Delete(mpzd.ZoneName) })
+	_, hdb := storeDB(t)
+	withActing(t, hdb)
+	apex := func() *tdns.OwnerData {
+		t.Helper()
+		a, err := mpzd.GetOwner(mpzd.ZoneName)
+		if err != nil || a == nil {
+			t.Fatalf("apex: %v", err)
+		}
+		return a
+	}
+	if in := readingOf(apex()); in == nil || !in.HasParam {
+		t.Fatalf("the copy with an HSYNCPARAM reads as %+v", in)
+	}
+	if !signerWaits(mpzd.ZoneName, apex()) {
+		t.Error("the signer does not wait for its agent's hand-over for a copy with an HSYNCPARAM")
+	}
+	setApex(t, mpzd, core.TypeHSYNCPARAM)
+	if in := readingOf(apex()); in == nil || in.HasParam || len(in.Records) != 2 {
+		t.Fatalf("HSYNC3 records alone read as %+v", in)
+	}
+	if signerWaits(mpzd.ZoneName, apex()) {
+		t.Error("the signer waits for a hand-over for HSYNC3 records alone")
+	}
+	setApex(t, mpzd, core.TypeHSYNCPARAM, `3600 IN HSYNCPARAM servers="alpha"`, `3600 IN HSYNCPARAM servers="beta"`)
+	if in := readingOf(apex()); in != nil {
+		t.Errorf("a broken copy after HSYNC3 records alone reads as %+v", in)
+	}
+}
+
 func TestARestartWithAStoredSerialHasGroupsAndPeersAfterTheFirstLoad(t *testing.T) {
 	saved := tdns.Globals.App.Type
 	tdns.Globals.App.Type = AppTypeMPAuditor

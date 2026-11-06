@@ -384,8 +384,8 @@ func asksInZone(zone ZoneName, self AgentId) bool {
 // Only a zone that is multi-provider here is asked about: one to which the
 // load gave provider data (populateMPdata). A zone with HSYNC3 records and
 // no HSYNCPARAM has none, and no agent can answer for it complete: asking
-// would repeat every five minutes for ever. Whether such a zone is
-// multi-provider is the transitions design's question.
+// would repeat every five minutes for ever. It reads as its records with no
+// parameters, and gives nobody a role (decision 108a).
 func (t *catchUpTracker) AskZone(zone ZoneName, reason string) map[AgentId]askResult {
 	if t == nil || !asksInZone(zone, t.self) {
 		return nil

@@ -536,9 +536,11 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 			}
 			switch {
 			case z.Active == nil && slices.ContainsFunc(z.Held, func(h heldSerial) bool { return givesRoles(h.Reading) }):
-				// with no active serial known the end of service cannot
-				// be judged: the newest held may list one provider while
-				// the active one lists more (design 7, S9)
+				// with no active serial known, a serial held that gives
+				// roles may be the active one, listing more providers
+				// than the newest (design 7, S9). Where every serial
+				// held gives no role the serials end, active known or
+				// not: no hang (the project owner, 2026-11-06, (A))
 				z.Copy, z.CopyError = SerialDigest{}, copyErr
 				z.ownerError(zone, gone+" dropped while the active serial is not known")
 				return nil

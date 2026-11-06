@@ -240,8 +240,9 @@ func (e *KeyLifecycleEngine) distributeAtJoining(zone string) {
 }
 
 // signerWaits: the signer holds no hand-over for the zone and the copy at
-// apex has a reading, which carries a serial (#308), so it waits for its
-// agent's (rule 5).
+// apex has an HSYNCPARAM, which carries a serial (#308), so it waits for its
+// agent's (rule 5). HSYNC3 records alone carry none, and the agent hands
+// nothing for them.
 func signerWaits(zone string, apex *tdns.OwnerData) bool {
 	s := actingHeld.Load()
 	if s == nil {
@@ -250,7 +251,8 @@ func signerWaits(zone string, apex *tdns.OwnerData) bool {
 	if _, held := s.get(zone); held {
 		return false
 	}
-	return readingOf(apex) != nil
+	in := readingOf(apex)
+	return in != nil && in.HasParam
 }
 
 // signerActingLine is what the signer acts by for the zone, for `signer
