@@ -490,8 +490,15 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 	err := s.update(zone, func(z *zoneSerials) error {
 		switch {
 		case benign && !givesRoles(activeOrHeld(z)):
-			if z.CopyError != readErr.Error() {
+			// the hold an earlier copy without serial= that gave a role
+			// started ends with it; any other owner error ends only at a
+			// serial above it (design 3.6)
+			ended := z.OwnerError == readErr.Error()
+			if z.CopyError != readErr.Error() || ended {
 				lg.Warn("a benign owner error in the zone's instructions: no role is given, and nothing is held", "zone", zone, "error", readErr.Error())
+			}
+			if ended {
+				z.OwnerError, z.ErrorAt = "", nil
 			}
 			z.Copy, z.CopyError = SerialDigest{}, readErr.Error()
 			return nil
@@ -1023,7 +1030,11 @@ func (st *InstructionsStatus) Line() string {
 	if st.Newest != nil && (st.Active == nil || *st.Newest != *st.Active) {
 		parts = append(parts, "newest "+st.Newest.String())
 	}
-	parts = append(parts, fmt.Sprintf("copy %d", st.Copy.Serial))
+	if st.CopyError != "" {
+		parts = append(parts, "copy: "+st.CopyError+", nothing held") // a benign owner error (decision 107a)
+	} else {
+		parts = append(parts, fmt.Sprintf("copy %d", st.Copy.Serial))
+	}
 	line := strings.Join(parts, ", ")
 	if r := st.refusedLine(); r != "" {
 		line = r + "; " + line
@@ -1057,6 +1068,9 @@ func (s *InstructionStore) fillMPZoneInfo(zone string, info *MPZoneInfo) {
 	info.Refused = st.refusedLine()
 	if info.OwnerError == "" {
 		info.OwnerError = st.OwnerError
+	}
+	if info.CopyError == info.OwnerError {
+		info.CopyError = "" // the store holds it: an owner error after all
 	}
 }
 

@@ -278,6 +278,26 @@ func TestANoSerialCopyThatGivesNoRoleHoldsNothing(t *testing.T) {
 	if st := status(t, given, storeZone); st.Phase != PhaseOwnerError || st.OwnerError != "HSYNCPARAM without serial=" {
 		t.Errorf("a copy that gives a role: phase %s error %q", st.Phase, st.OwnerError)
 	}
+	// the roles dropped, serial= still missing: the hold that copy started
+	// ends, as the copy that gives no role holds nothing
+	given.Note(storeZone, in, err)
+	if st := status(t, given, storeZone); st.Phase != PhaseSteady || st.OwnerError != "" || st.CopyError != "HSYNCPARAM without serial=" {
+		t.Errorf("the roles dropped after a copy that gave one: phase %s error %q copy error %q", st.Phase, st.OwnerError, st.CopyError)
+	}
+	if why := given.frozen(storeZone); len(why) > 0 {
+		t.Errorf("the roles dropped after a copy that gave one: frozen: %v", why)
+	}
+	if line := status(t, given, storeZone).Line(); !strings.Contains(line, "copy: HSYNCPARAM without serial=, nothing held") || strings.Contains(line, "copy 0") {
+		t.Errorf("the status line: %q, want the copy's error and that nothing is held", line)
+	}
+	// another owner error ends only at a serial above it (design 3.6)
+	other := newStore(t)
+	noteKnown(t, other, storeZone, noRoles)
+	other.Note(storeZone, nil, errors.New("two HSYNCPARAM records"))
+	other.Note(storeZone, in, err)
+	if st := status(t, other, storeZone); st.Phase != PhaseOwnerError || st.OwnerError != "two HSYNCPARAM records" {
+		t.Errorf("a copy that gives no role after another owner error: phase %s error %q", st.Phase, st.OwnerError)
+	}
 	held := newStore(t)
 	noteKnown(t, held, storeZone, at(t, 7, "alpha,beta"))
 	held.Note(storeZone, in, err)

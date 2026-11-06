@@ -37,6 +37,9 @@ func checkMPZoneHSYNCConfig(mpzd *MPZoneData) []string {
 	if info.OwnerError != "" {
 		errs = append([]string{info.OwnerError}, errs...)
 	}
+	if info.CopyError != "" {
+		errs = append(errs, "a benign owner error, nothing held: "+info.CopyError)
+	}
 	return errs
 }
 
