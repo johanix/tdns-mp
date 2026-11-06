@@ -206,6 +206,11 @@ func TestAServerRoleWithNoSignerHoldsAtTheSerialAlone(t *testing.T) {
 	if serverRoleHolds(conf, zone, step) {
 		t.Error("no signer: held while the nameservers serve serial 0, below the zone's 1")
 	}
+	// the status names no upstream, and tells no operator to point at one
+	now := time.Now()
+	if got, want := serverRoleStatus(conf, zone, heldStep{InstrStep: step, at: now.Add(-transferHelpAfter)}, now), "waiting for n.role.example.'s nameservers to serve the zone at serial 1 or later"; got != want {
+		t.Errorf("no signer: the status %q, want %q", got, want)
+	}
 	conf.InternalMp.transfers.zones[canonicalName(zone)].at = time.Now().Add(-transferRecheck)
 	var asked []string
 	serving(t, soa(t, zone, 7, nil, nil), &asked)
