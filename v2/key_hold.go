@@ -409,10 +409,24 @@ func (conf *Config) askParentTrust(ctx context.Context, kdb *tdns.KeyDB, zone Zo
 	}
 	tdns.UpdateParentState(kdb, string(zone), keyid, state)
 	if state != edns0.KeyStateTrusted {
+		// the word of this lead that it trusts the key is ended by this one
+		conf.forgetTrustHeard(zone, keyid)
 		return false
 	}
 	conf.noteTrustHeard(zone, keyid, lead)
 	return true
+}
+
+// forgetTrustHeard forgets the parent's word that it trusts keyid: the parent
+// has since said otherwise.
+func (conf *Config) forgetTrustHeard(zone ZoneName, keyid uint16) {
+	b := &conf.InternalMp.keyPolls
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.init()
+	if w, ok := b.trustHeard[canonZone(zone)]; ok && w.keyid == keyid {
+		delete(b.trustHeard, canonZone(zone))
+	}
 }
 
 // trustBeforeSigning asks the parent's KeyState, right before the leader's
