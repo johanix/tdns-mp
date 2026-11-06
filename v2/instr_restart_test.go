@@ -247,6 +247,35 @@ func TestASerialWithNoVotingMemberIsKnownAtOnce(t *testing.T) {
 	}
 }
 
+// A zone that leaves the configuration and comes back in the same run
+// (pruneInstructions): the restart rule's wait it had ends with its serials,
+// and the rule waits afresh, not on the time of the wait from before.
+func TestAZoneAddedAgainWaitsAfresh(t *testing.T) {
+	p := newThawRig(t, "pruned.restart.example.", "")
+	p.noRecord(p.n, freezeAt(t, 92, "none", "", ""))
+	p.conf.thawTurn(p.zone)
+	if p.known() != 0 {
+		t.Fatalf("precondition: a serial that gives roles held, nothing heard: known %d", p.known())
+	}
+	zd, ok := tdns.Zones.Get(p.zone)
+	if !ok {
+		t.Fatal("the zone is not among tdns's zones")
+	}
+	was := zd.Options[tdns.OptMultiProvider]
+	zd.Options[tdns.OptMultiProvider] = false // the zone left the configuration
+	p.conf.pruneInstructions()
+	zd.Options[tdns.OptMultiProvider] = was
+	if p.store.keeps(p.zone) {
+		t.Fatal("the serials of a zone that left the configuration are kept")
+	}
+	p.store.Note(p.zone, p.n, nil)
+	p.store.Note(p.zone, freezeAt(t, 92, "none", "", ""), nil)
+	later := time.Now().Add(leavingTimeoutFor(p.conf.MpConfig()) + time.Second)
+	if v, _ := p.conf.restartView(p.zone, later); v.take != nil || len(v.waits) == 0 {
+		t.Errorf("added again, a leaving timeout after the first wait: take %v, waits %q", v.take, v.waits)
+	}
+}
+
 // A member with no record does not take another member's active serial:
 // only the leader's.
 func TestAMemberWithNoRecordIgnoresAnotherMembersActive(t *testing.T) {
