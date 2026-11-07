@@ -201,6 +201,7 @@ func NewAuditorTree(use, role string) *cobra.Command {
 		newAuditorEventlogCmd(kind),
 		newAuditorZonesCmd(kind),
 		newAuditorObservationsCmd(kind),
+		newAuditorConfirmationsCmd(kind),
 		newAuditorWebCmd(kind),
 		newImrCmd(kind),
 	)

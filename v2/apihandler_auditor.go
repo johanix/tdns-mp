@@ -10,6 +10,8 @@
  *   zones               — list audited zones with provider summaries
  *   zone                — detail for one zone (req.Zone required)
  *   observations        — recent observations, optionally per zone
+ *   confirmations       — the zones' distributions and what each member
+ *                         has confirmed, optionally per zone
  *   eventlog-list       — query event log (zone/since/limit)
  *   eventlog-show       — one event, with its details (req.ID required)
  *   eventlog-clear      — clear events (zone, older_than, all)
@@ -49,6 +51,9 @@ type AuditResponse struct {
 	Deleted      int64                  `json:"deleted,omitempty"`
 	UsersFile    string                 `json:"users_file,omitempty"`
 	UsersCount   int                    `json:"users_count,omitempty"`
+
+	// Distributions answers the "confirmations" command.
+	Distributions []AuditDistributionSummary `json:"distributions,omitempty"`
 }
 
 // maxAuditBodySize bounds the JSON request body for /api/v1/auditor.
@@ -93,6 +98,13 @@ func (conf *Config) APIauditor() func(w http.ResponseWriter, r *http.Request) {
 			resp := AuditResponse{Status: "ok"}
 			if sm != nil {
 				resp.Observations = sm.SnapshotAllObservations(req.Zone)
+			}
+			writeAuditJSON(w, resp)
+
+		case "confirmations":
+			resp := AuditResponse{Status: "ok"}
+			if sm != nil {
+				resp.Distributions = sm.SnapshotAllDistributions(req.Zone, time.Now())
 			}
 			writeAuditJSON(w, resp)
 
