@@ -866,6 +866,7 @@ func (tr *TrackedRR) beginDistribution(state RRState, distID string, now time.Ti
 	tr.DistributionID = distID
 	tr.Confirmations = nil
 	tr.UpdatedAt = now
+	tr.RemovalByReplace = false
 }
 
 // markAddPending marks a ClassINET RR as pending (addition awaiting confirmation).
@@ -909,7 +910,9 @@ func (zdr *ZoneDataRepo) markDeletePending(tracked *TrackedRRset, rr dns.RR, dis
 
 // markRemovals marks the tracked records of a set that a REPLACE leaves out,
 // ACCEPTED or PENDING, as RRStatePendingRemoval under distID (#194). kept is
-// what the REPLACE holds.
+// what the REPLACE holds. Such a removal is marked as one by REPLACE: an
+// answer in full that leaves the record out counts as its removal
+// (ProcessConfirmation).
 func markRemovals(tracked *TrackedRRset, kept map[string]bool, distID string, now time.Time) {
 	for i := range tracked.Tracked {
 		tr := &tracked.Tracked[i]
@@ -917,6 +920,7 @@ func markRemovals(tracked *TrackedRRset, kept map[string]bool, distID string, no
 			continue
 		}
 		tr.beginDistribution(RRStatePendingRemoval, distID, now)
+		tr.RemovalByReplace = true
 		lgEngine.Debug("marked RR as pending-removal", "rr", tr.RR.String(), "distID", distID)
 	}
 }
@@ -1129,6 +1133,21 @@ func (zdr *ZoneDataRepo) settleTracked(zone ZoneName) {
 	}
 }
 
+// answersInFull: the answer is a peer's final word, and names every record of
+// the distribution it holds. A PARTIAL, a failure or a refusal may leave out a
+// record still held, a truncated answer leaves records out, and a peer at other
+// instructions than the send has decided nothing yet (NotYet).
+func answersInFull(detail *ConfirmationDetail) bool {
+	if detail.NotYet || detail.Truncated {
+		return false
+	}
+	switch detail.Status {
+	case "SUCCESS", "ok", "IGNORED", "ignored":
+		return true
+	}
+	return false
+}
+
 // ProcessConfirmation updates tracked RR states based on combiner confirmation feedback.
 func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *MsgQs) {
 	now := time.Now()
@@ -1318,6 +1337,21 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 						} else {
 							settles = aRecipientRemoved(tr) // it may have lost its vote after the voters answered
 						}
+					} else if tr.RemovalByReplace && answersInFull(detail) && !appliedSet[rrStr] && !ignoredSet[rrStr] && !nonVotingMember(detail.Zone, AgentId(source)) {
+						// A REPLACE names what it keeps, and a recipient names
+						// as removed only what it drops. One that holds none of
+						// the record drops nothing: it never had it, its
+						// combiner ignores the type, or this is the delete
+						// again. Its answer in full that leaves the record out
+						// says it holds none (#194). An explicit delete names
+						// the record, and an answer that leaves it out there
+						// may come from a recipient that still holds it. A
+						// member with no vote holds no record's state, and its
+						// answer is not recorded (allRecipientsConfirmed).
+						setConfirmation(tr, "removed", "holds none")
+						tr.UpdatedAt = now
+						matched++
+						settles = true
 					}
 					if settles && allRecipientsConfirmed(detail.Zone, tr) {
 						zdr.finishRemoval(detail.Zone, agentId, rrtype, tr)

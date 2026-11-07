@@ -287,3 +287,134 @@ func TestADeleteWaitsForAStoppedProviderUntilItLosesItsVote(t *testing.T) {
 		t.Errorf("with n an auditor that named the record as applied: %v, want REMOVED", tr.State)
 	}
 }
+
+// sendDelete is an explicit delete of rr, as the leader's withdrawal sends
+// one: it names the record. Marked under distID.
+func (r *delRig) sendDelete(distID string, recipients []string, rr dns.RR) {
+	zu := &ZoneUpdate{
+		Zone:       r.zone,
+		AgentId:    r.self,
+		RRsets:     map[uint16]core.RRset{},
+		Operations: []core.RROperation{{Operation: "delete", RRtype: "NS", Records: []string{rr.String()}}},
+	}
+	r.zdr.MarkRRsPending(r.zone, r.self, zu, distID, recipients)
+}
+
+// A recipient that holds none of the record drops nothing in a REPLACE without
+// it, and names nothing as removed. Its answer in full to the delete, which
+// leaves the record out, counts as its removal. The delete waited for it until
+// it lost its vote, and for good if no recipient had removed the record.
+func TestAnAnswerInFullThatLeavesTheRecordOutRemovesIt(t *testing.T) {
+	const zone = "delholdsnone.example."
+	ns1, ns2, ns9 := nsRR(t, zone, "ns1.provider.example."), nsRR(t, zone, "ns2.provider.example."), nsRR(t, zone, "ns9.provider.example.")
+	recipients := []string{freezeCombiner, roleB}
+	for _, c := range []struct {
+		name      string
+		pending   bool // the add of the record still waits for b when it is deleted
+		overtaken bool // a later REPLACE reaches b before the delete
+		answer    func(*ConfirmationDetail)
+	}{
+		{"a provider that does not sign: its combiner ignores the type", false, false, func(d *ConfirmationDetail) {
+			d.Status, d.IgnoredRecords = "IGNORED", []string{ns1.String()}
+		}},
+		{"a recipient that never had the record", true, false, appliedOf(ns1)},
+		{"the delete sent again, already in place", false, false, appliedOf(ns1)},
+		{"the delete overtaken by a later REPLACE", false, true, appliedOf(ns1)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newDelRig(t, zone, roleA, ns1)
+			if c.pending {
+				r.send(t, "a", recipients, nil, ns1, ns9)
+				r.confirm("a", freezeCombiner, appliedOf(ns1, ns9))
+			} else {
+				r.zdr.AddConfirmedRR(r.zone, r.self, ns9)
+			}
+			r.send(t, "d", recipients, []dns.RR{ns9}, ns1)
+			if c.overtaken {
+				r.send(t, "e", recipients, nil, ns1, ns2)
+			}
+			r.confirm("d", freezeCombiner, removedOf(ns9))
+			tr := r.tracked(t, ns9)
+			if tr.State != RRStatePendingRemoval {
+				t.Fatalf("before b answers: %v, want PENDING_REMOVAL", tr.State)
+			}
+			r.confirm("d", roleB, c.answer)
+			if tr.State != RRStateRemoved {
+				t.Errorf("after b's answer: %v, want REMOVED", tr.State)
+			}
+			if s := tr.Confirmations[roleB].Status; s != "removed" {
+				t.Errorf("b's answer is recorded as %q, want removed", s)
+			}
+		})
+	}
+}
+
+// An answer that may leave out a record its sender still holds says nothing of
+// the record, and the delete waits for that recipient as before. So does any
+// answer to an explicit delete that leaves the record out.
+func TestAnAnswerThatMayLeaveOutAHeldRecordDoesNotRemoveIt(t *testing.T) {
+	const zone = "delstillheld.example."
+	ns1, ns9 := nsRR(t, zone, "ns1.provider.example."), nsRR(t, zone, "ns9.provider.example.")
+	recipients := []string{freezeCombiner, roleB}
+	for _, c := range []struct {
+		name     string
+		explicit bool // an explicit delete, which names the record
+		answer   func(*ConfirmationDetail)
+	}{
+		{"PARTIAL", false, func(d *ConfirmationDetail) { d.Status = "PARTIAL"; appliedOf(ns1)(d) }},
+		{"FAILED", false, func(d *ConfirmationDetail) { d.Status = "FAILED" }},
+		{"the REPLACE refused", false, func(d *ConfirmationDetail) {
+			d.Status, d.RejectedItems = "REJECTED", []RejectedItemInfo{{Record: "(replace NS)", Reason: "replace failed"}}
+		}},
+		{"a refusal that names only the kept records", false, func(d *ConfirmationDetail) {
+			d.Status, d.RejectedItems = "REJECTED", []RejectedItemInfo{{Record: ns1.String(), Reason: "refused"}}
+		}},
+		{"truncated", false, func(d *ConfirmationDetail) { d.Truncated = true; appliedOf(ns1)(d) }},
+		{"at other instructions", false, func(d *ConfirmationDetail) { d.NotYet = true; appliedOf(ns1)(d) }},
+		{"the record named as held", false, appliedOf(ns1, ns9)},
+		{"the record named as ignored", false, func(d *ConfirmationDetail) {
+			d.Status, d.IgnoredRecords = "IGNORED", []string{ns1.String(), ns9.String()}
+		}},
+		{"an explicit delete", true, appliedOf(ns1)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newDelRig(t, zone, roleA, ns1, ns9)
+			if c.explicit {
+				r.sendDelete("d", recipients, ns9)
+			} else {
+				r.send(t, "d", recipients, []dns.RR{ns9}, ns1)
+			}
+			r.confirm("d", freezeCombiner, removedOf(ns9))
+			r.confirm("d", roleB, c.answer)
+			tr := r.tracked(t, ns9)
+			if tr.State != RRStatePendingRemoval {
+				t.Errorf("after b's answer: %v, want PENDING_REMOVAL", tr.State)
+			}
+			if got, ok := tr.Confirmations[roleB]; ok {
+				t.Errorf("b's answer is recorded as %q", got.Status)
+			}
+		})
+	}
+}
+
+// An answer from a member with no vote does not count as a removal: an
+// auditor's answer names only what a REPLACE keeps (auditorConfirms), and such
+// a member holds no record's state.
+func TestAnAnswerInFullFromAMemberWithNoVoteDoesNotCount(t *testing.T) {
+	r := newLostVoteRig(t, "delnovote.reconcile.example.")
+	ns1 := nsRR(t, string(r.zone), "ns1.provider.example.")
+	d := newDelRig(t, string(r.zone), r.us, ns1, r.rr)
+
+	r.activate(t, freezeAt(t, 42, "v", "a,b", "n"))
+	d.send(t, "d", []string{freezeCombiner, roleB, roleN}, []dns.RR{r.rr}, ns1)
+	d.confirm("d", roleN, func(c *ConfirmationDetail) { c.Status = "SUCCESS"; appliedOf(ns1)(c) })
+	tr := d.tracked(t, r.rr)
+	if got, ok := tr.Confirmations[roleN]; ok {
+		t.Errorf("the auditor's answer is recorded as %q", got.Status)
+	}
+	d.confirm("d", freezeCombiner, removedOf(r.rr))
+	d.confirm("d", roleB, removedOf(r.rr))
+	if tr.State != RRStateRemoved {
+		t.Errorf("when every recipient with a vote has removed it: %v, want REMOVED", tr.State)
+	}
+}

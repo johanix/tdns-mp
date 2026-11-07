@@ -77,6 +77,12 @@ The record leaves the SDE's data at once, so nothing the
 agent sends later names it again. Its tracking stays,
 state PENDING_REMOVAL, until every recipient has
 confirmed the removal; then it is REMOVED. A recipient
+that holds none of the record (it never had it, or its
+combiner ignores the type) names nothing as removed;
+its answer in full that leaves the record out counts as
+its removal. A partial, failed, refused or cut answer
+does not, nor does one from a member with no vote.
+A recipient
 that refuses the removal puts it back to ACCEPTED, with
 the reason "delete rejected: ...". The delete stands:
 the next REPLACE of the type, or a resync, sends it

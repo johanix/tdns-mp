@@ -302,6 +302,7 @@ type TrackedRR struct {
 	UpdatedAt          time.Time
 	Confirmations      map[string]RRConfirmation // recipientID → per-recipient status
 	ExpectedRecipients []string                  // Who must confirm before state transitions to accepted
+	RemovalByReplace   bool                      // A removal started by the agent's own REPLACE leaving the record out (#194)
 }
 
 type TrackedRRset struct {
