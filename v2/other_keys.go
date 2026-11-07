@@ -179,7 +179,7 @@ func upstreamStatus(conf *Config, zone string, step heldStep, _ time.Time) strin
 	}
 	line := fmt.Sprintf("waiting for %s's nameservers to serve the zone from its new upstream", id)
 	if self {
-		line += operatorMustPoint(mp, zone, id)
+		line += operatorMustPoint(conf, mp, zone, id)
 	}
 	return line
 }

@@ -40,6 +40,9 @@ const (
 	// transferHelpAfter: past this, counted from the step, the provider's
 	// status tells its operator what to point where.
 	transferHelpAfter = 5 * time.Minute
+	// upstreamXfrRetry: the least time between two asks of an upstream for
+	// its XFR addresses while it has named none.
+	upstreamXfrRetry = time.Minute
 )
 
 func init() {
@@ -101,16 +104,131 @@ func serverRoleStatus(conf *Config, zone string, step heldStep, now time.Time) s
 	}
 	line := fmt.Sprintf("waiting for %s's nameservers to serve the zone from its upstream at serial %d or later", id, copySerial(zone))
 	if self && now.Sub(step.at) >= transferHelpAfter {
-		line += operatorMustPoint(mp, zone, id)
+		line += operatorMustPoint(conf, mp, zone, id)
 	}
 	return line
 }
 
 // operatorMustPoint is what the provider id's status adds for its operator:
-// what to point where, for the zone's transfer from its upstream.
-func operatorMustPoint(mp *MultiProviderConf, zone, id string) string {
+// what to point where, for the zone's transfer from its upstream. An
+// upstream that id's record names is asked for its XFR addresses (CONFIG
+// upstream), and the hint names them once it has, or why it named none. mp
+// is the config the caller read, never nil.
+func operatorMustPoint(conf *Config, mp *MultiProviderConf, zone, id string) string {
+	in := instructionsFor(ZoneName(zone))
+	at := strings.Join(upstreamOf(in, id), " or ")
+	if label, ok := in.labelOf(id); ok {
+		if r, _ := in.record(label); r.Upstream != "" && in.identityOf(r.Upstream) != "" {
+			switch addrs, why := conf.InternalMp.upstreamXfrs.named(conf, zone, in.identityOf(r.Upstream)); {
+			case len(addrs) > 0:
+				at += fmt.Sprintf(" (XFR from %s)", strings.Join(addrs, ", "))
+			case why != "":
+				at += fmt.Sprintf(" (its XFR addresses not known: %s)", why)
+			}
+		}
+	}
 	return fmt.Sprintf("; its operator must point %s at %s for the zone's transfer",
-		strings.Join(mp.Local.Nameservers, ", "), strings.Join(upstreamOf(instructionsFor(ZoneName(zone)), id), " or "))
+		strings.Join(mp.Local.Nameservers, ", "), at)
+}
+
+// upstreamXfrBook is what this agent's upstreams named as their XFR
+// addresses when asked, by zone, for the operator's hint.
+type upstreamXfrBook struct {
+	mu    sync.Mutex
+	zones map[string]*upstreamXfr // by zone, folded
+	// ask asks upstream for its XFR addresses; nil: CONFIG upstream. A test
+	// sets it.
+	ask func(conf *Config, zone, upstream string) ([]string, error)
+	// start runs an ask; nil: in a goroutine of its own. A test runs it in
+	// place.
+	start func(ask func())
+}
+
+type upstreamXfr struct {
+	upstream string
+	addrs    []string
+	why      string    // why the latest ask got none
+	at       time.Time // when the latest ask ended
+	running  bool
+}
+
+// named is what upstream named as its XFR addresses for zone, or why it
+// named none. An ask starts when none runs, none has named any, and the
+// latest ended upstreamXfrRetry ago or more. With no agent registry or
+// message queues nothing is asked.
+func (b *upstreamXfrBook) named(conf *Config, zone, upstream string) ([]string, string) {
+	ask := b.ask
+	if ask == nil {
+		if ar := conf.InternalMp.AgentRegistry; ar == nil || ar.LocalAgent == nil || conf.InternalMp.MsgQs == nil {
+			return nil, ""
+		}
+		ask = askUpstreamXfr
+	}
+	key := canonicalName(zone)
+	b.mu.Lock()
+	if b.zones == nil {
+		b.zones = map[string]*upstreamXfr{}
+	}
+	u := b.zones[key]
+	if u == nil || !core.EqualNames(u.upstream, upstream) {
+		u = &upstreamXfr{upstream: upstream}
+		b.zones[key] = u
+	}
+	kick := len(u.addrs) == 0 && !u.running && (u.at.IsZero() || time.Since(u.at) >= upstreamXfrRetry)
+	if kick {
+		u.running = true
+	}
+	start := b.start
+	b.mu.Unlock()
+	if kick {
+		run := func() {
+			addrs, err := ask(conf, zone, upstream)
+			why := ""
+			switch {
+			case err != nil:
+				why = err.Error()
+			case len(addrs) == 0:
+				why = "it named none"
+			}
+			b.mu.Lock()
+			u.addrs, u.why, u.at, u.running = addrs, why, time.Now(), false
+			b.mu.Unlock()
+		}
+		if start == nil {
+			go run()
+		} else {
+			start(run)
+		}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(u.addrs), u.why
+}
+
+// askUpstreamXfr asks upstream for the addresses its zone transfers go out
+// from (CONFIG upstream: its xfr.outgoing.addresses).
+func askUpstreamXfr(conf *Config, zone, upstream string) ([]string, error) {
+	ar, msgQs := conf.InternalMp.AgentRegistry, conf.InternalMp.MsgQs
+	agent, err := ar.GetAgentInfo(AgentId(dns.Fqdn(upstream)))
+	if err != nil {
+		return nil, err
+	}
+	resp, err := requestConfig(ar, agent, zone, "upstream", msgQs)
+	switch {
+	case err != nil:
+		return nil, err
+	case resp == nil:
+		return nil, fmt.Errorf("%s did not answer", upstream)
+	case resp.Refused() != "":
+		return nil, fmt.Errorf("refused: %s", resp.Refused())
+	}
+	var addrs []string
+	for _, a := range strings.Split(resp.ConfigData["xfr_srcs"], ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			addrs = append(addrs, a)
+		}
+	}
+	return addrs, nil
 }
 
 // toldStepHeld: id's first-hand stamp tells that it holds step.
@@ -149,11 +267,10 @@ func upstreamOf(in *Instructions, id string) []string {
 	return identities(in.providers(in.Signers))
 }
 
-// signerKeys are the DNSKEYs the providers ids publish, as this agent holds
-// them: its own provider's from its signer, another's as that provider's
-// agent distributed them.
-func (conf *Config) signerKeys(zone string, ids []string) []dns.RR {
-	self := conf.MpConfig().Identity
+// signerKeys are the DNSKEYs the providers ids publish, as this agent (self)
+// holds them: its own provider's from its signer, another's as that
+// provider's agent distributed them.
+func (conf *Config) signerKeys(zone, self string, ids []string) []dns.RR {
 	var keys []dns.RR
 	for _, id := range ids {
 		if core.EqualNames(id, self) {
@@ -276,15 +393,25 @@ func (b *transferBook) held(zone, name string) bool {
 // its upstream (servingChainOK): at an SOA serial no lower than floor gives,
 // signed by its upstream's keys. The outcome is logged when it changes.
 func (conf *Config) checkTransfer(zone, name string, floor func(context.Context) (uint32, error)) {
+	b := &conf.InternalMp.transfers
+	mp := conf.MpConfig()
+	if mp == nil {
+		// a reload with no multi-provider block since the check was
+		// started: nothing is checked, and the step's next look starts one
+		b.mu.Lock()
+		if c := b.zones[canonicalName(zone)]; c != nil && c.step == name {
+			c.running = false
+		}
+		b.mu.Unlock()
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), transferCheckTimeout)
 	defer cancel()
-	mp := conf.MpConfig()
 	var served uint32
 	min, err := floor(ctx)
 	if err == nil {
-		served, err = servingChainOK(ctx, zone, mp.Local.Nameservers, conf.signerKeys(zone, upstreamOf(instructionsFor(ZoneName(zone)), mp.Identity)), min, time.Now())
+		served, err = servingChainOK(ctx, zone, mp.Local.Nameservers, conf.signerKeys(zone, mp.Identity, upstreamOf(instructionsFor(ZoneName(zone)), mp.Identity)), min, time.Now())
 	}
-	b := &conf.InternalMp.transfers
 	b.mu.Lock()
 	c := b.zones[canonicalName(zone)]
 	if c == nil || c.step != name {

@@ -179,6 +179,39 @@ func TestAServerRoleStepWaitsUntilTheProvidersServersServeTheUpstreamsCopy(t *te
 	}
 }
 
+// A reload with no multi-provider block stores no MP config. A transfer
+// check started before it read the config again, found none, and panicked
+// the agent. It now ends with nothing checked, and once the config is back
+// the step's next look starts a check that holds.
+func TestATransferCheckWithNoMPConfigEndsWithNothingChecked(t *testing.T) {
+	r := newServingRig(t, "reload.serving.example.", srNewcomer)
+	step := serverRoleStep(srNewcomer)
+	serving(t, soa(t, r.zone, 7, r.key, r.priv), nil)
+	var checks []func()
+	r.conf.InternalMp.transfers.start = func(check func()) { checks = append(checks, check) }
+	if serverRoleHolds(r.conf, r.zone, step) || len(checks) != 1 {
+		t.Fatalf("held before a check, or %d checks started, want 1", len(checks))
+	}
+	mp := r.conf.MpConfig()
+	r.conf.SetMpConfig(nil)
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Fatalf("the check with no MP config panicked: %v", p)
+			}
+		}()
+		checks[0]()
+	}()
+	r.conf.SetMpConfig(mp)
+	if serverRoleHolds(r.conf, r.zone, step) || len(checks) != 2 {
+		t.Fatalf("held with nothing checked, or %d checks started, want a second", len(checks))
+	}
+	checks[1]()
+	if !serverRoleHolds(r.conf, r.zone, step) {
+		t.Error("not held once a check with the config back passed")
+	}
+}
+
 // The serving check reads the SOA of each nameserver: its serial at least
 // the zone's by RFC 1982, and each RRSIG over it by a key of the expected
 // signers, valid, verifying.
