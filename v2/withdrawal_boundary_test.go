@@ -144,3 +144,39 @@ func TestTransportBoundary_AWithdrawalReachesTheRecipientsCombiner(t *testing.T)
 		t.Errorf("an update with the withdraw field, as routed: %+v", amp)
 	}
 }
+
+// The agent passes the leader's withdrawal on to its combiner as an update
+// in the withdrawn provider's name (deliverGenericMessage). At the
+// combiner's boundary the update keeps the flag and its originator, and the
+// combiner, whose own agent delivered it, removes the provider's records
+// although the provider does not vote in the zone.
+func TestTransportBoundary_TheCombinerTakesAWithdrawalFromItsOwnAgent(t *testing.T) {
+	mpzd, hdb := withdrawnAtCombiner(t, "wire.combiner.withdraw.example.", "ns1")
+	zone := mpzd.ZoneName
+	distID := nextDistributionID()
+	m, err := syncAppMessage(&PeerSyncRequest{SenderID: goneOrigin, Zone: zone, MessageType: "update", Timestamp: time.Now(),
+		Operations: []core.RROperation{{Operation: "replace", RRtype: "NS"}}, DistributionID: distID,
+		Withdraw: &Withdraw{Provider: goneOrigin, RRtype: "NS"}}, csyncCombinerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgQs := &MsgQs{Msg: make(chan *AgentMsgPostPlus, 1)}
+	tm := &MPTransportBridge{TransportManager: &transport.TransportManager{PeerRegistry: transport.NewPeerRegistry()}, msgQs: msgQs}
+	// the agent has an address: no discovery of it starts
+	if err := tm.PeerRegistry.GetOrCreate(csyncOurAgent).SetDNSCarrierAddress(&transport.Address{Host: "127.0.0.1", Port: 53, Transport: "udp"}); err != nil {
+		t.Fatal(err)
+	}
+	tm.routeIncomingMessage(&transport.IncomingMessage{TypeToken: "update", DistributionID: distID, SenderID: goneOrigin, TransportSender: csyncOurAgent,
+		Mechanism: transport.MechanismDNS, Zone: zone, Payload: m.Payload, ReceivedAt: time.Now(), SourceAddr: "127.0.0.1:0"})
+	amp, ok := recvMsgWithin(t, msgQs.Msg, 10*time.Second)
+	if !ok {
+		t.Fatal("the transport did not queue the update")
+	}
+	if amp.MessageType != core.AgentMsgUpdate || amp.OriginatorID != goneOrigin || amp.DeliveredBy != csyncOurAgent || amp.Withdraw == nil {
+		t.Fatalf("the update as routed: type %s, originator %s, delivered by %s, withdraw %+v", amp.MessageType, amp.OriginatorID, amp.DeliveredBy, amp.Withdraw)
+	}
+	combinerHandles(t, mpzd, hdb, amp)
+	if held := combinerHolds(mpzd, goneOrigin); len(held) != 0 {
+		t.Errorf("the provider's NS at the combiner after the withdrawal: %v", held)
+	}
+}
