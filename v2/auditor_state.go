@@ -282,7 +282,7 @@ func (zs *AuditZoneState) AddObservation(severity, provider, message string) {
 // in zone, from the copy the member sent, and that the member is one that
 // sends copies.
 func (m *AuditStateManager) NoteConfirmation(zone, distID, originator, member, status, message string, rejected []RejectedItemInfo) {
-	if strings.EqualFold(status, "PENDING") {
+	if strings.EqualFold(status, "PENDING") { // not-a-name: a confirmation status
 		return // not a final word
 	}
 	if distID == "" || len(distID) > auditDistributionIDMax {
