@@ -149,6 +149,23 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				continue
 			}
 
+			// A zone whose stored contributions are not read yet takes no
+			// update: its sender keeps it (contributionsMayChange). Before the
+			// edit is kept, so that a manual approval neither waits on it nor
+			// confirms it as a no-op by what the zone holds in memory.
+			if mpzd, ok := Zones.Get(dns.Fqdn(zone)); ok && !mpzd.contributionsMayChange(hdb, "update") {
+				lgCombiner.Info("update left with its sender: the zone's stored contributions are not read yet", "sender", senderID, "zone", zone, "distrib", msg.DistributionID)
+				combinerSendConfirmation(tm, deliveredBy, &CombinerSyncResponse{
+					DistributionID: msg.DistributionID,
+					Zone:           zone,
+					Nonce:          msg.Nonce,
+					Status:         "pending",
+					Message:        contributionsNotRead,
+					Timestamp:      time.Now(),
+				})
+				continue
+			}
+
 			// Persist all incoming edits to CombinerPendingEdits first.
 			var editID int
 			if hdb != nil {
@@ -386,7 +403,7 @@ func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, 
 		lgCombiner.Warn("RFI EDITS: zone not found", "zone", zone, "agent", agentID)
 		return
 	}
-	readContributionsAgain(conf, zd, zone)
+	readContributionsAgain(conf.InternalMp.HsyncDB, zd, "RFI EDITS")
 	req := editsAnswerFor(zd, conf.MpConfig().Identity, zone, nonce)
 	lgCombiner.Debug("RFI EDITS: preparing response", "zone", zone, "agent", agentID, "agents", len(req.AgentRecords))
 	if req.Message == editsNotLoaded {
@@ -423,26 +440,45 @@ func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, 
 // carries none: an empty map would read as the agent's own state.
 // readContributionsAgain reads the zone's stored contributions again, as the
 // operator's reapply does (CombinerReapplyContributions), when the read at
-// the zone's start failed: nothing else reads them again, and until they
-// are read every agent's own read of the zone stays not done. Only once the
-// zone has loaded: before, the read at its first load is still to come. A
-// read that fails again is tried at the next request.
-func readContributionsAgain(conf *Config, zd *MPZoneData, zone string) {
-	hdb := conf.InternalMp.HsyncDB
-	if hdb == nil || !zd.Ready {
-		return
-	}
+// the zone's start failed, and says whether they are read: until they are,
+// every agent's own read of the zone stays not done, and the zone takes no
+// update (contributionsMayChange). Asked by an agent's RFI EDITS and by an
+// update (asker). Only once the zone has loaded: before, the read at its
+// first load is still to come. A read that fails again is tried at the
+// next ask.
+func readContributionsAgain(hdb *HsyncDB, zd *MPZoneData, asker string) bool {
 	zd.Lock()
 	read := zd.MP != nil && zd.MP.ContributionsRead
 	zd.Unlock()
-	if read {
-		return
+	if read || hdb == nil || !zd.Ready {
+		return read
 	}
-	if _, err := CombinerReapplyContributions(dns.Fqdn(zone), hdb); err != nil {
-		lgCombiner.Warn("RFI EDITS: the zone's stored contributions could not be read again", "zone", zone, "err", err)
-		return
+	if _, err := CombinerReapplyContributions(zd.ZoneName, hdb); err != nil {
+		lgCombiner.Warn(asker+": the zone's stored contributions could not be read again", "zone", zd.ZoneName, "err", err)
+		return false
 	}
-	lgCombiner.Info("RFI EDITS: the zone's stored contributions, not read at its start, are read now", "zone", zone)
+	lgCombiner.Info(asker+": the zone's stored contributions, not read at its start, are read now", "zone", zd.ZoneName)
+	return true
+}
+
+// contributionsNotRead is the combiner's PENDING to an update for a zone
+// whose stored contributions are not read yet (contributionsMayChange).
+const contributionsNotRead = "the zone's stored contributions are not read yet; the update is to be sent again"
+
+// contributionsMayChange says whether the zone's contributions may change
+// now: it keeps none in the store (no PersistContributions), or its stored
+// ones are read (ContributionsRead). Until they are, the zone holds at most
+// part of them. A save would replace the sender's stored rows with that
+// part, and an update that changes nothing in memory would be confirmed
+// without being saved. So nothing changes before the read, and a sender's
+// update is answered PENDING, not refused: its reliable queue keeps it and
+// sends it again (settleQueuedMessage), where a refusal would close it for
+// good. A zone whose read at its start failed is read again first.
+func (zd *MPZoneData) contributionsMayChange(hdb *HsyncDB, asker string) bool {
+	zd.Lock()
+	unread := zd.MP != nil && zd.MP.PersistContributions != nil && !zd.MP.ContributionsRead
+	zd.Unlock()
+	return !unread || readContributionsAgain(hdb, zd, asker)
 }
 
 func editsAnswerFor(zd *MPZoneData, self, zone, nonce string) *PeerEditsRequest {

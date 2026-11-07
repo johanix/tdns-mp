@@ -441,6 +441,15 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		return refusal
 	}
 
+	// Nothing changes before the zone's stored contributions are read, and
+	// the update is left with its sender (contributionsMayChange).
+	if !mpzd.contributionsMayChange(hdb, "update") {
+		lgCombiner.Info("update left with its sender: the zone's stored contributions are not read yet", "sender", req.SenderID, "zone", zonename, "distrib", req.DistributionID)
+		resp.Status = "pending"
+		resp.Message = contributionsNotRead
+		return resp
+	}
+
 	policy := mpzd.getEditPolicy()
 
 	if len(req.Operations) > 0 {

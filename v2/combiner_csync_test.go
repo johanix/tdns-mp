@@ -66,6 +66,7 @@ func csyncCombinerZone(t *testing.T, name string, signed, signer bool) (*MPZoneD
 	mpzd.MP.PersistContributions = func(zone, sender string, contribs map[string]map[uint16]core.RRset) error {
 		return SaveContributions(hdb, zone, sender, contribs)
 	}
+	mpzd.MP.ContributionsRead = true // its store, empty, is read
 	mpzd.snapshotUpstreamData(mpzd.ZoneData)
 	return mpzd, hdb
 }
