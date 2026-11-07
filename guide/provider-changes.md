@@ -313,8 +313,7 @@ On this build the agents also refuse every edit whose
 steps tdns-mp does not carry out yet (`step-missing`,
 `not-built`): a role taken away (section 4), a server role
 (3.4), a move into `signers=` (3.4, 5.1), and a change of
-an upstream, of `nsmgmt`, `parentsync`, `pubkey` or
-`pubcds`. So:
+an upstream, of `parentsync`, `pubkey` or `pubcds`. So:
 
 - a removal is refused. The owner keeps the provider's NS
   records in its own NS RRset and at the parent;
@@ -323,6 +322,24 @@ an upstream, of `nsmgmt`, `parentsync`, `pubkey` or
 
 A change of `auditors=` or `suffix`, and an HSYNC3 record
 added or removed for a provider with no role, are agreed.
+
+A change of `nsmgmt` is agreed too, and takes effect at the
+leader's step for it, not when the owner's edit arrives:
+
+- To the owner: every combiner stops applying the agents' NS
+  records and serves the owner's NS RRset, every agent drops
+  the NS records from its data, and the combiners drop what
+  they stored. Have the NS RRset the zone is to have in place
+  before the edit.
+- To the agents: nothing that was stored comes back. Each
+  provider's operator adds its NS records again (3.5).
+
+Under `nsmgmt="owner"` the owner's NS RRset may name a
+provider's nameservers only once that provider's role is
+done. Every agent warns about one that does, by the names
+each provider sets in `multi-provider.local.nameservers`: in
+`tdns-mpcli agent parentsync status`, and once an hour in its
+log. A provider with no names configured is not checked.
 
 The refusal shows in `tdns-mpcli agent parentsync status`
 (`instructions: 42 refused: ...`), in `zone mplist` and in

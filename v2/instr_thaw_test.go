@@ -721,11 +721,11 @@ func TestAMemberActivatesOnAVotingMemberUnderV(t *testing.T) {
 
 // A member behind the thaw's from-serial, holding both, moves straight to
 // the target. It judges the thaw's own pair, not its own active serial
-// against the target: 40 to 42 changes nsmgmt and is refused, 41 to 42 is
-// not.
+// against the target: 40 to 42 changes parentsync and is refused, 41 to 42
+// is not.
 func TestAMemberThatMovesStraightJudgesTheThawsPairNotItsOwn(t *testing.T) {
 	r := newThawRig(t, "straight.thaw.example.", roleB)
-	old := jAt(t, 40, `servers="a,b" nsmgmt="owner" suffix="o"`, freezeRecords...)
+	old := jAt(t, 40, `servers="a,b" nsmgmt="agent" parentsync="agent" suffix="o"`, freezeRecords...)
 	if err := r.store.Forget(r.zone); err != nil {
 		t.Fatal(err)
 	}

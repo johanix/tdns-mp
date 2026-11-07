@@ -222,7 +222,6 @@ func TestAMoveIntoSignersIsRefusedUntilItsStepExists(t *testing.T) {
 func TestAKindWithoutItsStepsIsRefused(t *testing.T) {
 	from := jAt(t, 41, jServers2, jAlpha, jBeta, jCharlie)
 	for _, c := range []struct{ param, reason string }{
-		{jServers2 + ` nsmgmt="agent"`, "changes nsmgmt"},
 		{jServers2 + ` parentsync="agent"`, "changes parentsync"},
 		{jServers2 + ` pubkey`, "changes pubkey"},
 		{jServers2 + ` pubcds`, "changes pubcds"},
@@ -232,6 +231,8 @@ func TestAKindWithoutItsStepsIsRefused(t *testing.T) {
 		wantRefusals(t, c.reason, judgeTransition(from, to), Refusal{RefusedNotBuilt, c.reason + ": not built yet"})
 		wantRefusals(t, c.reason+", once built", judge(from, to, allKinds, allKinds))
 	}
+	// nsmgmt: its step is built (S19)
+	wantRefusals(t, "nsmgmt", judgeTransition(from, jAt(t, 42, jServers2+` nsmgmt="agent"`, jAlpha, jBeta, jCharlie)))
 	// the auditors and the suffix: nothing to carry out (design 5.6)
 	wantRefusals(t, "auditors and suffix", judgeTransition(from, jAt(t, 42, jServers2+` auditors="charlie" suffix="mp"`, jAlpha, jBeta, jCharlie)))
 }

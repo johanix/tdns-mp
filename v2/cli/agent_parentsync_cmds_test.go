@@ -389,6 +389,7 @@ func TestParentSyncStatusPrintsEveryPartOfTheReport(t *testing.T) {
 			{Identity: "agent.bravo.example.", State: "OPERATIONAL", Transport: "DNS", Operational: true},
 			{Identity: "agent.charlie\x1b]0;retitled\x07.example.", State: "NEEDED", Transport: "-", Operational: false},
 		},
+		OwnersNS: []string{"the owner's NS RRset names the servers of agent.delta.example., whose role is not done"},
 	}
 	agent := func(report tdnsmp.ParentSyncStatus) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -418,6 +419,7 @@ func TestParentSyncStatusPrintsEveryPartOfTheReport(t *testing.T) {
 		"  zone:           signed",
 		"  parent zone:    parentsync.example.",
 		"  scheme in use:  UPDATE",
+		"  warning:        the owner's NS RRset names the servers of agent.delta.example., whose role is not done",
 		"Sync schemes the parent advertises:",
 		"  Scheme    Type    Port   Target",
 		"  UPDATE    ANY     5354   updates.parentsync.example.",

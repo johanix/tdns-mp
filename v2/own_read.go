@@ -346,12 +346,12 @@ func applyOwnRead(zd *MPZoneData, a *ownReadAnswer, zdr *ZoneDataRepo, self Agen
 		lgEngine.Info("the combiner has not loaded the zone's stored contributions; this agent's own state is not read", "zone", a.zone)
 		return
 	case editsLoaded:
-		applyEditsToSDE(zd.ZoneData, a.resp.AgentRecords, zdr, self, a.sentAt)
+		applyEditsToSDE(zd.ZoneData, a.resp.AgentRecords, a.resp.Acting, zdr, self, a.sentAt)
 		zdr.markOwnState(a.zone, true, "")
 	default:
 		applied := editsRecordCount(a.resp.AgentRecords) > 0 && !(a.reread && zdr.olderApplied[a.zone])
 		if applied {
-			applyEditsToSDE(zd.ZoneData, a.resp.AgentRecords, zdr, self, a.sentAt)
+			applyEditsToSDE(zd.ZoneData, a.resp.AgentRecords, a.resp.Acting, zdr, self, a.sentAt)
 			if zdr.olderApplied == nil {
 				zdr.olderApplied = map[ZoneName]bool{}
 			}
