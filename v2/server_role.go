@@ -164,21 +164,20 @@ func noProviderSigns(in *Instructions, id string) bool {
 // servingFromUpstream is the transfer confirmation's look at this provider's
 // nameservers: the SOA serial at min or later, signed by its upstream's keys
 // (servingChainOK); where no provider signs, the serial alone. An upstream or
-// a signer named whose keys have not reached this agent is waited for.
-func (conf *Config) servingFromUpstream(ctx context.Context, zone string, min uint32) (uint32, error) {
-	mp := conf.MpConfig()
+// a signer named whose keys have not reached this agent is waited for. mp is
+// the config the check read, never nil.
+func (conf *Config) servingFromUpstream(ctx context.Context, mp *MultiProviderConf, zone string, min uint32) (uint32, error) {
 	in := instructionsFor(ZoneName(zone))
 	if noProviderSigns(in, mp.Identity) {
 		return servingSerialOK(ctx, zone, mp.Local.Nameservers, min)
 	}
-	return servingChainOK(ctx, zone, mp.Local.Nameservers, conf.signerKeys(zone, upstreamOf(in, mp.Identity)), min, time.Now())
+	return servingChainOK(ctx, zone, mp.Local.Nameservers, conf.signerKeys(zone, mp.Identity, upstreamOf(in, mp.Identity)), min, time.Now())
 }
 
-// signerKeys are the DNSKEYs the providers ids publish, as this agent holds
-// them: its own provider's from its signer, another's as that provider's
-// agent distributed them.
-func (conf *Config) signerKeys(zone string, ids []string) []dns.RR {
-	self := conf.MpConfig().Identity
+// signerKeys are the DNSKEYs the providers ids publish, as this agent (self)
+// holds them: its own provider's from its signer, another's as that
+// provider's agent distributed them.
+func (conf *Config) signerKeys(zone, self string, ids []string) []dns.RR {
 	var keys []dns.RR
 	for _, id := range ids {
 		if core.EqualNames(id, self) {
@@ -288,12 +287,22 @@ func (b *transferBook) held(zone, name string) bool {
 // zone's as this agent holds it, signed by its upstream's keys where a
 // provider signs. The outcome is logged when it changes.
 func (conf *Config) checkTransfer(zone, name string) {
+	b := &conf.InternalMp.transfers
+	mp := conf.MpConfig()
+	if mp == nil {
+		// a reload with no multi-provider block since the check was
+		// started: nothing is checked, and the step's next look starts one
+		b.mu.Lock()
+		if c := b.zones[canonicalName(zone)]; c != nil && c.step == name {
+			c.running = false
+		}
+		b.mu.Unlock()
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), transferCheckTimeout)
 	defer cancel()
-	mp := conf.MpConfig()
 	min := copySerial(zone)
-	served, err := conf.servingFromUpstream(ctx, zone, min)
-	b := &conf.InternalMp.transfers
+	served, err := conf.servingFromUpstream(ctx, mp, zone, min)
 	b.mu.Lock()
 	c := b.zones[canonicalName(zone)]
 	if c == nil || c.step != name {
