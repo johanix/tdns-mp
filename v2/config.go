@@ -146,6 +146,8 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 	if hdb == nil {
 		return
 	}
+	// before the router delivers any REPLACE
+	loadCombinerReplaceOrigins(hdb)
 	if conf.InternalMp.onFirstLoadRegistered == nil {
 		conf.InternalMp.onFirstLoadRegistered = make(map[string]bool)
 	}
