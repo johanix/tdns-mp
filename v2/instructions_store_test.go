@@ -243,6 +243,132 @@ func TestACopyWithNoReadingIsAnOwnerError(t *testing.T) {
 	}
 }
 
+// An HSYNCPARAM without serial= that gives no role is a benign owner error
+// (the project owner, 2026-11-06). After a serial that gives no role it is
+// reported in the copy's line and holds nothing; at a first load nothing is
+// kept. Giving a role, or after a serial that gives one, it is the owner error
+// it was.
+func TestANoSerialCopyThatGivesNoRoleHoldsNothing(t *testing.T) {
+	noRoles := readOf(t, withParam(`serial="7" nsmgmt="agent"`)...)
+	read := func(param string) (*Instructions, error) {
+		return ReadInstructions(apexOf(t, append(slices.Clone(instrBase[:3]), `3600 IN HSYNCPARAM `+param)...))
+	}
+	in, err := read(`nsmgmt="agent"`)
+	if !errors.Is(err, errNoSerial) || in != nil || err.Error() != "HSYNCPARAM without serial=" {
+		t.Fatalf("reading %v, error %v; want the owner error %v", in, err, errNoSerial)
+	}
+
+	s := newStore(t)
+	noteKnown(t, s, storeZone, noRoles)
+	s.Note(storeZone, in, err)
+	if st := status(t, s, storeZone); st.Phase != PhaseSteady || st.OwnerError != "" || st.CopyError != "HSYNCPARAM without serial=" || st.Active.Serial != 7 {
+		t.Errorf("after a serial that gives no role: phase %s error %q copy error %q active %s", st.Phase, st.OwnerError, st.CopyError, serialOf(st.Active))
+	}
+	if why := s.frozen(storeZone); len(why) > 0 {
+		t.Errorf("frozen: %v", why)
+	}
+	first := newStore(t)
+	first.Note(storeZone, in, err)
+	if first.keeps(storeZone) {
+		t.Errorf("at a first load: serials kept: %+v", first.Status(storeZone))
+	}
+
+	withRole, roleErr := read(`servers="alpha"`)
+	given := newStore(t)
+	noteKnown(t, given, storeZone, noRoles)
+	given.Note(storeZone, withRole, roleErr)
+	if st := status(t, given, storeZone); st.Phase != PhaseOwnerError || st.OwnerError != "HSYNCPARAM without serial=" {
+		t.Errorf("a copy that gives a role: phase %s error %q", st.Phase, st.OwnerError)
+	}
+	// the roles dropped, serial= still missing: the hold that copy started
+	// ends, as the copy that gives no role holds nothing
+	given.Note(storeZone, in, err)
+	if st := status(t, given, storeZone); st.Phase != PhaseSteady || st.OwnerError != "" || st.CopyError != "HSYNCPARAM without serial=" {
+		t.Errorf("the roles dropped after a copy that gave one: phase %s error %q copy error %q", st.Phase, st.OwnerError, st.CopyError)
+	}
+	if why := given.frozen(storeZone); len(why) > 0 {
+		t.Errorf("the roles dropped after a copy that gave one: frozen: %v", why)
+	}
+	if line := status(t, given, storeZone).Line(); !strings.Contains(line, "copy: HSYNCPARAM without serial=, nothing held") || strings.Contains(line, "copy 0") {
+		t.Errorf("the status line: %q, want the copy's error and that nothing is held", line)
+	}
+	// the copy that gave a role came at a first load: once it gives none,
+	// nothing is kept, as at a first load of it
+	firstRole := newStore(t)
+	firstRole.Note(storeZone, withRole, roleErr)
+	if !firstRole.keeps(storeZone) {
+		t.Fatal("a first load of a copy without serial= that gives a role: nothing kept")
+	}
+	firstRole.Note(storeZone, in, err)
+	if firstRole.keeps(storeZone) {
+		t.Errorf("the roles dropped after a first load that gave one: kept, %+v", firstRole.Status(storeZone))
+	}
+	// a conflict's hold, its message overwritten by a copy without serial=
+	// that gives a role, ends only at a serial above it
+	conflict := newStore(t)
+	noteKnown(t, conflict, storeZone, noRoles)
+	conflict.Note(storeZone, readOf(t, withParam(`serial="7" nsmgmt="owner"`)...), nil)
+	conflict.Note(storeZone, withRole, roleErr)
+	conflict.Note(storeZone, in, err)
+	if st := status(t, conflict, storeZone); st.Phase != PhaseOwnerError {
+		t.Errorf("a conflict under the message of a copy without serial=: phase %s error %q", st.Phase, st.OwnerError)
+	}
+	// another owner error ends only at a serial above it (design 3.6)
+	other := newStore(t)
+	noteKnown(t, other, storeZone, noRoles)
+	other.Note(storeZone, nil, errors.New("two HSYNCPARAM records"))
+	other.Note(storeZone, in, err)
+	if st := status(t, other, storeZone); st.Phase != PhaseOwnerError || st.OwnerError != "two HSYNCPARAM records" {
+		t.Errorf("a copy that gives no role after another owner error: phase %s error %q", st.Phase, st.OwnerError)
+	}
+	// and so does one whose message a copy without serial= that gives a role
+	// overwrote: the hold is the first error's (ErrorFrom)
+	under := newStore(t)
+	noteKnown(t, under, storeZone, noRoles)
+	under.Note(storeZone, nil, errors.New("two HSYNCPARAM records"))
+	under.Note(storeZone, withRole, roleErr)
+	under.Note(storeZone, in, err)
+	if st := status(t, under, storeZone); st.Phase != PhaseOwnerError {
+		t.Errorf("another owner error under the message of a copy without serial=: phase %s error %q", st.Phase, st.OwnerError)
+	}
+	held := newStore(t)
+	noteKnown(t, held, storeZone, at(t, 7, "alpha,beta"))
+	held.Note(storeZone, in, err)
+	if st := status(t, held, storeZone); st.Phase != PhaseOwnerError || st.OwnerError != "HSYNCPARAM without serial=" {
+		t.Errorf("after a serial that gives roles: phase %s error %q", st.Phase, st.OwnerError)
+	}
+}
+
+// The project owner's ruling (a), 2026-11-06: under an active serial that
+// gives no role, with a newer serial held that gives roles, a copy that
+// loses serial= and its roles is benign, and the transition to the serial
+// held goes on: it is made active as ever. Once it is, the same copy is the
+// owner error, as the active serial gives roles.
+func TestABenignCopyLeavesATransitionToRolesGoingOn(t *testing.T) {
+	noRoles := readOf(t, withParam(`serial="7" nsmgmt="agent"`)...)
+	roles := at(t, 8, "alpha,beta")
+	in, err := ReadInstructions(apexOf(t, append(slices.Clone(instrBase[:3]), `3600 IN HSYNCPARAM nsmgmt="agent"`)...))
+	s := newStore(t)
+	noteKnown(t, s, storeZone, noRoles)
+	if uerr := s.update(storeZone, func(z *zoneSerials) error {
+		z.Held = append(z.Held, heldSerial{SerialDigest: sd(roles), Reading: roles})
+		return nil
+	}); uerr != nil {
+		t.Fatal(uerr)
+	}
+	s.Note(storeZone, in, err)
+	if st := status(t, s, storeZone); st.OwnerError != "" || st.CopyError != "HSYNCPARAM without serial=" || st.Newest == nil || st.Newest.Serial != 8 {
+		t.Fatalf("the copy under 7 with 8 held: error %q copy error %q newest %s", st.OwnerError, st.CopyError, serialOf(st.Newest))
+	}
+	if aerr := s.Activate(storeZone, Thaw{From: sd(noRoles), To: sd(roles)}); aerr != nil {
+		t.Fatalf("the transition to 8 after the copy: %v", aerr)
+	}
+	s.Note(storeZone, in, err)
+	if st := status(t, s, storeZone); st.Active == nil || st.Active.Serial != 8 || st.OwnerError != "HSYNCPARAM without serial=" {
+		t.Errorf("the same copy under 8, which gives roles: active %s error %q", serialOf(st.Active), st.OwnerError)
+	}
+}
+
 func TestBothRecordsDroppedWithTwoProvidersIsAnOwnerError(t *testing.T) {
 	s := newStore(t)
 	noteKnown(t, s, storeZone, at(t, 7, "alpha,beta"))

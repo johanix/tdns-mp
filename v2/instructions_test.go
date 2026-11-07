@@ -511,6 +511,25 @@ func setApex(t *testing.T, mpzd *MPZoneData, rrtype uint16, records ...string) {
 	mpzd.InstallInitialSnapshot()
 }
 
+// A copy without serial= that gives no role is a benign owner error
+// (decision 107a): mplist and the auditor's check report it apart, as the
+// copy's error that holds nothing, not as the owner error. One that gives a
+// role is the owner error it was.
+func TestMplistReportsABenignNoSerialCopyApart(t *testing.T) {
+	benign := instrTestZone(t, "benign.mplist.example.", append(slices.Clone(instrBase[:3]), `3600 IN HSYNCPARAM nsmgmt="agent"`)...)
+	if info := MPZoneInfoFromMPZoneData(benign); info.OwnerError != "" || info.CopyError != "HSYNCPARAM without serial=" {
+		t.Errorf("no role given: owner error %q copy error %q", info.OwnerError, info.CopyError)
+	}
+	errs := checkMPZoneHSYNCConfig(benign)
+	if len(errs) == 0 || errs[len(errs)-1] != "a benign owner error, nothing held: HSYNCPARAM without serial=" || slices.Contains(errs, "HSYNCPARAM without serial=") {
+		t.Errorf("the auditor's check: %q", errs)
+	}
+	given := instrTestZone(t, "given.mplist.example.", append(slices.Clone(instrBase[:3]), `3600 IN HSYNCPARAM servers="alpha"`)...)
+	if info := MPZoneInfoFromMPZoneData(given); info.OwnerError != "HSYNCPARAM without serial=" || info.CopyError != "" {
+		t.Errorf("a role given: owner error %q copy error %q", info.OwnerError, info.CopyError)
+	}
+}
+
 func TestMplistShowsTheCopysSerialAndDigest(t *testing.T) {
 	want := digestOf(t, instrBase...)
 	info := MPZoneInfoFromMPZoneData(instrTestZone(t, "list.example.", instrBase...))
