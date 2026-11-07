@@ -79,6 +79,7 @@ func (cs *CombinerState) SetGetPeerAddress(fn func(senderID string) (address str
 type editPolicy struct {
 	ZoneSigned  bool
 	WeAreSigner bool
+	WeHoldKeys  bool  // in KeySigners: its signer takes the other signers' DNSKEYs from this copy before it signs (plan S18b)
 	Leaving     bool  // a signer out of signers= that the step's sets keep signing (plan S13): it applies, and submits no keys
 	NSmgmt      uint8 // core.HsyncNSmgmtOWNER or core.HsyncNSmgmtAGENT
 	ParentSync  uint8 // core.HsyncParentSyncOwner or core.HsyncParentSyncAgent
@@ -111,9 +112,10 @@ func (p *editPolicy) canApply(rrtype uint16) bool {
 		}
 		return true
 	}
-	// Signed zone: must be a signer to apply anything
+	// Signed zone: must be a signer to apply anything, but for a signer on
+	// its way in the other signers' DNSKEYs (plan S18b)
 	if !p.WeAreSigner {
-		return false
+		return p.WeHoldKeys && rrtype == dns.TypeDNSKEY
 	}
 	switch rrtype {
 	case dns.TypeNS:
@@ -172,6 +174,7 @@ func (zd *MPZoneData) getEditPolicy() *editPolicy {
 	if zd.MP != nil && zd.MP.MPdata != nil {
 		p.ZoneSigned = zd.MP.MPdata.ZoneSigned
 		p.WeAreSigner = zd.MP.MPdata.WeAreSigner
+		p.WeHoldKeys = zd.MP.MPdata.WeHoldKeys
 		p.Leaving = zd.MP.MPdata.Leaving
 	}
 	// NSmgmt and ParentSync change only at a step (design 3.3): the sets.

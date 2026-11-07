@@ -347,13 +347,33 @@ func (conf *Config) rolloverInZone(zone string) bool {
 // under way in the zone waits for the parent to trust the key (keyPending):
 // the rollover's DS sync waits for the key, so holding its offers would
 // leave the rollover and the thaw waiting for each other (design 3.1, 6;
-// plan S14).
+// plan S14). Nor as a step of the reconciliation (design 6): a step's own sync
+// waits for the key too (holdForZoneKey comes before the freeze), so a leader
+// that holds a key not published during a joiner's DS step would wait for the
+// step, and the step for it.
 func (conf *Config) offerHeld(ctx context.Context, zone ZoneName) (held bool, why string) {
-	if len(conf.zoneFrozen(string(zone))) > 0 && conf.rolloverInZone(string(zone)) && conf.keyPending(ctx, zone) {
-		lgAgent.Info("the zone's SIG(0) key is offered during the transition: a rollover under way waits for the parent to trust it", "zone", zone)
-		return false, ""
+	if len(conf.zoneFrozen(string(zone))) > 0 {
+		if conf.rolloverInZone(string(zone)) && conf.keyPending(ctx, zone) {
+			lgAgent.Info("the zone's SIG(0) key is offered during the transition: a rollover under way waits for the parent to trust it", "zone", zone)
+			return false, ""
+		}
+		if conf.joinersDSAsked(string(zone)) {
+			lgAgent.Info("the zone's SIG(0) key is published and offered during the transition: a step's own sync waits for it", "zone", zone)
+			return false, ""
+		}
 	}
 	return conf.syncHeld(string(zone), syncOther)
+}
+
+// keyToPublish: this agent leads the zone, and its key's publication in this
+// lead failed or the freeze held it. The key rounds publish it when they may
+// (reofferZoneKey), also for a key the parent trusts, which nothing else would.
+func (conf *Config) keyToPublish(zone ZoneName) bool {
+	if lem := conf.InternalMp.LeaderElectionManager; lem == nil || !lem.IsLeader(zone) {
+		return false
+	}
+	_, unpublished, _ := conf.InternalMp.keyPolls.state(zone)
+	return unpublished
 }
 
 // zoneKeyLine is the status of the zone's SIG(0) key at the leader, for

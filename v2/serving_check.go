@@ -18,6 +18,7 @@ import (
 	"log"
 	"net"
 	"slices"
+	"sync"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -29,16 +30,26 @@ import (
 // with its RRSIGs. A test stands in for it.
 var servingLookup = imrServingLookup
 
-// imrServingLookup finds ns's addresses through the IMR and asks them,
-// without recursion and with DNSSEC OK, for the zone's SOA.
+// servingKeysLookup is servingLookup for the zone's DNSKEY RRset.
+var servingKeysLookup = func(ctx context.Context, zone, ns string) (*core.RRset, error) {
+	return imrServingQuery(ctx, zone, ns, dns.TypeDNSKEY)
+}
+
+// imrServingLookup asks ns for the zone's SOA (imrServingQuery).
 func imrServingLookup(ctx context.Context, zone, ns string) (*core.RRset, error) {
+	return imrServingQuery(ctx, zone, ns, dns.TypeSOA)
+}
+
+// imrServingQuery finds ns's addresses through the IMR and asks them,
+// without recursion and with DNSSEC OK, for the zone's RRset of qtype.
+func imrServingQuery(ctx context.Context, zone, ns string, qtype uint16) (*core.RRset, error) {
 	imr := tdns.Globals.ImrEngine
 	if imr == nil {
 		return nil, errors.New("the IMR is not running")
 	}
 	var addrs []string
-	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		resp, err := imr.ImrQuery(ctx, ns, qtype, dns.ClassINET, nil)
+	for _, addrType := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		resp, err := imr.ImrQuery(ctx, ns, addrType, dns.ClassINET, nil)
 		if err != nil || resp == nil || resp.RRset == nil {
 			continue
 		}
@@ -56,13 +67,13 @@ func imrServingLookup(ctx context.Context, zone, ns string) (*core.RRset, error)
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("the IMR finds no address for %s", ns)
 	}
-	rrset, rcode, _, err := imr.AuthDNSQuery(ctx, zone, dns.TypeSOA, addrs, log.Default(), false)
+	rrset, rcode, _, err := imr.AuthDNSQuery(ctx, zone, qtype, addrs, log.Default(), false)
 	switch {
 	case err != nil:
 		return nil, err
 	case rrset == nil:
 		// NODATA, NXDOMAIN or a referral: no error, and no RRset
-		return nil, fmt.Errorf("no SOA in the answer (%s)", dns.RcodeToString[rcode])
+		return nil, fmt.Errorf("no %s in the answer (%s)", dns.TypeToString[qtype], dns.RcodeToString[rcode])
 	}
 	return rrset, nil
 }
@@ -136,4 +147,144 @@ func signedByOneOf(rrset *core.RRset, keys []dns.RR, now time.Time) error {
 		}
 	}
 	return nil
+}
+
+// dnskeyTTLOf is the largest TTL among rrset's DNSKEYs, and whether it holds one.
+func dnskeyTTLOf(rrset *core.RRset) (time.Duration, bool) {
+	var largest time.Duration
+	found := false
+	if rrset != nil {
+		for _, rr := range rrset.RRs {
+			if _, ok := rr.(*dns.DNSKEY); ok {
+				largest, found = max(largest, time.Duration(rr.Header().Ttl)*time.Second), true
+			}
+		}
+	}
+	return largest, found
+}
+
+// largestServedDnskeyTTL is the largest TTL any of the zone's nameservers, by the
+// NS RRset of its copy, serves its DNSKEY RRset with, the servers that served it and
+// those that did not, and why the last of those did not. Each is asked under a bound
+// of its own.
+func largestServedDnskeyTTL(mpzd *MPZoneData) (largest time.Duration, served, silent []string, err error) {
+	rrset, err := mpzd.GetRRset(mpzd.ZoneName, dns.TypeNS)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	if rrset != nil {
+		for _, rr := range rrset.RRs {
+			ns, ok := rr.(*dns.NS)
+			if !ok {
+				continue
+			}
+			ctx, cancel := lookCtx()
+			keys, lookErr := servingKeysLookup(ctx, mpzd.ZoneName, ns.Ns)
+			cancel()
+			ttl, found := dnskeyTTLOf(keys)
+			switch {
+			case lookErr != nil:
+				err = fmt.Errorf("%s: %w", ns.Ns, lookErr)
+			case !found:
+				err = fmt.Errorf("%s serves no DNSKEY for the zone", ns.Ns)
+			default:
+				largest = max(largest, ttl)
+				served = append(served, ns.Ns)
+				continue
+			}
+			silent = append(silent, ns.Ns)
+		}
+	}
+	if len(served) == 0 && err == nil {
+		err = errors.New("the zone's copy names no nameserver")
+	}
+	return largest, served, silent, err
+}
+
+// servedKeysEvery is how often a signer asks a zone it does not sign yet's
+// nameservers what they serve its DNSKEY RRset with.
+const servedKeysEvery = time.Minute
+
+// servedKeysBook is what a signer has seen the nameservers of the zones it does
+// not sign yet serve their DNSKEY RRsets with, by zone. In memory: after a restart
+// it looks again.
+type servedKeysBook struct {
+	mu    sync.Mutex
+	zones map[string]*servedKeysLook
+	// start runs a look; nil: in a goroutine of its own. A test runs it in place.
+	start func(look func())
+}
+
+type servedKeysLook struct {
+	ttl     time.Duration   // the largest seen: a cache may hold what was served before
+	served  map[string]bool // the servers seen serving it: one gone quiet has served what it served
+	whole   bool            // every server the copy names has been seen serving it
+	looked  bool            // a look has finished since the start
+	said    bool            // that it is not whole, once
+	at      time.Time
+	running bool
+}
+
+// largest is the largest TTL seen for the zone, whether every nameserver its copy
+// names has been seen serving the RRset, and whether a look has finished since the
+// start. It never waits for a look: it runs under the key machine's lock.
+func (b *servedKeysBook) largest(mpzd *MPZoneData) (ttl time.Duration, whole, looked bool) {
+	zone := mpzd.ZoneName
+	key := canonicalName(zone)
+	b.mu.Lock()
+	if b.zones == nil {
+		b.zones = map[string]*servedKeysLook{}
+	}
+	l := b.zones[key]
+	if l == nil {
+		l = &servedKeysLook{}
+		b.zones[key] = l
+	}
+	due := !l.running && time.Since(l.at) >= servedKeysEvery
+	if due {
+		l.running = true
+	}
+	start := b.start
+	b.mu.Unlock()
+	if due {
+		look := func() {
+			seen, served, silent, err := largestServedDnskeyTTL(mpzd)
+			b.mu.Lock()
+			l.running, l.at, l.looked = false, time.Now(), true
+			before, wasWhole := l.ttl, l.whole
+			l.ttl = max(l.ttl, seen)
+			if l.served == nil {
+				l.served = map[string]bool{}
+			}
+			for _, ns := range served {
+				l.served[canonicalName(ns)] = true
+			}
+			missing := slices.DeleteFunc(silent, func(ns string) bool { return l.served[canonicalName(ns)] })
+			// a look that could list no server says nothing of them all
+			l.whole = len(served)+len(silent) > 0 && len(l.served) > 0 && len(missing) == 0
+			grew, warn := l.whole && (!wasWhole || l.ttl > before), !l.whole && !l.said
+			l.said = l.said || warn
+			now := l.ttl
+			b.mu.Unlock()
+			switch {
+			case grew:
+				lgSigner.Info("the zone's new keys wait the TTL its servers serve its DNSKEY RRset with", "zone", zone, "ttl", now)
+			case warn:
+				lgSigner.Warn("not every server of the zone has served its DNSKEY RRset; its new keys wait at least its copy's TTL", "zone", zone, "silent", missing, "err", err)
+			}
+		}
+		if start != nil {
+			start(look)
+		} else {
+			go look()
+		}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return l.ttl, l.whole, l.looked
+}
+
+// lookCtx is one look's context, with its bound.
+func lookCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), transferCheckTimeout)
 }

@@ -58,6 +58,9 @@ const (
 	// TTL, so no validator holds a DS RRset with it any more (the withdrawal
 	// wait of an algorithm rollover, T10b).
 	EvDSExpired KeyEvent = "ds-expired"
+	// EvStartOver is E16: this provider's keys-step of its joining began, and
+	// nothing says this key has propagated since (plan S18b, reading 20).
+	EvStartOver KeyEvent = "start-over"
 )
 
 // The states, as the keystore names them. tdns's own names are reused where
@@ -142,9 +145,11 @@ type ZoneView struct {
 	Pending  map[string]bool
 	Rejected map[string]bool
 	// PropagationDelay plus ServedDnskeyTTL is the wait behind E5; Margin
-	// the wait behind E8.
+	// the wait behind E8. ServedTTLUnknown: nothing is known of the TTL yet,
+	// and E5 waits for it.
 	PropagationDelay time.Duration
 	ServedDnskeyTTL  time.Duration
+	ServedTTLUnknown bool
 	Margin           time.Duration
 	// ActiveOfRoleAndAlg reports another active key of the key's role and
 	// algorithm on this provider. RolloverRequested says the promotion is a
@@ -280,7 +285,7 @@ var KeyLifecycleTable = []Transition{
 	{"T7'", KeyStatePublished, CmdWithdraw, nil, KeyStateMpremove, "a served key given up on: the removal distributed"},
 	{"T7''", KeyStateStandby, CmdWithdraw, nil, KeyStateMpremove, "as T7'"},
 	{"T8", KeyStatePublished, EvPropagated, func(k KeyView, z ZoneView) bool {
-		return !k.PublishedAt.IsZero() && !z.Now.Before(k.PublishedAt.Add(z.PropagationDelay+z.ServedDnskeyTTL))
+		return !z.ServedTTLUnknown && !k.PublishedAt.IsZero() && !z.Now.Before(k.PublishedAt.Add(z.PropagationDelay+z.ServedDnskeyTTL))
 	}, KeyStateStandby, "a KSK's ds=1 puts its DS into the zone's DS set"},
 	{"T9", KeyStateStandby, EvPromote, func(k KeyView, z ZoneView) bool {
 		return (!z.ActiveOfRoleAndAlg || z.RolloverRequested || z.AlgRollInFlight) && !distributionIncomplete(z) && parentDSWaitMet(k, z)
@@ -314,6 +319,8 @@ var KeyLifecycleTable = []Transition{
 		}
 		return z.OldAlgKSKLeaving || (!z.PolicyAlgActiveSince.IsZero() && !z.Now.Before(z.PolicyAlgActiveSince.Add(z.SigLifetime)))
 	}, KeyStateRetired, "the old algorithm's ZSK leaves last (O4): once a ZSK of the policy's algorithm signs and no KSK of another algorithm than the policy's does; after a combined roll that is the old KSK's retirement (T10b: its DS gone for the DS TTL), in a ZSK-only roll a signature lifetime after the new ZSK began signing (the drain of tdns's relaxed roll); it retires as on T10"},
+	{"T20", KeyStateActive, EvStartOver, nil, KeyStateMpdist, "a joiner's key not published since its keys' step began (made by tdns as it acted by its own copy, or left from an earlier time) starts over: the distribution again, ds=0, and T3, T8 and T9 say what they say of any key; it goes on signing"},
+	{"T20'", KeyStateStandby, EvStartOver, nil, KeyStateMpdist, "as T20"},
 }
 
 // Next applies the table to one key: the state after the event, and whether

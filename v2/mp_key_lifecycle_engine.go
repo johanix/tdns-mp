@@ -45,7 +45,7 @@ func (w *signerWire) mpzd(zone string) *MPZoneData {
 
 // OtherSigners: the providers other than this one whose confirmations a
 // key's distribution expects (KeyConfirmers, plan S11). Nothing when this
-// provider does not sign the zone: the machine must not run there
+// provider has no keys in the zone: the machine must not run there
 // (IsSigner), and never waits on itself.
 func (w *signerWire) OtherSigners(zone string) []string {
 	self, r, signs := w.sets(zone)
@@ -56,7 +56,7 @@ func (w *signerWire) OtherSigners(zone string) []string {
 }
 
 // DSSigners: the providers other than this one whose KSKs have a DS
-// (plan S11); nothing when this provider does not sign the zone.
+// (plan S11); nothing when this provider has no keys in the zone.
 func (w *signerWire) DSSigners(zone string) []string {
 	self, r, signs := w.sets(zone)
 	if !signs {
@@ -65,14 +65,16 @@ func (w *signerWire) DSSigners(zone string) []string {
 	return othersIn(r.DSSigners, self)
 }
 
-// IsSigner reports whether this provider signs the zone (Signing).
+// IsSigner reports whether this provider's keys are published in the zone
+// (KeySigners, plan S18b): the machine runs from its DNSKEY step on, well
+// before it enters Signing and serves its own signatures.
 func (w *signerWire) IsSigner(zone string) bool {
 	_, _, signs := w.sets(zone)
 	return signs
 }
 
 // sets are this provider's label in the zone, the zone's sets
-// (signerSets), and whether this provider signs it.
+// (signerSets), and whether its keys are published there.
 func (w *signerWire) sets(zone string) (self string, r Roles, signs bool) {
 	mpzd := w.mpzd(zone)
 	if mpzd == nil {
@@ -83,7 +85,7 @@ func (w *signerWire) sets(zone string) (self string, r Roles, signs bool) {
 		mp = &MultiProviderConf{}
 	}
 	self, r = signerSets(mpzd, mp)
-	return self, r, self != "" && has(r.Signing, self)
+	return self, r, self != "" && has(r.KeySigners, self)
 }
 
 // signerSets are the sets the signer acts by for the zone, and this
@@ -149,10 +151,10 @@ func othersIn(set []Provider, self string) []string {
 
 // otherSignerLabels: the providers other than this one whose DNSKEYs are
 // published and whose foreign rows are kept (KeySigners, plan S11), and
-// whether this provider signs the zone at all.
+// whether this provider's keys are published there too.
 func otherSignerLabels(mpzd *MPZoneData, mp *MultiProviderConf) ([]string, bool) {
 	self, r := signerSets(mpzd, mp)
-	if self == "" || !has(r.Signing, self) {
+	if self == "" || !has(r.KeySigners, self) {
 		return nil, false
 	}
 	return othersIn(r.KeySigners, self), true
@@ -265,19 +267,45 @@ func (w *signerWire) Resign(zone string) {
 	sendResignRequest(w.conf.Config.Internal.ResignQ, dns.Fqdn(zone))
 }
 
-func (w *signerWire) ServedDnskeyTTL(zone string) time.Duration {
-	if mpzd := w.mpzd(zone); mpzd != nil {
-		if rrset, err := mpzd.GetRRset(mpzd.ZoneName, dns.TypeDNSKEY); err == nil && rrset != nil && len(rrset.RRs) > 0 {
-			return time.Duration(rrset.RRs[0].Header().Ttl) * time.Second
+// ServedDnskeyTTL: a provider that serves serves the RRset itself, with its own
+// copy's TTL. One that does not, signing or not, serves nobody a set to wait out:
+// what caches hold is what the zone's servers served. Its copy's TTL is the data's, and
+// a signer's ceiling can have it served lower; its policy says what it will serve
+// itself, and a signer beside it can serve longer. So it waits the largest TTL the
+// zone's servers were seen serving (servedKeysBook). Its copy's TTL is the floor
+// until every server has been seen: one that was not may serve above the others.
+// Until a first look since the start has finished nothing is known, and the key
+// waits for it.
+func (w *signerWire) ServedDnskeyTTL(zone string) (time.Duration, bool) {
+	mpzd := w.mpzd(zone)
+	if mpzd == nil {
+		return tdns.DefaultDnskeyTTL, true
+	}
+	own := tdns.DefaultDnskeyTTL
+	if rrset, err := mpzd.GetRRset(mpzd.ZoneName, dns.TypeDNSKEY); err == nil {
+		if ttl, ok := dnskeyTTLOf(rrset); ok {
+			own = ttl
 		}
 	}
-	return tdns.DefaultDnskeyTTL
+	if self, r, _ := w.sets(zone); self != "" && !has(r.Servers, self) {
+		ttl, whole, looked := w.conf.InternalMp.servedKeys.largest(mpzd)
+		switch {
+		case !looked:
+			return own, false
+		case whole:
+			return ttl, true
+		}
+		return max(ttl, own), true
+	}
+	return own, true
 }
 
 // KeysChanged: a fresh inventory to every agent, on every column change,
 // not only a state change (design §4.1, arrow 2).
 func (w *signerWire) KeysChanged(zone string) {
 	go pushKeystateInventoryToAllAgents(w.conf, dns.Fqdn(zone))
+	// a provider that signs at its naming starts once its first keys are there
+	w.conf.askSignerRole(dns.Fqdn(zone))
 	// and the CDS follows a ds column change the served DNSKEY RRset does
 	// not show (arrow 1): tdns's DS engine is woken
 	if kdb := w.conf.Config.Internal.KeyDB; kdb != nil {
@@ -285,6 +313,21 @@ func (w *signerWire) KeysChanged(zone string) {
 			kdb.KeysChanged(zd)
 		}
 	}
+}
+
+// JoiningSince: the hand-over held says its keys-step, and when it was taken.
+func (w *signerWire) JoiningSince(zone string) (time.Time, bool) {
+	held, ok := actingHeld.Load().get(dns.Fqdn(zone))
+	if !ok || !held.handover.Joining {
+		return time.Time{}, false
+	}
+	return held.since, true
+}
+
+// SignsAtNaming: Signing names this provider, and Servers does not.
+func (w *signerWire) SignsAtNaming(zone string) bool {
+	self, r, _ := w.sets(zone)
+	return self != "" && has(r.Signing, self) && !has(r.Servers, self)
 }
 
 func (w *signerWire) Report(zone string, keyid uint16, what string) {
@@ -588,7 +631,8 @@ func (e *KeyLifecycleEngine) TakeConfiguredZones() {
 	}
 	// A configured zone is taken once it is loaded with its DNSSEC policy
 	// bound, which happens after the engines start (the policy binds on
-	// the zone's first load); until then it waits, and Run asks again on
+	// the zone's first load, or for one that does not sign yet at its DNSKEY
+	// step: signerRoleTurn); until then it waits, and Run asks again on
 	// every tick. A zone that is not multi-provider is refused, said once,
 	// and looked at again on every tick: the option may come to it later.
 	e.mu.Lock()
