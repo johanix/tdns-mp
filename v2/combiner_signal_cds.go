@@ -82,7 +82,9 @@ func (mpzd *MPZoneData) dsbootWanted(by string) map[string]map[uint16][]dns.RR {
 // what the sets handed and the served apex say: called after whatever can
 // change them, a hand-over, an update, a refresh or a first load, and a no-op
 // when they are already so. Handed nothing, the combiner leaves them as they
-// are (rule 5), and a zone that has not loaded says nothing either way. A
+// are (rule 5); handed no instructions, the end of the zone's multi-provider
+// service, it withdraws them (handedNone). A zone that has not loaded says
+// nothing either way. A
 // provider zone that has not loaded waits for its own first load
 // (serveDsbootNamesAtFirstLoad). A failure is kept, and the combiner tries
 // again every minute (syncOwedDsbootNames): an update's data is held and
@@ -93,11 +95,15 @@ func (mpzd *MPZoneData) syncDsbootNames() (err error) {
 	if GetProviderZoneRRtypes(mpzd.ZoneName) != nil || !mpzd.HasPublishedData() {
 		return nil
 	}
-	held, ok := actingHeld.Load().get(mpzd.ZoneName)
-	if !ok {
+	store := actingHeld.Load()
+	held, ok := store.get(mpzd.ZoneName)
+	want := map[string]map[uint16][]dns.RR{}
+	switch {
+	case ok:
+		want = mpzd.dsbootWanted(held.by)
+	case !store.handedNone(mpzd.ZoneName):
 		return nil
 	}
-	want := mpzd.dsbootWanted(held.by)
 	prefix := dsbootOwnerPrefix(mpzd.ZoneName)
 	byProvider := map[string][]string{}
 	for owner := range want {

@@ -39,6 +39,9 @@ type actingStore struct {
 	owed  map[string]bool // zones whose combine by the hand-over held failed
 	// zones whose _dsboot names the last sync left behind, by key: their names
 	dsbootOwed map[string]string
+	// zones whose agent handed no instructions since the last hand-over of
+	// some, by key: their _dsboot names go (handedNone). In memory only.
+	none map[string]bool
 }
 
 type heldHandover struct {
@@ -240,6 +243,10 @@ func (s *actingStore) take(h *ActingHandover, by string) (prev *ActingHandover, 
 		}
 	}
 	if in == nil {
+		if s.none == nil {
+			s.none = map[string]bool{}
+		}
+		s.none[key] = true
 		if prev == nil {
 			return nil, false, nil
 		}
@@ -270,7 +277,20 @@ func (s *actingStore) take(h *ActingHandover, by string) (prev *ActingHandover, 
 		}
 	}
 	s.zones[key] = &heldHandover{handover: &stored, reading: in, by: by, since: now}
+	delete(s.none, key)
 	return prev, true, nil
+}
+
+// handedNone: the agent's latest hand-over for the zone was of no
+// instructions. The zone's multi-provider service has ended, and its
+// _dsboot names go; a zone never handed anything says nothing (rule 5).
+func (s *actingStore) handedNone(zone string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.none[handoverKey(zone)]
 }
 
 // ownAgent: sender is one of the combiner's agents (its agents: list; the
