@@ -697,6 +697,37 @@ func TestAFirstLoadWithNothingHandedIsProvisionalOrWaits(t *testing.T) {
 	if !serial.waitsForHandover() || plain.waitsForHandover() {
 		t.Error("a zone whose copy reads waits, one whose copy has no reading does not")
 	}
+
+	// A copy with HSYNC3 alone carries no serial (107a): provisional. One
+	// that drops HSYNCPARAM while the last good reading lists several
+	// providers with roles keeps that reading, and waits.
+	_, bare := actingCombiner(t, "bare.acting.example.", actRecords("")[:2]...)
+	_, dropped := actingCombiner(t, "dropped.acting.example.", actRecords(`serial="3" servers="alpha,beta" signers="alpha"`)...)
+	t.Cleanup(func() {
+		for _, z := range []*MPZoneData{plain, serial, restored, bare, dropped} {
+			lastGood.Delete(z.ZoneName)
+			noReading.Delete(z.ZoneName)
+		}
+	})
+	if !dropped.waitsForHandover() {
+		t.Fatal("a zone whose copy carries a serial does not wait")
+	}
+	setApex(t, dropped, core.TypeHSYNCPARAM)
+	for _, c := range []struct {
+		mpzd  *MPZoneData
+		waits bool
+		want  string
+	}{
+		{bare, false, "provisional, by its own copy"},
+		{dropped, true, "waiting for its agent's hand-over, serving the copy as it comes"},
+	} {
+		if got := c.mpzd.waitsForHandover(); got != c.waits {
+			t.Errorf("%s waits: %v, want %v", c.mpzd.ZoneName, got, c.waits)
+		}
+		if got := combinerActingLine(c.mpzd); got != c.want {
+			t.Errorf("%s: %q, want %q", c.mpzd.ZoneName, got, c.want)
+		}
+	}
 }
 
 // While it waits, the combiner removes no stored contribution: it merges
