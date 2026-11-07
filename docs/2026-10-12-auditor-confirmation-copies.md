@@ -1,6 +1,6 @@
 # Confirmations are copied to the zone's auditors
 
-**Status:** implemented on branch `feat/auditor-liveness-and-pending`, for issue #152. Unit and transport-harness tests only; not yet run on a test fleet. The design text is not rewritten after review (dated amendments at the end).
+**Status:** implemented on branch `feat/auditor-liveness-and-pending`, for issue #152. Unit and transport-harness tests only; not yet run on a test fleet. The design text is not rewritten after review (dated amendments at the end). Brought onto main on 2026-11-07: section 8.
 
 **Provisional:** how the copy travels (section 3). It is sent once, unconfirmed, under the transport's own `confirm` verb. Section 7 lists what that leaves open: a lost copy is not repaired, and a copy can meet a peer that is not an auditor. A message type of its own, sent through the confirmed queue, would close both, and is the likely replacement. The auditor's side (sections 5 and 6) does not depend on which of the two carries the copy.
 
@@ -83,3 +83,13 @@ A detector raises one observation when a distribution has waited longer than `au
 - **A change of members while a distribution waits.** The members awaited are those the zone had when the distribution arrived.
 - **A copy at an agent that a zone lists as its auditor.** The transport's handler matches a confirmation to a queued message by distribution ID and sender. IDs coincide (section 3), so a copy could settle such an agent's own message to the same member. This needs a zone that names an agent under `auditors=`. Distribution IDs that are unique across agents would remove the case.
 - **The web dashboard** does not show the view.
+
+## 8. Amendment, 2026-11-07: brought onto main
+
+The branch was merged forward onto main, which had moved by about 900 commits. Sections 1 to 7 stand; this is what main changed around them.
+
+- **Confirmations go by the mechanism the distribution came on** (#229): over DNS or HTTPS, with fallback to the other. The copy does not: it still goes over DNS alone, as section 3 says. An agent without a DNS transport sends no copy, and the auditor reads it as `unknown`. Sending the copy the way the confirmation goes, with the originator in the confirmation's application data, would close this.
+- **The sync API takes the `confirm` verb on `/msg`.** Section 3's sender check holds there too: over HTTPS the sender is the client certificate's identity, the endpoint refuses a confirmation whose body names another, and the TLSA check refuses a request without a certificate.
+- **A kept distribution's PENDING** (plan S8: made under instructions not yet active at the member) is not copied either. The member's final word on it is.
+- **The auditor confirms every distribution it gets** (#101), to the originator only. It sends no copies, as section 3 says.
+- **Nothing waits for a copy.** It is sent after the originator's confirmation, from the same goroutine, with a time-out per auditor. The view and the observations change nothing that an agent does. Where an agent waits for an auditor's own confirmation (a DNSKEY distribution, the leader's CSYNC), the wait ends at a time-out (#371).
