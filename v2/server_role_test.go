@@ -179,6 +179,89 @@ func TestAServerRoleStepWaitsUntilTheProvidersServersServeTheUpstreamsCopy(t *te
 	}
 }
 
+// A reload with no multi-provider block stores no MP config. A transfer
+// check started before it read the config again, found none, and panicked
+// the agent. It now ends with nothing checked, and once the config is back
+// the step's next look starts a check that holds.
+func TestATransferCheckWithNoMPConfigEndsWithNothingChecked(t *testing.T) {
+	r := newServingRig(t, "reload.serving.example.", srNewcomer)
+	step := serverRoleStep(srNewcomer)
+	serving(t, soa(t, r.zone, 7, r.key, r.priv), nil)
+	var checks []func()
+	r.conf.InternalMp.transfers.start = func(check func()) { checks = append(checks, check) }
+	if serverRoleHolds(r.conf, r.zone, step) || len(checks) != 1 {
+		t.Fatalf("held before a check, or %d checks started, want 1", len(checks))
+	}
+	mp := r.conf.MpConfig()
+	r.conf.SetMpConfig(nil)
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Fatalf("the check with no MP config panicked: %v", p)
+			}
+		}()
+		checks[0]()
+	}()
+	r.conf.SetMpConfig(mp)
+	if serverRoleHolds(r.conf, r.zone, step) || len(checks) != 2 {
+		t.Fatalf("held with nothing checked, or %d checks started, want a second", len(checks))
+	}
+	checks[1]()
+	if !serverRoleHolds(r.conf, r.zone, step) {
+		t.Error("not held once a check with the config back passed")
+	}
+}
+
+// The zone's first server role, with no signer role and no upstream on the
+// newcomer's record (the walk into HSYNCPARAM management, its step 3). No
+// provider's key signs the copy its nameservers serve, and the confirmation
+// asked for one: the step never held, and the transition hung. With no
+// provider to sign it, the confirmation is the serial alone; a signer named
+// whose keys have not reached this agent is still waited for.
+func TestAServerRoleWithNoSignerHoldsAtTheSerialAlone(t *testing.T) {
+	step := serverRoleStep(srNewcomer)
+	record := `3600 IN HSYNC3 ON n ` + srNewcomer + ` .`
+	newcomer := func(zone, param string, records ...string) *Config {
+		t.Helper()
+		asMPAgent(t)
+		instrTestZone(t, zone, append(records, `3600 IN HSYNCPARAM `+numberedText(param))...)
+		conf := &Config{Config: &tdns.Config{}}
+		mp := &MultiProviderConf{Role: "agent", Identity: srNewcomer}
+		mp.Local.Nameservers = srNameservers
+		conf.SetMpConfig(mp)
+		conf.InternalMp.transfers.start = func(check func()) { check() }
+		return conf
+	}
+
+	zone := "nosigner.serving.example."
+	conf := newcomer(zone, `servers="n"`, record)
+	serving(t, soa(t, zone, 0, nil, nil), nil)
+	if serverRoleHolds(conf, zone, step) {
+		t.Error("no signer: held while the nameservers serve serial 0, below the zone's 1")
+	}
+	// the status names no upstream, and tells no operator to point at one
+	now := time.Now()
+	if got, want := serverRoleStatus(conf, zone, heldStep{InstrStep: step, at: now.Add(-transferHelpAfter)}, now), "waiting for n.role.example.'s nameservers to serve the zone at serial 1 or later"; got != want {
+		t.Errorf("no signer: the status %q, want %q", got, want)
+	}
+	conf.InternalMp.transfers.zones[canonicalName(zone)].at = time.Now().Add(-transferRecheck)
+	var asked []string
+	serving(t, soa(t, zone, 7, nil, nil), &asked)
+	if !serverRoleHolds(conf, zone, step) {
+		t.Error("no signer: not held once the nameservers serve the zone's serial")
+	}
+	if !slices.Equal(asked, srNameservers) {
+		t.Errorf("no signer: asked %v, want each of the provider's own nameservers", asked)
+	}
+
+	signed := "signer.serving.example."
+	conf = newcomer(signed, `servers="a,n" signers="a"`, `3600 IN HSYNC3 ON a `+srUpstream+` .`, record)
+	serving(t, soa(t, signed, 7, nil, nil), nil)
+	if serverRoleHolds(conf, signed, step) {
+		t.Error("a signer named, its keys not here: held at the serial alone")
+	}
+}
+
 // The serving check reads the SOA of each nameserver: its serial at least
 // the zone's by RFC 1982, and each RRSIG over it by a key of the expected
 // signers, valid, verifying.
