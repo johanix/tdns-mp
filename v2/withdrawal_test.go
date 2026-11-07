@@ -3,6 +3,7 @@ package tdnsmp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -498,29 +499,9 @@ func TestTheCombinerTakesTheFlagFromItsOwnAgentOnly(t *testing.T) {
 // from the combiner's own agent is applied at once, not kept for approval.
 func TestAWithdrawalIsNotKeptForManualApproval(t *testing.T) {
 	mpzd, hdb := withdrawnAtCombiner(t, "manual.combiner.withdraw.example.", "ns1")
-	mpzd.Options[OptMPManualApproval] = true
-	conf := &Config{Config: &tdns.Config{}}
-	conf.Config.Internal.KeyDB = hdb.KeyDB
-	conf.SetMpConfig(&MultiProviderConf{Role: "combiner", Identity: csyncCombinerID, Agents: []*PeerConf{{Identity: csyncOurAgent}}})
-	msgQs := &MsgQs{Msg: make(chan *AgentMsgPostPlus, 4)}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { defer close(done); CombinerMsgHandler(ctx, conf, msgQs, nil, nil) }()
-	t.Cleanup(func() { cancel(); <-done })
-	msgQs.Msg <- &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: AgentMsgNotify, OriginatorID: goneOrigin, DeliveredBy: csyncOurAgent,
+	combinerHandles(t, mpzd, hdb, &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: core.AgentMsgUpdate, OriginatorID: goneOrigin, DeliveredBy: csyncOurAgent,
 		Zone: ZoneName(mpzd.ZoneName), DistributionID: nextDistributionID(), Withdraw: &Withdraw{Provider: goneOrigin, RRtype: "NS"},
-		Operations: []core.RROperation{{Operation: "replace", RRtype: "NS"}}}}
-	// a voting origin's edit behind it is kept for approval: once it is,
-	// the withdrawal before it has been handled
-	msgQs.Msg <- &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: AgentMsgNotify, OriginatorID: AgentId(csyncLeaderA), DeliveredBy: csyncOurAgent,
-		Zone: ZoneName(mpzd.ZoneName), DistributionID: nextDistributionID(),
-		Operations: []core.RROperation{{Operation: "add", RRtype: "NS", Records: []string{mpzd.ZoneName + " 3600 IN NS ns.alpha.example."}}}}}
-	waitUntil(t, "the edit behind the withdrawal was not kept for approval", func() bool {
-		edits, _ := ListPendingEdits(hdb, mpzd.ZoneName)
-		return len(edits) > 0
-	})
-	cancel()
-	<-done
+		Operations: []core.RROperation{{Operation: "replace", RRtype: "NS"}}}})
 	edits, _ := ListPendingEdits(hdb, mpzd.ZoneName)
 	for _, e := range edits {
 		if e.SenderID == goneOrigin {
@@ -530,6 +511,62 @@ func TestAWithdrawalIsNotKeptForManualApproval(t *testing.T) {
 	if held := combinerHolds(mpzd, goneOrigin); len(held) != 0 {
 		t.Errorf("the origin's NS after the withdrawal: %v", held)
 	}
+}
+
+// combinerRemovesOnly reads the contributions under the zone's lock, which
+// the chunk handler writes them under while the message loop judges a
+// withdrawal.
+func TestARemovalIsJudgedUnderTheZonesLock(t *testing.T) {
+	mpzd, _ := withdrawnAtCombiner(t, "lock.combiner.withdraw.example.", "ns1", "ns2")
+	z := mpzd.ZoneName
+	ops := []core.RROperation{{Operation: "replace", RRtype: "NS", Records: []string{z + " 3600 IN NS ns2.gone.example."}}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range 200 {
+			if _, err := mpzd.AddCombinerDataNG(fmt.Sprintf("agent.w%d.example.", i), map[string][]string{z: {z + " 3600 IN NS ns.w.example."}}); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		default:
+		}
+		if !combinerRemovesOnly(z, goneOrigin, ops) {
+			<-done
+			t.Fatal("a subset replace is no removal while another origin's data is added")
+		}
+	}
+}
+
+// combinerHandles runs the combiner's message loop on msg, on a zone whose
+// edits wait for manual approval: a voting origin's edit behind it is kept
+// for approval, and once it is, msg has been handled.
+func combinerHandles(t *testing.T, mpzd *MPZoneData, hdb *HsyncDB, msg *AgentMsgPostPlus) {
+	t.Helper()
+	mpzd.Options[OptMPManualApproval] = true
+	conf := &Config{Config: &tdns.Config{}}
+	conf.Config.Internal.KeyDB = hdb.KeyDB
+	conf.SetMpConfig(&MultiProviderConf{Role: "combiner", Identity: csyncCombinerID, Agents: []*PeerConf{{Identity: csyncOurAgent}}})
+	msgQs := &MsgQs{Msg: make(chan *AgentMsgPostPlus, 4)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); CombinerMsgHandler(ctx, conf, msgQs, nil, nil) }()
+	t.Cleanup(func() { cancel(); <-done })
+	msgQs.Msg <- msg
+	msgQs.Msg <- &AgentMsgPostPlus{AgentMsgPost: AgentMsgPost{MessageType: core.AgentMsgUpdate, OriginatorID: AgentId(csyncLeaderA), DeliveredBy: csyncOurAgent,
+		Zone: ZoneName(mpzd.ZoneName), DistributionID: nextDistributionID(),
+		Operations: []core.RROperation{{Operation: "add", RRtype: "NS", Records: []string{mpzd.ZoneName + " 3600 IN NS ns.alpha.example."}}}}}
+	waitUntil(t, "the edit behind the message was not kept for approval", func() bool {
+		edits, _ := ListPendingEdits(hdb, mpzd.ZoneName)
+		return len(edits) > 0
+	})
+	cancel()
+	<-done
 }
 
 const goneOrigin = "agent.gone.example."
