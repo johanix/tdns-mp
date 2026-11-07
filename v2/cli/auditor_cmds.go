@@ -177,6 +177,43 @@ func newAuditorObservationsCmd(kind string) *cobra.Command {
 	return c
 }
 
+func newAuditorConfirmationsCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "confirmations",
+		Short: "Show the zones' distributions and which members have confirmed them",
+		Long: `Show the distributions the auditor has seen in the zones it audits, and
+for each the members whose confirmation it waits for, has seen, or has seen
+refused (with the reason). Distributions that still wait for a member come
+first. A completed distribution is kept for an hour.
+
+A member is "unknown" when its confirmation has not been seen and it has
+sent the auditor none since the auditor started: an agent on older software
+sends none at all.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			req := AuditPost{Command: "confirmations"}
+			if zone, _ := cmd.Flags().GetString("zone"); zone != "" {
+				req.Zone = dns.Fqdn(zone)
+			}
+			resp, err := callAuditor(cmd, req)
+			if err != nil {
+				log.Fatal(err)
+			}
+			pendingOnly, _ := cmd.Flags().GetBool("pending")
+			if n := printDistributions(os.Stdout, resp.Distributions, pendingOnly); n == 0 {
+				if pendingOnly {
+					fmt.Println("No distribution waits for a confirmation")
+				} else {
+					fmt.Println("No distributions seen")
+				}
+			}
+		},
+	}
+	c.Flags().StringP("zone", "z", "", "filter by zone")
+	c.Flags().Bool("pending", false, "only the distributions that wait for a member")
+	return c
+}
+
 func callAuditor(cmd *cobra.Command, req AuditPost) (*AuditResponse, error) {
 	api, err := GetApiClientForCmd(cmd, true)
 	if err != nil {
@@ -279,6 +316,46 @@ func printZones(zones []AuditZoneSummary) {
 				p.GossipState)
 		}
 	}
+}
+
+// printDistributions prints the distributions zone by zone, each with a line
+// per member below it, and returns how many it printed. What a peer sent
+// (the summary, a rejection's reason) goes through termSafe.
+func printDistributions(w io.Writer, dists []AuditDistributionSummary, pendingOnly bool) int {
+	n, zone := 0, ""
+	for _, d := range dists {
+		if pendingOnly && d.State != "pending" {
+			continue
+		}
+		if d.Zone != zone || n == 0 {
+			zone = d.Zone
+			fmt.Fprintf(w, "Zone: %s\n", termSafe(zone))
+			fmt.Fprintf(w, "  %-12s  %-30s  %-8s  %-9s  %s\n",
+				"Distribution", "Originator", "Age", "State", "Carries")
+		}
+		n++
+		fmt.Fprintf(w, "  %-12s  %-30s  %-8s  %-9s  %s\n",
+			termSafe(d.DistributionID), termSafe(d.Originator),
+			(time.Duration(d.AgeSeconds) * time.Second).String(), d.State, termSafe(d.Summary))
+		for _, m := range d.Members {
+			var detail string
+			switch m.State {
+			case "pending":
+				detail = fmt.Sprintf("no confirmation seen for %s", time.Duration(m.PendingSeconds)*time.Second)
+			case "unknown":
+				detail = "no confirmation seen, and none from this member since the auditor started"
+			case "rejected":
+				detail = termSafe(m.Status)
+				if m.Reason != "" {
+					detail += ": " + termSafe(m.Reason)
+				}
+			default:
+				detail = fmt.Sprintf("%s at %s", termSafe(m.Status), m.Seen.Format("15:04:05"))
+			}
+			fmt.Fprintf(w, "      %-30s  %-9s  %s\n", termSafe(m.Identity), m.State, detail)
+		}
+	}
+	return n
 }
 
 func printObservations(obs []AuditObservation) {

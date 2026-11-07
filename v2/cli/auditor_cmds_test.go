@@ -53,3 +53,53 @@ func TestEventPrintersDoNotPassTerminalControls(t *testing.T) {
 		t.Errorf("list --details printed %d detail lines, want 3:\n%s", n, list.String())
 	}
 }
+
+// `auditor confirmations` names each distribution, its originator, and per
+// member whether its confirmation was seen. A rejection's reason is a
+// peer's text and reaches the terminal escaped. With --pending only the
+// distributions that wait for a member are listed.
+func TestConfirmationsPrinterShowsEachMembersState(t *testing.T) {
+	seen := time.Date(2026, 10, 12, 9, 30, 0, 0, time.UTC)
+	dists := []AuditDistributionSummary{
+		{Zone: "example.com.", DistributionID: "69812b15", Originator: "agent.alpha.example.", Summary: "add NS (1 record)",
+			State: "pending", AgeSeconds: 192, Members: []AuditDistributionMember{
+				{Identity: "agent.bravo.example.", State: "confirmed", Status: "SUCCESS", Seen: seen},
+				{Identity: "agent.charlie.example.", State: "pending", PendingSeconds: 190},
+			}},
+		{Zone: "example.com.", DistributionID: "69812b20", Originator: "agent.bravo.example.", Summary: "replace DNSKEY (2 records)",
+			State: "rejected", AgeSeconds: 30, Members: []AuditDistributionMember{
+				{Identity: "agent.alpha.example.", State: "rejected", Status: "FAILED", Reason: "not a signer\x1b[2J", Seen: seen},
+				{Identity: "agent.delta.example.", State: "unknown", PendingSeconds: 30},
+			}},
+	}
+
+	var all, pending bytes.Buffer
+	if n := printDistributions(&all, dists, false); n != 2 {
+		t.Errorf("printed %d distributions, want 2", n)
+	}
+	out := all.String()
+	for _, want := range []string{
+		"Zone: example.com.\n",
+		"69812b15", "agent.alpha.example.", "3m12s", "pending", "add NS (1 record)",
+		"agent.bravo.example.            confirmed  SUCCESS at 09:30:00",
+		"agent.charlie.example.          pending    no confirmation seen for 3m10s",
+		"agent.alpha.example.            rejected   FAILED: not a signer\\x1b[2J",
+		"agent.delta.example.            unknown    no confirmation seen, and none from this member since the auditor started",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the listing lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Count(out, "Zone: ") != 1 {
+		t.Errorf("the zone is named more than once for its distributions:\n%s", out)
+	}
+	for _, r := range out {
+		if r != '\n' && (unicode.IsControl(r) || unicode.Is(unicode.Cf, r)) {
+			t.Errorf("the listing printed control character %U:\n%q", r, out)
+		}
+	}
+
+	if n := printDistributions(&pending, dists, true); n != 1 || strings.Contains(pending.String(), "69812b20") || !strings.Contains(pending.String(), "69812b15") {
+		t.Errorf("--pending printed %d distributions, want the one that waits:\n%s", n, pending.String())
+	}
+}

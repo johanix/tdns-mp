@@ -80,7 +80,7 @@ func TestABeatCountsForEveryZoneItNames(t *testing.T) {
 		}
 	}
 	detect := func(state *detectorRunState, now time.Time) {
-		runDetectorsOnce(sm, state, now, threshold)
+		runDetectorsOnce(sm, state, now, threshold, 0)
 	}
 
 	// Every provider beats twice.
