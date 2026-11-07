@@ -38,6 +38,14 @@ var (
 	errNoSerial          = errors.New("HSYNCPARAM without serial=")
 )
 
+// noSerialError is errNoSerial, with whether the copy gives roles: one that
+// gives none is a benign owner error, reported and holding nothing (the
+// project owner, 2026-11-06).
+type noSerialError struct{ roles bool }
+
+func (e noSerialError) Error() string { return errNoSerial.Error() }
+func (e noSerialError) Unwrap() error { return errNoSerial }
+
 // Instructions is the canonical reading of a zone's HSYNC3 and HSYNCPARAM
 // records (design rule 2): what the code acts on, and nothing else. Unknown
 // and private-use keys, TTLs and signatures are not in it.
@@ -142,13 +150,13 @@ func ReadInstructions(apex *tdns.OwnerData) (*Instructions, error) {
 		return nil, fmt.Errorf("HSYNCPARAM record with data of type %T", prr.Data)
 	}
 	in.HasParam = true
-	var hasSerial bool
-	if in.Serial, hasSerial = hp.GetSerial(); !hasSerial {
-		return nil, errNoSerial
-	}
 	in.Servers = sortedUnique(hp.GetServers())
 	in.Signers = sortedUnique(hp.GetSigners())
 	in.Auditors = sortedUnique(hp.GetAuditors())
+	var hasSerial bool
+	if in.Serial, hasSerial = hp.GetSerial(); !hasSerial {
+		return nil, noSerialError{roles: givesRoles(in)}
+	}
 	in.NSmgmt = hp.GetNSmgmt()
 	in.ParentSync = hp.GetParentSync()
 	in.Suffix = hp.GetSuffix()

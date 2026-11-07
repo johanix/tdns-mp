@@ -6,6 +6,7 @@
 package tdnsmp
 
 import (
+	"errors"
 	"slices"
 	"time"
 
@@ -56,7 +57,10 @@ func MPZoneInfoFromMPZoneData(mpzd *MPZoneData) MPZoneInfo {
 	}
 	// The serial, the digest and the owner error are the copy's (S1). The
 	// lists are the active instructions', which the code acts on (S3).
-	if in, err := ReadInstructions(apex); err != nil {
+	var ns noSerialError
+	if in, err := ReadInstructions(apex); errors.As(err, &ns) && !ns.roles {
+		info.CopyError = err.Error() // benign while the store holds no role (decision 107a)
+	} else if err != nil {
 		info.OwnerError = err.Error()
 	} else if in != nil {
 		info.Serial = in.Serial

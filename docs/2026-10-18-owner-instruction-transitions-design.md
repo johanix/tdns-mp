@@ -1,6 +1,6 @@
 # Changes to the zone owner's instructions: numbered by the owner, agreed before they act, carried out by the leader
 
-**Status:** PROPOSAL, 2026-10-18, revision 6 (2026-10-26); rule 2 amended 2026-10-28.
+**Status:** PROPOSAL, 2026-10-18, revision 6 (2026-10-26); rule 2 amended 2026-10-28 and 2026-11-06; 3.6 amended 2026-11-07.
 
 This document describes how tdns-mp handles a change of a zone owner's instructions: every edit of the zone's HSYNC3 or HSYNCPARAM records. It describes the design as it is meant to stand. The difference from today's code and the steps of the work are in the plan beside it, `2026-10-18-owner-instruction-transitions-plan.md`, whose section 6 lists the decisions this design rests on and the parts of the membership design it changes.
 
@@ -153,6 +153,8 @@ During a removal the leaving provider leaves these one at a time (5.2). A combin
 ### 3.6 Owner errors and refusals
 
 An owner error (rule 2) holds the zone as agreeing does: nothing new starts, work under way finishes by the active serial. It ends only at a higher serial, never when the contents are reverted at the same serial. A refused transition (3.1) leaves the zone steady at N, unless a serial between N and it is accepted, and an agent never makes active a serial it has refused.
+
+*Amended 2026-11-07* (the project owner; #384). A copy without `serial=` that holds nothing (rule 2, 107a) ends a hold only if a copy without `serial=` began it, so the agent keeps with each hold the owner error that began it. A hold stored before the agent kept that is read as begun by another owner error: it ends only at a serial higher than those held when it began, or at any serial if none was held. Read the other way, it could end a hold that a parse error began. A hold kept wrongly can still be ended by the owner with a raised serial; one ended wrongly cannot be put back. Test fleets start from fresh databases (plan decision 108), so this meets only an agent upgraded in place with such a hold stored.
 
 ### 3.7 Why it holds
 
