@@ -73,10 +73,11 @@ func (s zoneSetups) prune() {
 }
 
 // RegisterMPRefreshCallbacks appends tdns-mp PreRefresh/PostRefresh
-// closures to all MP zones that don't already have them. Called at
-// startup and after every zone reload (SIGHUP / "config reload-zones")
-// via the PostParseZonesHook. A zone a reload has put back gets them
-// again.
+// closures to all MP zones that don't already have them, and on the
+// signer puts each such zone on the resigner's watchlist (keepResigned).
+// Called at startup and after every zone reload (SIGHUP / "config
+// reload-zones") via the PostParseZonesHook. A zone a reload has put back
+// gets them again.
 func (conf *Config) RegisterMPRefreshCallbacks() {
 	tm := conf.InternalMp.MPTransport
 	msgQs := conf.InternalMp.MsgQs
@@ -104,6 +105,9 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 			zd.SyncQ = conf.InternalMp.SyncQ
 		}
 		conf.InternalMp.refreshRegistered[zoneName] = zd.ZoneData
+		if tdns.Globals.App.Type == AppTypeMPSigner {
+			conf.keepResigned(zd.ZoneData)
+		}
 		// The closure looks up conf.MpConfig() at invocation rather than
 		// capturing the current pointer, so PostParseConfigHook can
 		// replace the parsed MultiProviderConf on reload (SIGHUP) without
@@ -134,6 +138,39 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 				}
 			})
 	}
+}
+
+// keepResigned puts a zone the signer signs on tdns's resigner watchlist,
+// which renews its signatures as they age. The signer's zones sign through
+// tdns: MPPreRefresh switches inline-signing on before the first publish,
+// the policy binds through the zone's dnssecpolicy, signOnceAfterPolicyBind
+// signs and flips Ready, every refresh signs its staged scope, and the
+// ResignerEngine renews. tdns registers only zones whose config carries a
+// signing option, and MP switches it on dynamically, so a zone it switched
+// on is registered here: at the zone's first load, after MPPreRefresh, or
+// at once for a zone whose first load is already done. The watchlist holds
+// one *tdns.ZoneData per name: a zone a reload has put back is registered
+// again, or the resigner goes on renewing the dropped one (#313).
+func (conf *Config) keepResigned(zd *tdns.ZoneData) {
+	register := func(zd *tdns.ZoneData) {
+		if !zd.Options[tdns.OptInlineSigning] {
+			return
+		}
+		q := conf.Config.Internal.ResignQ
+		if q == nil {
+			return
+		}
+		select {
+		case q <- tdns.ResignRequest{Zd: zd, Reason: tdns.ResignPeriodic}:
+		case <-time.After(5 * time.Second):
+			lg.Error("timeout registering zone for periodic re-signing", "zone", zd.ZoneName)
+		}
+	}
+	if zd.FirstZoneLoad {
+		zd.OnFirstLoad = append(zd.OnFirstLoad, register)
+		return
+	}
+	register(zd)
 }
 
 // ForEachMPZone iterates all zones with OptMultiProvider and calls
@@ -320,8 +357,11 @@ func (mpzd *MPZoneData) restoreContributions(hdb *HsyncDB, zoneContribs map[stri
 		mpzd.MP.PersistContributions = func(zone, senderID string, contribs map[string]map[uint16]core.RRset) error {
 			// A save replaces the sender's stored rows. Until the store has
 			// been read (a read that failed here, and the re-apply reads it
-			// again), the map in memory is at most part of them. Called under
-			// the zone's lock, which guards ContributionsRead.
+			// again), the map in memory is at most part of them. An update
+			// does not get this far before the read (contributionsMayChange);
+			// the _signal KEYs the combiner publishes from its stored
+			// instructions can, and the re-apply puts them back from those.
+			// Called under the zone's lock, which guards ContributionsRead.
 			if !mp.ContributionsRead {
 				return fmt.Errorf("zone %s: its stored contributions are not read yet; %s's are not replaced", zone, senderID)
 			}

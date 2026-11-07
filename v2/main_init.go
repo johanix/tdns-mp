@@ -125,30 +125,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			}
 		}
 		zd.Unlock()
-
-		// The signer's zones sign through tdns: MPPreRefresh switches
-		// inline-signing on before the first publish, the policy binds
-		// through the zone's dnssecpolicy, signOnceAfterPolicyBind signs
-		// and flips Ready, every refresh signs its staged scope, and the
-		// ResignerEngine renews. tdns registers only zones whose config
-		// carries a signing option, and MP switches it on dynamically, so
-		// a zone it switched on is put on the resigner's watchlist here.
-		if tdns.Globals.App.Type == AppTypeMPSigner && zd.FirstZoneLoad {
-			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *tdns.ZoneData) {
-				if !zd.Options[tdns.OptInlineSigning] {
-					return
-				}
-				q := conf.Config.Internal.ResignQ
-				if q == nil {
-					return
-				}
-				select {
-				case q <- tdns.ResignRequest{Zd: zd, Reason: tdns.ResignPeriodic}:
-				case <-time.After(5 * time.Second):
-					lg.Error("timeout registering zone for periodic re-signing", "zone", zd.ZoneName)
-				}
-			})
-		}
+		// The signer's zones are put on the resigner's watchlist by
+		// RegisterMPRefreshCallbacks (keepResigned), which a zone a reload
+		// puts back runs through too.
 	})
 
 	conf.Config.ParseAuthOptions()
