@@ -36,7 +36,10 @@ type SynchedDataUpdate struct {
 	// established it, which the update's own word on where it comes from
 	// (AgentId) is not. A CSYNC is taken from the zone's leader only, and
 	// that is asked of this sender.
-	DeliveredBy   AgentId
+	DeliveredBy AgentId
+	// Withdraw: the update is the leader's withdrawal of AgentId's records
+	// (plan S16), which DeliveredBy sent; its answers go to DeliveredBy.
+	Withdraw      *Withdraw
 	Force         bool     // Bypass dedup check (always send even if RR already present)
 	SkipCombiner  bool     // Don't send to combiner (e.g. local DNSKEY changes — signer adds its own)
 	DnskeyKeyTags []uint16 // Key tags for DNSKEY propagation tracking (mpdist flow)
@@ -150,7 +153,9 @@ type SynchedDataCmd struct {
 	TargetAgent AgentId // For "resync-targeted": send only to this agent
 	// CatchUp: the request for the zone's state that a "resync-targeted"
 	// answers (the membership design, 5.3).
-	CatchUp  *CatchUp `json:"catch_up,omitempty"`
+	CatchUp *CatchUp `json:"catch_up,omitempty"`
+	// Withdraw: for "withdraw", the leader's withdrawal to send (plan S16)
+	Withdraw *Withdraw
 	Response chan *SynchedDataCmdResponse
 	// ownRead: for "own-read", what a re-read of the zone brought
 	// (own_read.go)
@@ -201,19 +206,30 @@ type ZoneDataRepo struct {
 	// DNSKEY replaces whose final confirmation waits for the combiner's word
 	// on that distribution's set (waitForCombiner). Engine only.
 	staleWaits map[string][]*staleWait
+	// withdrawals: the leader's withdrawals this agent sent, by
+	// distribution (withdrawal.go, plan S16). Under mu.
+	withdrawals map[string]sentWithdrawal
 }
 
 type replaceOrigin struct {
 	Time   time.Time
 	DistID string
+	// Under is the active serial stamped at the send, when the stamp
+	// told one (HasUnder): replaces are ordered by it first (plan S16).
+	Under    uint32
+	HasUnder bool
 }
 
 type PendingRemoteConfirmation struct {
 	OriginatingDistID string
 	OriginatingSender string
-	Mechanism         string
-	Zone              ZoneName
-	CreatedAt         time.Time
+	// Origin is whose records the update carries: its agent, and for the
+	// leader's withdrawal the provider, while OriginatingSender is the
+	// leader its answer goes to (plan S16)
+	Origin    AgentId
+	Mechanism string
+	Zone      ZoneName
+	CreatedAt time.Time
 	// StaleHeld: the records of the update's stale replaces that the repo
 	// holds. They did not go to the combiner; the confirmation to the
 	// sender names them beside what the combiner applied.

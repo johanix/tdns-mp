@@ -177,7 +177,7 @@ func (conf *Config) tellKept(u *SynchedDataUpdate, text string, msgQs *MsgQs) {
 	if u.OriginatingDistID != "" && msgQs != nil && msgQs.OnRemoteConfirmationReady != nil {
 		msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 			OriginatingDistID: u.OriginatingDistID,
-			OriginatingSender: string(u.AgentId),
+			OriginatingSender: string(u.answerTo()),
 			Mechanism:         u.Mechanism,
 			Zone:              u.Zone,
 			Status:            "PENDING",
@@ -198,7 +198,7 @@ func refuseStale(u *SynchedDataUpdate, active, made *SerialDigest, msgQs *MsgQs)
 	if u.OriginatingDistID != "" && msgQs != nil && msgQs.OnRemoteConfirmationReady != nil {
 		msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 			OriginatingDistID: u.OriginatingDistID,
-			OriginatingSender: string(u.AgentId),
+			OriginatingSender: string(u.answerTo()),
 			Mechanism:         u.Mechanism,
 			Zone:              u.Zone,
 			Status:            "REJECTED",
@@ -277,7 +277,7 @@ func (conf *Config) instrActivated(ctx context.Context, zdr *ZoneDataRepo, zone 
 			if kept && receiptOf(active, madeUnder(e.Update.Instr)) == receiptKeep {
 				continue // made under a higher serial: it waits on
 			}
-			if kept && carriesLeaderOnly(e.Update.Operations, e.Update.Publish) {
+			if kept && (carriesLeaderOnly(e.Update.Operations, e.Update.Publish) || e.Update.Withdraw != nil) {
 				if holds, leader, until := conf.leaderHolds(zone, e.Update, now); blocked || holds {
 					if !e.Update.ForLeader {
 						if err := k.markForLeader(string(zone), e.Seq, leader, until); err != nil {
@@ -319,7 +319,7 @@ func (conf *Config) releaseKept(ctx context.Context, zdr *ZoneDataRepo, zone Zon
 		if ok, why := tm.IsPeerAuthorized(string(sender), string(zone)); !ok {
 			lgEngine.Info("a kept distribution is refused at its release: its sender may not send for the zone now", "zone", zone, "peer", u.AgentId, "distrib", u.OriginatingDistID, "why", why)
 			if u.OriginatingDistID != "" && msgQs != nil && msgQs.OnRemoteConfirmationReady != nil {
-				msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{OriginatingDistID: u.OriginatingDistID, OriginatingSender: string(u.AgentId),
+				msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{OriginatingDistID: u.OriginatingDistID, OriginatingSender: string(u.answerTo()),
 					Mechanism: u.Mechanism, Zone: zone, Status: "REJECTED", Message: "refused at its release: " + why})
 			}
 			return
@@ -338,6 +338,8 @@ type notYet struct {
 	distID string
 	answer *MsgStamp
 	at     time.Time
+	// notBefore: it goes no earlier than this, in step or not (notYetWait)
+	notBefore time.Time
 }
 
 // notYetBook holds what waits to be sent again once this agent and the
@@ -433,7 +435,7 @@ func (b *notYetBook) zones() []ZoneName {
 func (tm *MPTransportBridge) notYetFrom(distID, peer string, status transport.ConfirmStatus, message string, answer *MsgStamp) bool {
 	switch status {
 	case transport.ConfirmRejected:
-		if strings.HasPrefix(message, staleInstructions+":") {
+		if strings.HasPrefix(message, staleInstructions+":") || strings.HasPrefix(message, staleWithdrawal+":") {
 			return true
 		}
 	case transport.ConfirmIgnored, transport.ConfirmFailed, transport.ConfirmPartial:
@@ -448,8 +450,15 @@ func (tm *MPTransportBridge) notYetFrom(distID, peer string, status transport.Co
 // to send the distribution again at once if the two are in step already:
 // the trigger, this agent's activation, has then fired (decision 52).
 func (tm *MPTransportBridge) noteNotYet(zone ZoneName, peer AgentId, distID string, answer *MsgStamp) {
+	tm.noteNotYetAfter(zone, peer, distID, answer, 0)
+}
+
+// noteNotYetAfter is noteNotYet for a distribution that goes no earlier than
+// wait from now.
+func (tm *MPTransportBridge) noteNotYetAfter(zone ZoneName, peer AgentId, distID string, answer *MsgStamp, wait time.Duration) {
 	lgEngine.Info("an answer from a peer at other instructions is not final; sending again when in step", "zone", zone, "peer", peer, "distrib", distID)
-	tm.notYets.add(&notYet{zone: zone, peer: peer, distID: distID, answer: answer, at: time.Now()})
+	now := time.Now()
+	tm.notYets.add(&notYet{zone: zone, peer: peer, distID: distID, answer: answer, at: now, notBefore: now.Add(wait)})
 	if tm.msgQs == nil || tm.msgQs.SynchedDataCmd == nil {
 		return
 	}
@@ -485,11 +494,26 @@ func (conf *Config) resendInStep(zdr *ZoneDataRepo, zone ZoneName) {
 		return
 	}
 	var due []*notYet
+	now := time.Now()
 	for _, n := range open {
+		if n.notBefore.After(now) {
+			continue
+		}
 		if peer := madeUnder(n.answer); peer == nil || CompareSerial(active.Serial, peer.Serial) >= 0 {
 			due = append(due, n)
 		}
 	}
+	// a withdrawal this agent sent as the zone's leader goes again as
+	// itself, not as this agent's own records (plan S16)
+	own := due[:0:0]
+	for _, n := range due {
+		if sw, ok := zdr.withdrawalSent(n.distID); ok {
+			conf.withdrawAgain(zone, n, sw)
+			continue
+		}
+		own = append(own, n)
+	}
+	due = own
 	if len(due) == 0 {
 		return
 	}

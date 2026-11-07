@@ -22,12 +22,14 @@ func SaveReplaceOrigin(hdb *HsyncDB, zone, agentID string, rrtype uint16, origin
 	defer hdb.Unlock()
 
 	_, err := hdb.DB.Exec(`
-		INSERT INTO ZoneDataReplaceOrigin (zone, agent_id, rrtype, origin_time, dist_id)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO ZoneDataReplaceOrigin (zone, agent_id, rrtype, origin_time, dist_id, under, has_under)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(zone, agent_id, rrtype) DO UPDATE SET
 			origin_time = excluded.origin_time,
-			dist_id = excluded.dist_id`,
-		zone, agentID, rrtype, origin.Time.UnixNano(), origin.DistID)
+			dist_id = excluded.dist_id,
+			under = excluded.under,
+			has_under = excluded.has_under`,
+		zone, agentID, rrtype, origin.Time.UnixNano(), origin.DistID, origin.Under, origin.HasUnder)
 	if err != nil {
 		return fmt.Errorf("SaveReplaceOrigin: upsert: %w", err)
 	}
@@ -40,7 +42,7 @@ func LoadAllReplaceOrigins(hdb *HsyncDB) (map[string]replaceOrigin, error) {
 	hdb.Lock()
 	defer hdb.Unlock()
 
-	rows, err := hdb.DB.Query(`SELECT zone, agent_id, rrtype, origin_time, dist_id FROM ZoneDataReplaceOrigin`)
+	rows, err := hdb.DB.Query(`SELECT zone, agent_id, rrtype, origin_time, dist_id, under, has_under FROM ZoneDataReplaceOrigin`)
 	if err != nil {
 		return nil, fmt.Errorf("LoadAllReplaceOrigins: query: %w", err)
 	}
@@ -51,11 +53,13 @@ func LoadAllReplaceOrigins(hdb *HsyncDB) (map[string]replaceOrigin, error) {
 		var zone, agentID, distID string
 		var rrtype uint16
 		var originTime int64
-		if err := rows.Scan(&zone, &agentID, &rrtype, &originTime, &distID); err != nil {
+		var under uint32
+		var hasUnder bool
+		if err := rows.Scan(&zone, &agentID, &rrtype, &originTime, &distID, &under, &hasUnder); err != nil {
 			return nil, fmt.Errorf("LoadAllReplaceOrigins: scan: %w", err)
 		}
 		key := zone + "|" + agentID + "|" + dns.TypeToString[rrtype]
-		result[key] = replaceOrigin{Time: time.Unix(0, originTime), DistID: distID}
+		result[key] = replaceOrigin{Time: time.Unix(0, originTime), DistID: distID, Under: under, HasUnder: hasUnder}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("LoadAllReplaceOrigins: rows: %w", err)
