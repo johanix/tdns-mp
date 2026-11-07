@@ -104,7 +104,7 @@ func serverRoleStatus(conf *Config, zone string, step heldStep, now time.Time) s
 	}
 	line := fmt.Sprintf("waiting for %s's nameservers to serve the zone from its upstream at serial %d or later", id, copySerial(zone))
 	if self && now.Sub(step.at) >= transferHelpAfter {
-		line += operatorMustPoint(conf, zone, id)
+		line += operatorMustPoint(conf, mp, zone, id)
 	}
 	return line
 }
@@ -112,8 +112,9 @@ func serverRoleStatus(conf *Config, zone string, step heldStep, now time.Time) s
 // operatorMustPoint is what the provider id's status adds for its operator:
 // what to point where, for the zone's transfer from its upstream. An
 // upstream that id's record names is asked for its XFR addresses (CONFIG
-// upstream), and the hint names them once it has, or why it named none.
-func operatorMustPoint(conf *Config, zone, id string) string {
+// upstream), and the hint names them once it has, or why it named none. mp
+// is the config the caller read, never nil.
+func operatorMustPoint(conf *Config, mp *MultiProviderConf, zone, id string) string {
 	in := instructionsFor(ZoneName(zone))
 	at := strings.Join(upstreamOf(in, id), " or ")
 	if label, ok := in.labelOf(id); ok {
@@ -127,7 +128,7 @@ func operatorMustPoint(conf *Config, zone, id string) string {
 		}
 	}
 	return fmt.Sprintf("; its operator must point %s at %s for the zone's transfer",
-		strings.Join(conf.MpConfig().Local.Nameservers, ", "), at)
+		strings.Join(mp.Local.Nameservers, ", "), at)
 }
 
 // upstreamXfrBook is what this agent's upstreams named as their XFR
@@ -266,11 +267,10 @@ func upstreamOf(in *Instructions, id string) []string {
 	return identities(in.providers(in.Signers))
 }
 
-// signerKeys are the DNSKEYs the providers ids publish, as this agent holds
-// them: its own provider's from its signer, another's as that provider's
-// agent distributed them.
-func (conf *Config) signerKeys(zone string, ids []string) []dns.RR {
-	self := conf.MpConfig().Identity
+// signerKeys are the DNSKEYs the providers ids publish, as this agent (self)
+// holds them: its own provider's from its signer, another's as that
+// provider's agent distributed them.
+func (conf *Config) signerKeys(zone, self string, ids []string) []dns.RR {
 	var keys []dns.RR
 	for _, id := range ids {
 		if core.EqualNames(id, self) {
@@ -393,15 +393,25 @@ func (b *transferBook) held(zone, name string) bool {
 // its upstream (servingChainOK): at an SOA serial no lower than floor gives,
 // signed by its upstream's keys. The outcome is logged when it changes.
 func (conf *Config) checkTransfer(zone, name string, floor func(context.Context) (uint32, error)) {
+	b := &conf.InternalMp.transfers
+	mp := conf.MpConfig()
+	if mp == nil {
+		// a reload with no multi-provider block since the check was
+		// started: nothing is checked, and the step's next look starts one
+		b.mu.Lock()
+		if c := b.zones[canonicalName(zone)]; c != nil && c.step == name {
+			c.running = false
+		}
+		b.mu.Unlock()
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), transferCheckTimeout)
 	defer cancel()
-	mp := conf.MpConfig()
 	var served uint32
 	min, err := floor(ctx)
 	if err == nil {
-		served, err = servingChainOK(ctx, zone, mp.Local.Nameservers, conf.signerKeys(zone, upstreamOf(instructionsFor(ZoneName(zone)), mp.Identity)), min, time.Now())
+		served, err = servingChainOK(ctx, zone, mp.Local.Nameservers, conf.signerKeys(zone, mp.Identity, upstreamOf(instructionsFor(ZoneName(zone)), mp.Identity)), min, time.Now())
 	}
-	b := &conf.InternalMp.transfers
 	b.mu.Lock()
 	c := b.zones[canonicalName(zone)]
 	if c == nil || c.step != name {
