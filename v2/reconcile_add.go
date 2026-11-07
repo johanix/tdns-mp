@@ -1,41 +1,40 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johani@johani.org
  *
- * A signer added (design 5.1, plan S18b, the owner's decision of 2026-11-03). A
- * provider with no role signs as soon as it is named: no NS record names it, so
- * no validator sees its signatures, and what must wait is NS records for its
- * servers. A server that becomes a signer is refused for now (design 5.3). The
- * leader's steps, each confirmed by every voting member:
+ * A signer added (design 5.1, plan S18b, the owner's decisions of 2026-11-03). A
+ * provider with no role signs as soon as it is named: no NS record names it, so no
+ * validator sees its signatures, and the propagation of keys is meaningless for a
+ * zone it does not serve. What must wait is NS records for its servers and its DS.
+ * A server that becomes a signer is refused for now (design 5.3). The leader's
+ * steps, each confirmed by every voting member:
  *
  *  1. Its keys, and its signing. The joiner enters KeySigners and KeyConfirmers,
  *     and once every member's parts hold that, its signer is handed it too, with
  *     Signing: another signer's combiner would refuse a key from a provider its
- *     sets do not name, and a rejected key waits for its operator. Its key machine
- *     makes its first keys (which a hold lets it: a role with no active key gets
- *     one), which sign from the start, and distributes them; its signer starts
- *     signing. Keys it already holds start over (T20): tdns's, made as it acted by
- *     its own copy, or left from an earlier time. Nothing says those have
- *     propagated, and an active key would read as if they had. The step waits until
- *     its key states show a KSK and a ZSK published, which needs every other signer
- *     to have applied them, and until its signer says it signs.
- *  2. Its DS. It enters DSSigners. Its KSK's ds=1, set once the DNSKEY RRset has
- *     propagated (T8), puts its DS in the DS set, the leader syncs under
- *     parentsync=agent, and the step waits until the parent serves it, whoever put
- *     it there.
- *  3. The caches' time. Its key machine waits the DS TTL at the parent before its
- *     KSK goes active (T9), asking one server: the step waits until its key states
- *     show them active, and for the DS TTL from when every server served its DS.
+ *     sets do not name, and a rejected key waits for its operator. Its signer
+ *     starts signing with its first keys, active at once, and sends them to the
+ *     other signers, also those it already held. The step waits until its signer
+ *     says it signs, and at the leader until every nameserver of the zone serves
+ *     its KSK and ZSK, and then for the propagation delay and the largest TTL they
+ *     serve the DNSKEY RRset with (signerAddBook.keysPropagated). One that does not
+ *     answer has that TTL at least its copy's, and holds nothing, with a warning;
+ *     one that answers without the keys holds the step.
+ *  2. Its DS. It enters DSSigners, which puts its KSK's DS in the DS set, the leader
+ *     syncs under parentsync=agent, and the step waits until the parent serves it,
+ *     whoever put it there.
+ *  3. The caches' time: the DS TTL at the parent, from when every server there
+ *     served its DS.
  *
  * A server role given in the same edit is planned after these (server_role.go),
  * and its nameservers enter Servers only at the last step; given in a later edit,
  * it waits for this transition to be done. An operator's NS records are kept until
  * done (oweIfFrozen). So under nsmgmt=agent nothing names its servers before its
  * DNSKEYs have propagated and its DS is served. Under nsmgmt=owner that is the
- * owner's (design 3.7).
+ * owner's, and the product holds nothing back (design 3.7, S19's warning).
  *
- * The DS and DNSKEY steps wait for an emergency rollover (design 3.3). With no
- * provider signing yet there are no signatures to go with a DS: the zone's first
- * signer has its caches' time before its DS goes to the parent.
+ * The DS and DNSKEY steps wait for an emergency rollover (design 3.3). A zone nobody
+ * signs yet has nothing to validate new keys against, so its first signer has no
+ * wait at its keys, and no caches' time after its DS.
  */
 package tdnsmp
 
@@ -136,16 +135,19 @@ func signerAddStepsOf(joiner Provider, first bool) []plannedStep {
 			h.KeySigners, h.KeyConfirmers = addProvider(h.KeySigners, joiner), addProvider(h.KeyConfirmers, joiner)
 			return h
 		}}
-	mint := plannedStep{key: key(signerAddMint), provider: id, keys: true, what: what(1, "its first keys, published, and its signing"),
+	mint := plannedStep{key: key(signerAddMint), provider: id, keys: true, what: what(1, "its first keys and its signing, propagated"),
 		sets: func(h Roles) Roles {
 			h.Signing = addProvider(h.Signing, joiner)
 			return h
 		},
 		wait: func(conf *Config, zone string, _ time.Time) string {
-			if conf.joinerKeysIn(zone, id, KeyStatePublished, KeyStateStandby, KeyStateActive) {
+			switch {
+			case !conf.joinerKeysIn(zone, id, KeyStateActive):
+				return id + " (its KSK and ZSK active)"
+			case first:
 				return ""
 			}
-			return id + " (its KSK and ZSK published)"
+			return conf.InternalMp.signerAdds.keysPropagated(conf, zone, id)
 		}}
 	ds := plannedStep{key: key(signerAddDS), provider: id, keys: true, what: what(2, "its DS at the parent"),
 		sets: func(h Roles) Roles {
@@ -160,25 +162,26 @@ func signerAddStepsOf(joiner Provider, first bool) []plannedStep {
 		}}
 	caches := plannedStep{key: key(signerAddCaches), provider: id, what: what(3, "the caches' time"),
 		wait: func(conf *Config, zone string, since time.Time) string {
-			switch {
-			case !conf.joinerKeysIn(zone, id, KeyStateActive):
-				return id + " (its KSK and ZSK active)"
-			case time.Since(since) < conf.InternalMp.signerAdds.parentDSTTL(conf, zone):
+			b := &conf.InternalMp.signerAdds
+			switch _, known := b.parentDS(conf, zone); {
+			case !known:
+				return "the parent (the TTL of its DS RRset)"
+			case time.Since(since) < b.parentDSTTL(conf, zone):
 				return "the DS TTL at the parent, since every server there serves " + id + "'s DS"
 			}
 			return ""
 		}}
 	if first {
-		return []plannedStep{accept, mint, caches, ds}
+		return []plannedStep{accept, mint, ds}
 	}
 	return []plannedStep{accept, mint, ds, caches}
 }
 
 // forOwnSigner is what this agent hands its signer of h: at its own provider's
 // first step, h without itself in KeySigners and KeyConfirmers, since its signer
-// would make its first keys at once and some other signer may not hold the step
-// yet. It is handed them at the next step, which the leader takes once every
-// voting member holds this one, marked so that keys it already holds start over.
+// would distribute keys at once and some other signer may not hold the step yet.
+// It is handed them at the next step, which the leader takes once every voting
+// member holds this one, marked so that keys it already holds go out again.
 func (conf *Config) forOwnSigner(zone string, h *ActingHandover) *ActingHandover {
 	mp := conf.MpConfig()
 	in, ok := conf.InternalMp.Instructions.reconcileInputs(zone)
@@ -219,20 +222,23 @@ func (conf *Config) joinerKeysIn(zone, id string, states ...string) bool {
 			zsk = true
 		}
 	}
-	conf.joinerKeys(zone, id, func(flags uint16, _ uint16, state string, _ *bool) { note(flags, state) })
+	conf.joinerKeys(zone, id, func(flags uint16, _ uint16, state string, _ *bool, _ *dns.DNSKEY) { note(flags, state) })
 	return ksk && zsk
 }
 
 // joinerKeys calls each with what this agent knows of each of id's keys: its
-// flags, its key tag, its state and its ds.
-func (conf *Config) joinerKeys(zone, id string, each func(flags, keytag uint16, state string, ds *bool)) {
+// flags, its key tag, its state, its ds and the key, nil if its record can't be
+// read.
+func (conf *Config) joinerKeys(zone, id string, each func(flags, keytag uint16, state string, ds *bool, key *dns.DNSKEY)) {
 	zone = dns.Fqdn(zone)
 	if mp := conf.MpConfig(); mp != nil && core.EqualNames(id, mp.Identity) {
 		if mpzd, ok := Zones.Get(zone); ok && mpzd != nil {
 			if snap := mpzd.GetLastKeyInventory(); snap != nil {
 				for _, it := range snap.Inventory {
 					if it.State != DnskeyStateForeign {
-						each(it.Flags, it.KeyTag, it.State, it.DS)
+						rr, _ := dns.NewRR(it.KeyRR)
+						key, _ := rr.(*dns.DNSKEY)
+						each(it.Flags, it.KeyTag, it.State, it.DS, key)
 					}
 				}
 			}
@@ -249,26 +255,48 @@ func (conf *Config) joinerKeys(zone, id string, each func(flags, keytag uint16, 
 		}
 		for _, st := range share.states {
 			if i := slices.IndexFunc(share.dnskeys, func(dk *dns.DNSKEY) bool { return dk.KeyTag() == st.KeyTag }); i >= 0 {
-				each(share.dnskeys[i].Flags, st.KeyTag, st.State, st.DS)
+				each(share.dnskeys[i].Flags, st.KeyTag, st.State, st.DS, share.dnskeys[i])
 			}
 		}
 	}
+}
+
+// joinerActiveKeys are id's active keys, as this agent knows them, with nil for
+// one whose record can't be read.
+func (conf *Config) joinerActiveKeys(zone, id string) []*dns.DNSKEY {
+	var keys []*dns.DNSKEY
+	conf.joinerKeys(zone, id, func(_, _ uint16, state string, _ *bool, key *dns.DNSKEY) {
+		if state == KeyStateActive {
+			keys = append(keys, key)
+		}
+	})
+	return keys
 }
 
 // joinerDSAtParent: the parent, as last looked at, serves at every server the DS
 // of a KSK of id whose ds is set. A look is asked while the step waits, and under
 // parentsync=agent the leader's sync asked again now and then: explicit, an
 // update only where the parent differs. Under parentsync=owner the owner adds
-// the DS, and the step's test is the same.
+// the DS, and the step's test is the same. Where no server of the parent that
+// answers serves any DS of the zone, the zone is unsigned at the parent: no
+// validator looks for the joiner's DS, and the step ends at once, whatever the
+// scheme (Johan's ruling of 2026-11-05).
 func (conf *Config) joinerDSAtParent(zone, id string) bool {
-	var tags []uint16
-	conf.joinerKeys(zone, id, func(flags, keytag uint16, _ string, ds *bool) {
-		if flags&dns.SEP != 0 && ds != nil && *ds {
-			tags = append(tags, keytag)
+	var ksks []*dns.DNSKEY
+	conf.joinerKeys(zone, id, func(flags, _ uint16, _ string, ds *bool, key *dns.DNSKEY) {
+		if flags&dns.SEP != 0 && ds != nil && *ds && key != nil {
+			ksks = append(ksks, key)
 		}
 	})
 	seen, known := conf.InternalMp.signerAdds.parentDS(conf, zone)
-	if known && slices.ContainsFunc(tags, func(t uint16) bool { return seen.tags[t] }) {
+	switch {
+	case !known:
+	case seen.unsigned:
+		if conf.InternalMp.reconciles.sayOnce(canonicalName(zone), "parent unsigned "+canonicalName(id)) {
+			lg.Info("the parent serves no DS for the zone; a signer's DS step does not wait", "zone", zone, "provider", id)
+		}
+		return true
+	case slices.ContainsFunc(ksks, seen.serves):
 		return true
 	}
 	if rolesForZone(ZoneName(zone)).ParentSync == core.HsyncParentSyncAgent && conf.InternalMp.signerAdds.syncDue(conf, zone) {
@@ -295,11 +323,37 @@ func (conf *Config) joinersDSAsked(zone string) bool {
 	return add && part == signerAddDS && rolesForZone(ZoneName(zone)).ParentSync == core.HsyncParentSyncAgent
 }
 
-// parentDSSeen is what the parent serves of the zone's DS RRset: the key tags
-// that every server that answered holds, and the largest TTL they gave it.
+// parentDSSeen is what the parent serves of the zone's DS RRset: the records
+// that every server that answered holds, whether none of them serves any DS of
+// the zone, the largest TTL they gave it, and the servers that did not answer,
+// with the last one's error.
 type parentDSSeen struct {
-	tags map[uint16]bool
-	ttl  time.Duration
+	records  map[parentDSRecord]bool
+	unsigned bool
+	ttl      time.Duration
+	silent   []string
+	why      error
+}
+
+// parentDSRecord is a DS record as served. A key tag says less: 16 bits, and
+// another key's DS can have the same.
+type parentDSRecord struct {
+	tag                   uint16
+	algorithm, digestType uint8
+	digest                string
+}
+
+// serves: the parent serves a DS of key, by whichever digest.
+func (s parentDSSeen) serves(key *dns.DNSKEY) bool {
+	for r := range s.records {
+		if r.tag != key.KeyTag() || r.algorithm != key.Algorithm {
+			continue
+		}
+		if ds := key.ToDS(r.digestType); ds != nil && strings.ToLower(ds.Digest) == r.digest { // not-a-name: a hex digest
+			return true
+		}
+	}
+	return false
 }
 
 // parentDSLook asks the parent's servers for the zone's DS RRset. A test stands
@@ -341,37 +395,40 @@ func askParentDS(zone, server string) ([]dns.RR, error) {
 
 // dsAtEveryServer is parentDSSeen from asking each of servers. A validator may
 // be handed the DS RRset of any of them, and one without the joiner's DS finds
-// nothing to validate its signatures with, so a tag counts only if every server
-// that answers holds it. One that does not answer hands nothing to anyone; with
-// no answer at all nothing is known.
+// nothing to validate its signatures with, so a record counts only if every
+// server that answers holds it. One that does not answer is not counted, and is
+// named: down, it hands nothing to anyone, but silent to this agent alone it may
+// hand others an older RRset. With no answer at all nothing is known.
 func dsAtEveryServer(servers []string, ask func(server string) ([]dns.RR, error)) (parentDSSeen, error) {
 	var seen parentDSSeen
-	var last error
+	served := false
 	for _, server := range servers {
 		rrs, err := ask(server)
 		if err != nil {
-			last = err
+			seen.silent, seen.why = append(seen.silent, server), err
 			continue
 		}
-		tags := map[uint16]bool{}
+		records := map[parentDSRecord]bool{}
 		for _, rr := range rrs {
 			if ds, ok := rr.(*dns.DS); ok {
-				tags[ds.KeyTag] = true
+				records[parentDSRecord{ds.KeyTag, ds.Algorithm, ds.DigestType, strings.ToLower(ds.Digest)}] = true // not-a-name: a hex digest
 				seen.ttl = max(seen.ttl, time.Duration(ds.Hdr.Ttl)*time.Second)
+				served = true
 			}
 		}
-		if seen.tags != nil {
-			maps.DeleteFunc(tags, func(tag uint16, _ bool) bool { return !seen.tags[tag] })
+		if seen.records != nil {
+			maps.DeleteFunc(records, func(r parentDSRecord, _ bool) bool { return !seen.records[r] })
 		}
-		seen.tags = tags
+		seen.records = records
 	}
-	if seen.tags != nil {
+	if seen.records != nil {
+		seen.unsigned = !served
 		return seen, nil
 	}
-	if last == nil {
-		last = errors.New("no parent server is known")
+	if seen.why == nil {
+		seen.why = errors.New("no parent server is known")
 	}
-	return parentDSSeen{}, last
+	return parentDSSeen{}, seen.why
 }
 
 // --- This provider's part ---
@@ -416,6 +473,8 @@ type signerAddBook struct {
 	zones map[string]*signerAddLooks
 	// start runs a look; nil: in a goroutine of its own. A test runs it in place.
 	start func(look func())
+	// now is the keys' wait's clock; nil: the time. A test moves it.
+	now func() time.Time
 }
 
 type signerAddLooks struct {
@@ -427,6 +486,99 @@ type signerAddLooks struct {
 	parentAt  time.Time
 	parentRun bool
 	syncAt    time.Time
+	keys      map[string]*joinerKeysLooks // by the joiner's identity, folded
+}
+
+// joinerKeysLooks is what this agent has seen the zone's nameservers serve of a
+// joiner's keys.
+type joinerKeysLooks struct {
+	of      string          // the active keys these looks are of (activeKeysOf)
+	with    map[string]bool // those seen with them, folded: one gone quiet has served what it served
+	without []string        // those that answered the last look without them
+	silent  []string        // those that have answered no look, or answered without them and went quiet
+	ttl     time.Duration   // the largest TTL seen: a cache may hold what was served before
+	copyTTL time.Duration   // the RRset's TTL in the zone's copy
+	since   time.Time       // since when none has held the step; zero while one does
+	looked  bool            // a look has found out
+	blind   bool            // the latest look found nothing out
+	running bool
+	at      time.Time
+}
+
+// activeKeysOf says which keys these are, whatever their order and TTLs. A nil key,
+// one whose record can't be read, says only that.
+func activeKeysOf(keys []*dns.DNSKEY) string {
+	ids := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if key == nil {
+			ids = append(ids, "?")
+			continue
+		}
+		ids = append(ids, fmt.Sprintf("%d %d %d %s", key.Flags, key.Protocol, key.Algorithm, key.PublicKey))
+	}
+	slices.Sort(ids)
+	return strings.Join(ids, ",")
+}
+
+// note takes one look's finding, as of now.
+func (k *joinerKeysLooks) note(seen joinerKeysServed, now time.Time) {
+	k.ttl, k.copyTTL, k.looked, k.blind = max(k.ttl, seen.ttl), seen.copyTTL, true, false
+	with := map[string]bool{}
+	for _, ns := range seen.with {
+		with[canonicalName(ns)] = true
+	}
+	k.without, k.silent = seen.without, nil
+	for _, ns := range seen.silent {
+		if k.with[canonicalName(ns)] {
+			with[canonicalName(ns)] = true
+		} else {
+			k.silent = append(k.silent, ns)
+		}
+	}
+	k.with = with
+	switch {
+	case len(k.without) > 0:
+		k.since = time.Time{}
+	case k.since.IsZero():
+		k.since = now
+	}
+}
+
+// waitTTL is the TTL the wait counts: the largest seen, and at least the copy's while
+// a nameserver has not answered, which may serve more than the others.
+func (k *joinerKeysLooks) waitTTL() time.Duration {
+	if len(k.silent) > 0 {
+		return max(k.ttl, k.copyTTL)
+	}
+	return k.ttl
+}
+
+// end is when the wait runs out, given the propagation delay.
+func (k *joinerKeysLooks) end(delay time.Duration) time.Time {
+	return k.since.Add(delay + k.waitTTL())
+}
+
+// owesLook: the wait has run out on what the looks that reported before then found.
+// It ends only on one that reports since, which may find a nameserver without the
+// keys, or nothing.
+func (k *joinerKeysLooks) owesLook(delay time.Duration, now time.Time) bool {
+	return k.looked && !k.blind && len(k.without) == 0 && !now.Before(k.end(delay)) && k.at.Before(k.end(delay))
+}
+
+// waitsFor is what the keys' step waits for at the nameservers, of the joiner id
+// ("" for nothing), given the propagation delay.
+func (k *joinerKeysLooks) waitsFor(id string, delay time.Duration, now time.Time) string {
+	switch {
+	case !k.looked || k.blind:
+		return "the zone's nameservers (what they serve of " + id + "'s keys, not known yet)"
+	case len(k.without) > 0:
+		return strings.Join(k.without, ", ") + " (" + id + "'s keys)"
+	case now.Before(k.end(delay)):
+		return "the propagation delay and the DNSKEY TTL, since the zone's nameservers serve " + id + "'s keys"
+	case k.owesLook(delay, now):
+		return "a look at the zone's nameservers that reports after the propagation delay and the DNSKEY TTL (" + id + "'s keys)"
+	}
+	return ""
 }
 
 // looksLocked is the zone's looks under its active serial, new when that moved.
@@ -455,6 +607,101 @@ func (b *signerAddBook) run(look func()) {
 	go look()
 }
 
+// clock is the time, as the keys' wait reads it.
+func (b *signerAddBook) clock() time.Time {
+	if b.now != nil {
+		return b.now()
+	}
+	return time.Now()
+}
+
+// keysPropagated is what the keys' step of the joiner id waits for at the zone's
+// nameservers ("" for nothing): each serves its active keys, by the NS RRset of the
+// zone's copy, and the DNSKEY RRset has had the propagation delay of the slowest of
+// the zone's serving providers and the largest TTL seen since. A look is asked once
+// the last is older than signerAddLookEvery, and at once when the wait runs out: it
+// ends only on a look that reports since. Kept in memory: a new leader looks again
+// and counts from its own look.
+func (b *signerAddBook) keysPropagated(conf *Config, zone, id string) string {
+	key := canonicalName(id)
+	keys := conf.joinerActiveKeys(zone, id)
+	of := activeKeysOf(keys)
+	delay, _ := conf.delegationNotifyWaitAnnounced(zone)
+	b.mu.Lock()
+	l := b.looksLocked(conf, zone)
+	if l.keys == nil {
+		l.keys = map[string]*joinerKeysLooks{}
+	}
+	k := l.keys[key]
+	switch {
+	case k == nil:
+		k = &joinerKeysLooks{of: of}
+		l.keys[key] = k
+	case k.of != of:
+		// Other active keys: nothing seen was of these, and the wait starts over.
+		// A look under way notes in the old k, which is gone. The largest TTL
+		// stays, since a cache may hold that RRset.
+		k = &joinerKeysLooks{of: of, ttl: k.ttl}
+		l.keys[key] = k
+	}
+	now := b.clock()
+	due := !k.running && (now.Sub(k.at) >= signerAddLookEvery || k.owesLook(delay, now))
+	if due {
+		k.running = true
+	}
+	b.mu.Unlock()
+	if due {
+		b.run(func() { b.lookForKeys(conf, zone, id, k, keys) })
+	}
+	b.mu.Lock()
+	wait, ttl := k.waitsFor(id, delay, b.clock()), k.waitTTL()
+	b.mu.Unlock()
+	if wait == "" && conf.InternalMp.reconciles.sayOnce(canonicalName(zone), "keys propagated "+key) {
+		lg.Info("a new signer's keys have propagated", "zone", zone, "provider", id, "delay", delay, "ttl", ttl)
+	}
+	return wait
+}
+
+// lookForKeys runs one look at what the zone's nameservers serve of keys, those of
+// the joiner id, and notes it in k.
+func (b *signerAddBook) lookForKeys(conf *Config, zone, id string, k *joinerKeysLooks, keys []*dns.DNSKEY) {
+	seen, err := joinerKeysServed{}, errors.New("the zone is not here")
+	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil {
+		seen, err = lookForJoinerKeys(mpzd, keys)
+	}
+	b.mu.Lock()
+	k.running, k.at = false, b.clock()
+	wasHeld := k.since.IsZero()
+	if err == nil {
+		k.note(seen, k.at)
+	} else {
+		k.blind = true
+	}
+	cleared := wasHeld && !k.since.IsZero()
+	silent, ttl := slices.Clone(k.silent), k.waitTTL()
+	b.mu.Unlock()
+	say := func(what string) bool {
+		return conf.InternalMp.reconciles.sayOnce(canonicalName(zone), "keys look "+canonicalName(id)+" "+what)
+	}
+	if err != nil {
+		if say(err.Error()) {
+			lg.Warn("what the zone's nameservers serve could not be looked at; a new signer's keys step waits", "zone", zone, "provider", id, "err", err)
+		}
+		return
+	}
+	if len(seen.without) > 0 && say("without "+strings.Join(seen.without, " ")) {
+		lg.Info("a nameserver of the zone answers without a new signer's keys; its keys step waits", "zone", zone, "provider", id, "nameservers", seen.without)
+	}
+	if len(silent) > 0 && say("silent "+strings.Join(silent, " ")) {
+		lg.Warn("a nameserver of the zone does not answer; a new signer's keys step does not wait for it, and waits at least the TTL of the zone's copy", "zone", zone, "provider", id, "nameservers", silent, "err", seen.why)
+	}
+	if cleared {
+		delay, _ := conf.delegationNotifyWaitAnnounced(zone)
+		lg.Info("the zone's nameservers serve a new signer's keys; its keys step waits the propagation delay and their TTL", "zone", zone, "provider", id, "delay", delay, "ttl", ttl)
+	}
+	conf.askThaw(zone)
+}
+
 // parentDS is the parent's DS RRset as last looked at, and whether a look has
 // found out. Another is asked once the last is older than signerAddLookEvery.
 func (b *signerAddBook) parentDS(conf *Config, zone string) (parentDSSeen, bool) {
@@ -481,6 +728,9 @@ func (b *signerAddBook) parentDS(conf *Config, zone string) (parentDSSeen, bool)
 				}
 				return
 			}
+			if len(seen.silent) > 0 && conf.InternalMp.reconciles.sayOnce(canonicalName(zone), "parent silent "+strings.Join(seen.silent, " ")) {
+				lg.Warn("a server of the parent does not answer; a signer's DS step does not wait for it", "zone", zone, "servers", seen.silent, "err", seen.why)
+			}
 			conf.askThaw(zone)
 		})
 	}
@@ -490,8 +740,7 @@ func (b *signerAddBook) parentDS(conf *Config, zone string) (parentDSSeen, bool)
 }
 
 // parentDSTTL is the largest TTL the parent was seen serving the zone's DS RRset
-// with under the active serial; 0 when no look has found out, as for a new leader,
-// which then has T9's wait alone.
+// with under the active serial; 0 when no look has found out.
 func (b *signerAddBook) parentDSTTL(conf *Config, zone string) time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()

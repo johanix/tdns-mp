@@ -255,7 +255,6 @@ func (conf *Config) inventoryMarksOf(zone string, items []KeyInventoryItem) inve
 	var f rolloverFlags
 	if e := conf.InternalMp.KeyLifecycle; e != nil {
 		if l := e.driver(zone); l != nil {
-			m.signs = m.signs && !l.StartOverDue()
 			var err error
 			if f, err = l.RolloverFlags(); err != nil {
 				lgSigner.Error("key lifecycle: whether a rollover is under way could not be read; the inventory says one is", "zone", zone, "err", err)

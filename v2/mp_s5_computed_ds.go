@@ -16,6 +16,7 @@ package tdnsmp
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -300,17 +301,55 @@ func dsWaitsString(waits []dsWait) string {
 	return strings.Join(parts, ", ")
 }
 
+// inDSSigners is the agent's word on its own rows in the DS set its own
+// signer's inventory gives (MPKeyLifecycleOwner.DSIntent): they count only
+// while this provider is in the step's DSSigners, as every other provider's
+// do (plan S13). A joiner's first KSK is active, with ds=1, from its keys step
+// on (reading 21), and it enters them at its DS step: a joiner that leads
+// would otherwise put its DS at the parent before its keys step ends. A zone
+// with no instructions, or whose records do not name this provider, keeps its
+// own rows.
+func (conf *Config) inDSSigners(zone string) bool {
+	mpzd, ok := Zones.Get(dns.Fqdn(zone))
+	if !ok || mpzd == nil {
+		return true
+	}
+	if in := mpzd.instructions(); in == nil || !in.HasParam {
+		return true
+	}
+	matched, label, err := mpzd.matchHsyncIdentity(ourHsyncIdentities(conf.MpConfig()))
+	if err != nil || !matched {
+		return true
+	}
+	ours := trimDot(label)
+	for _, s := range labelsOf(mpzd.roles().DSSigners) {
+		if s == ours {
+			return true
+		}
+	}
+	return false
+}
+
 // foreignDSWithheld is the agent's check on the DS set its own signer's
 // inventory gives (MPKeyLifecycleOwner.DSIntent): another provider's DS
 // leaves the parent only when the key states that provider's agent sent this
 // agent, with its DNSKEY distributions, say so (tdns-mp #207). It names a key
 // those key states have standby, active or retired with ds=1 (P3, as
 // foreignDSFor reads the same key states at the signer, where this agent
-// relays them) and that the inventory does not hold as a SEP key with ds=1;
-// empty when there is none. One inventory without the key is not the key
-// states dropping it: the signer may have taken a copy of the zone that
-// lacked it. A provider that is not in the step's DSSigners is not asked:
-// its DS leaves at its DS step, by the set (plan S13).
+// relays them) and that the inventory does not hold as another provider's SEP
+// key with ds=1; empty when there is none. One inventory without the key is
+// not the key states dropping it: the signer may have taken a copy of the
+// zone that lacked it. A provider that is not in the step's DSSigners is not
+// asked: its DS leaves at its DS step, by the set (plan S13).
+//
+// A key is held by its record, not its tag: another key under the tag would
+// stand in for it, our own (the signer keeps no copy of a key under a tag of
+// its own, syncForeignDNSKEYs) or a third provider's. Until its provider's
+// record has arrived nothing holds it, as the computed set waits for it too.
+// A row of this provider's own never holds another's key. Tags are not
+// unique: a provider's distributions may carry two records under one tag,
+// and the computed set makes a DS of each SEP record under it, so each must
+// be held, and a ZSK under the tag does not make the key a ZSK.
 func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) string {
 	zone = dns.Fqdn(zone)
 	tm := conf.InternalMp.MPTransport
@@ -332,10 +371,15 @@ func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) 
 	if matched, label, err := mpzd.matchHsyncIdentity(ourHsyncIdentities(conf.MpConfig())); err == nil && matched {
 		ourLabel = trimDot(label)
 	}
-	held := map[uint16]bool{}
+	var held []*dns.DNSKEY
 	for _, it := range inv {
-		if it.Flags&dns.SEP != 0 && it.DS != nil && *it.DS {
-			held[it.KeyTag] = true
+		if it.State != KeyStateForeign || it.Flags&dns.SEP == 0 || it.DS == nil || !*it.DS {
+			continue
+		}
+		if rr, err := dns.NewRR(it.KeyRR); err == nil {
+			if dk, ok := rr.(*dns.DNSKEY); ok {
+				held = append(held, dk)
+			}
 		}
 	}
 	shares := tm.foreignSharesFor(ZoneName(zone))
@@ -355,25 +399,36 @@ func (conf *Config) foreignDSWithheld(zone string, inv []tdns.KeyInventoryItem) 
 		}
 		share := shares[AgentId(a)]
 		for _, st := range share.states {
-			// a key whose record has not arrived is taken to be a SEP key:
-			// its provider says its DS belongs at the parent
-			sep := true
+			// every record under the tag is the key the state speaks of; a
+			// key whose record has not arrived is taken to be a SEP key: its
+			// provider says its DS belongs at the parent
+			var records []*dns.DNSKEY
 			for _, dk := range share.dnskeys {
 				if dk.KeyTag() == st.KeyTag {
-					sep = dk.Flags&dns.SEP != 0
-					break
+					records = append(records, dk)
 				}
 			}
+			isSEP := func(dk *dns.DNSKEY) bool { return dk.Flags&dns.SEP != 0 }
+			sep := len(records) == 0 || slices.ContainsFunc(records, isSEP)
 			want, decided := foreignDSFor(foreignSaid{Provider: label, State: st.State, DS: st.DS}, sep, signing)
-			if !decided || !want || held[st.KeyTag] {
+			if !decided || !want {
 				continue
 			}
 			who := label
 			if id := mpzd.identitiesByLabel()[label]; id != "" {
 				who = id
 			}
-			return fmt.Sprintf("provider %s holds its key %d %s with its DS at the parent, and the signer's inventory does not have that DS",
-				who, st.KeyTag, st.State)
+			if len(records) == 0 {
+				return fmt.Sprintf("provider %s holds its key %d %s with its DS at the parent, and this agent has no record of that key yet",
+					who, st.KeyTag, st.State)
+			}
+			for _, record := range records {
+				if !isSEP(record) || slices.ContainsFunc(held, func(dk *dns.DNSKEY) bool { return sameDNSKEYRdata(dk, record) }) {
+					continue
+				}
+				return fmt.Sprintf("provider %s holds its key %d %s with its DS at the parent, and the signer's inventory does not have that DS",
+					who, st.KeyTag, st.State)
+			}
 		}
 	}
 	return ""
@@ -478,7 +533,8 @@ func (conf *Config) dsSetUnknown(ds tdns.DelegationSyncRequest) (waitingFor stri
 // ownedDSWaitingFor is dsSetUnknown for a zone this provider's signer owns,
 // read as DSIntent reads it: another provider whose key states hold the set
 // back (foreignDSWithheld), this provider's SEP keys whose ds is not set,
-// or an inventory with no SEP key.
+// or an inventory with no SEP key that counts: this provider's own count
+// only while it is in the step's DSSigners.
 func (conf *Config) ownedDSWaitingFor(o *MPKeyLifecycleOwner, zone string, snap *KeyInventorySnapshot) (string, bool) {
 	if check := o.foreignDSCheck(); check != nil {
 		if why := check(zone, snap.Inventory); why != "" {
@@ -489,10 +545,15 @@ func (conf *Config) ownedDSWaitingFor(o *MPKeyLifecycleOwner, zone string, snap 
 	if mp := conf.MpConfig(); mp != nil {
 		self = dns.Fqdn(mp.Identity)
 	}
+	own := o.ownDSCounts(zone)
 	var waits []dsWait
-	sep := false
+	sep, left := false, false
 	for _, it := range snap.Inventory {
 		if it.Flags&dns.SEP == 0 {
+			continue
+		}
+		if !own && it.State != KeyStateForeign {
+			left = true
 			continue
 		}
 		sep = true
@@ -501,6 +562,8 @@ func (conf *Config) ownedDSWaitingFor(o *MPKeyLifecycleOwner, zone string, snap 
 		}
 	}
 	switch {
+	case !sep && left:
+		return "nobody: this provider is not in the step's DS signers, and the signer's inventory holds no other provider's key with the SEP flag", true
 	case !sep:
 		return "nobody: the signer's inventory holds no key with the SEP flag", true
 	case len(waits) > 0:

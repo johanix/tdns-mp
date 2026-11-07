@@ -262,6 +262,91 @@ func TestTheInventoryHoldAsksAProviderInTheStepsDSSigners(t *testing.T) {
 	}
 }
 
+// A joiner that leads: its own signer's inventory holds its first KSK
+// active, with ds=1, from its keys step on (reading 21). Its DS is no part
+// of the zone's DS set until the step's DSSigners take it in, at its DS
+// step: its keys arriving ask the parent nothing, and the DS step asks it.
+// The rig's serving check: the joiner's DS went to the parent on "the zone's
+// DS set changed" four minutes before its keys step ended. The active serial
+// names us in signers=, as the add's does; the step keeps us out of
+// DSSigners.
+func TestAJoinersOwnDSWaitsForItsDSStepAtItsOwnLeader(t *testing.T) {
+	yes, no := true, false
+	r := newComputedDSRig(t, "joiner.ownds.example.", []string{"us", "p2"})
+	r.owner.SetForeignDSCheck(r.conf.foreignDSWithheld)
+	z := r.mpzd.ZoneName
+	r.mpzd.Options[tdns.OptMultiProvider] = true
+	r.leader("agent.us.example.")
+	ourKSK, ourZSK, theirKSK, theirZSK := testDnskey(t, z, 257), testDnskey(t, z, 256), testDnskey(t, z, 257), testDnskey(t, z, 256)
+	r.distribution(t, "agent.p2.example.", word{theirKSK, KeyStateActive, &yes}, word{theirZSK, KeyStateActive, &no})
+	s := withActiveStore(t, r.mpzd)
+	rest := r.mpzd.roles()
+	rest.ParentSync = core.HsyncParentSyncAgent // the agents sync the parent
+	keys := withSigners(rest, "us", "p2")
+	keys.DSSigners = providersOf("p2")
+	stepAs(t, s, z, 1, keys)
+	r.mpzd.populateMPdata(r.conf.MpConfig(), r.mpzd.roles())
+	r.conf.onSetsChanged(r.mpzd, true)
+	r.requests(t)
+
+	row := func(k *dns.DNSKEY, state string, ds bool) KeyInventoryItem {
+		return KeyInventoryItem{KeyTag: k.KeyTag(), Algorithm: k.Algorithm, Flags: k.Flags, State: state, KeyRR: k.String(), Pub: true, DS: &ds}
+	}
+	inventory := func(items ...KeyInventoryItem) {
+		r.conf.noteKeyInventory(r.ctx, r.mpzd, &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: z, Inventory: items, Owned: true})
+	}
+	check := func(step string, want ...*dns.DNSKEY) {
+		t.Helper()
+		known, tags := r.dsSet(t)
+		if !known || len(tags) != len(want) {
+			t.Fatalf("%s: the DS set is known=%v with %v, want %d DS", step, known, tags, len(want))
+		}
+		for _, k := range want {
+			if !tags[k.KeyTag()] {
+				t.Fatalf("%s: the DS set %v lacks key %d", step, tags, k.KeyTag())
+			}
+		}
+	}
+	theirs := []KeyInventoryItem{row(theirKSK, DnskeyStateForeign, true), row(theirZSK, DnskeyStateForeign, false)}
+	inventory(theirs...)
+	check("p2's keys alone", theirKSK)
+	r.requests(t)
+
+	inventory(append(slices.Clone(theirs), row(ourKSK, tdns.DnskeyStateActive, true), row(ourZSK, tdns.DnskeyStateActive, false))...)
+	check("our first keys active, before our DS step", theirKSK)
+	if n := r.requests(t); n != 0 {
+		t.Fatalf("our first keys asked the parent for %d syncs before our DS step", n)
+	}
+
+	stepAs(t, s, z, 2, withSigners(rest, "us", "p2"))
+	r.conf.onSetsChanged(r.mpzd, true)
+	check("our DS step", ourKSK, theirKSK)
+	if n := r.requests(t); n != 1 {
+		t.Fatalf("our DS step asked the parent for %d syncs, want 1", n)
+	}
+}
+
+// With no other provider's KSK in the inventory, a joiner's own KSK outside
+// the DS signers leaves the DS set unknown, not empty: the parent's DS is
+// left alone, and the status says why.
+func TestAJoinersOwnKSKAloneLeavesTheDSSetUnknown(t *testing.T) {
+	yes, no := true, false
+	r := newComputedDSRig(t, "alone.ownds.example.", []string{"us", "p2"})
+	z := r.mpzd.ZoneName
+	s := withActiveStore(t, r.mpzd)
+	keys := withSigners(r.mpzd.roles(), "us", "p2")
+	keys.DSSigners = providersOf("p2")
+	stepAs(t, s, z, 1, keys)
+	r.conf.noteKeyInventory(r.ctx, r.mpzd, &KeystateInventoryMsg{SenderID: "signer.us.example.", Zone: z, Owned: true,
+		Inventory: []KeyInventoryItem{invItem(t, z, 257, KeyStateActive, &yes), invItem(t, z, 256, KeyStateActive, &no)}})
+	if known, tags := r.dsSet(t); known {
+		t.Fatalf("our own KSK alone, before our DS step: the DS set is known with %v", tags)
+	}
+	if why := r.conf.dsSetWaitingFor(z); why != "nobody: this provider is not in the step's DS signers, and the signer's inventory holds no other provider's key with the SEP flag" {
+		t.Fatalf("the status says %q", why)
+	}
+}
+
 // A step that changes DSSigners changes the DS set with no key and no
 // inventory changing: it asks the leader's delegation sync, once. A step
 // that leaves them as they are asks for nothing, and so does an agent that

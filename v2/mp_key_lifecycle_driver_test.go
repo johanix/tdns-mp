@@ -769,198 +769,209 @@ func TestDriverExpectsTheSignersOnlyOnceTheyAreFollowed(t *testing.T) {
 	}
 }
 
-// A provider named a signer that serves nothing: its first key of each role signs
-// from its first distribution and goes on through T3, T8 and T9, which say what the
-// others have applied and what the parent serves (the table's P1, amended
-// 2026-11-03). Its DS still waits for T8. A later key of the role does not sign, and
-// a provider that serves signs nothing before T9.
-func TestANewSignersFirstKeysSignFromTheStart(t *testing.T) {
-	signs := func(r *driverRig, state, role string) []uint16 {
-		r.t.Helper()
-		inv, err := tdns.GetKeyInventory(r.kdb, r.l.Zone)
-		if err != nil {
-			r.t.Fatal(err)
-		}
-		var out []uint16
-		for _, it := range inv {
-			if it.State == state && roleOf(it.Flags) == role && it.Sign {
-				out = append(out, it.KeyTag)
-			}
-		}
-		return out
-	}
-	d := newDriverRig(t, "named.adding.example.", driverPolicy)
+// A provider no NS record names has its first key of each role straight in active
+// (T2a): nothing validates by it, so there is nothing to propagate first. That holds
+// where the machine makes them, as for a zone it runs already, with the parent serving
+// another signer's DS. tdns's check finds nothing, a resend brings the key to the other
+// signers until they have applied it, and a later key of a role takes the table's way.
+// A provider that serves signs nothing before T9.
+func TestANewSignersFirstKeysGoStraightToActive(t *testing.T) {
+	resending := driverPolicy
+	resending.ResendAfter = time.Minute
+	d := newDriverRig(t, "named.adding.example.", resending)
 	d.wire.signsAtNaming = true
 	d.wire.signers = []string{"p2"}
 	d.wire.parentDS[0] = true // the parent serves a DS of another signer's
 	d.l.SetHold(true)
-	tick := func(what string) {
-		t.Helper()
-		if err := d.l.Tick(); err != nil {
-			t.Fatalf("%s: %v", what, err)
-		}
+	if err := d.l.Tick(); err != nil {
+		t.Fatal(err)
 	}
-	tick("named")
-	// a key that signs before its state says so: tdns's check reports it (I9)
-	for _, v := range tdns.CheckKeyRowInvariants(d.kdb, d.l.Zone) {
-		if v.Invariant != "I9" {
-			t.Errorf("named: %v", v)
-		}
+	ksks, zsks := d.keysIn(KeyStateActive, "KSK"), d.keysIn(KeyStateActive, "ZSK")
+	if len(ksks) != 1 || len(zsks) != 1 {
+		t.Fatalf("named, its active KSKs are %v and ZSKs %v; want one of each", ksks, zsks)
 	}
-	ksks := d.keysIn(KeyStateMpdist, "KSK")
-	if len(ksks) != 1 || len(signs(d, KeyStateMpdist, "KSK")) != 1 || len(signs(d, KeyStateMpdist, "ZSK")) != 1 {
-		t.Fatalf("named, its KSKs in mpdist are %v, signing KSK %v, ZSK %v; want one of each signing", ksks, signs(d, KeyStateMpdist, "KSK"), signs(d, KeyStateMpdist, "ZSK"))
+	if v := tdns.CheckKeyRowInvariants(d.kdb, d.l.Zone); len(v) != 0 {
+		t.Errorf("named, tdns's check finds %v", v)
 	}
-	for _, id := range append(ksks, d.keysIn(KeyStateMpdist, "ZSK")...) {
+	cols, err := d.l.columnsOf(ksks[0])
+	if err != nil || !cols.Sign || !cols.DS.Bool {
+		t.Errorf("its KSK's columns %+v (%v), want it signing with ds=1", cols, err)
+	}
+	// its record: resent until p2 has applied it, and gone after
+	d.clock.Advance(resending.ResendAfter + time.Second)
+	if err := d.l.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	d.wire.mu.Lock()
+	resent := slices.Clone(d.wire.resends)
+	d.wire.mu.Unlock()
+	if !slices.Contains(resent, ksks[0]) || !slices.Contains(resent, zsks[0]) {
+		t.Errorf("unconfirmed for its resend time, resent %v: want both keys", resent)
+	}
+	for _, id := range []uint16{ksks[0], zsks[0]} {
 		if _, _, err := d.l.Confirm(id, "p2", "applied", ""); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if got := signs(d, KeyStatePublished, "KSK"); len(got) != 1 || got[0] != ksks[0] {
-		t.Fatalf("every signer applied it, and the KSKs published and signing are %v", got)
-	}
-	cols, err := d.l.columnsOf(ksks[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cols.DS.Bool {
-		t.Error("published, its KSK has ds=1 (P2)")
-	}
-	d.clock.Advance(driverPolicy.PropagationDelay + d.wire.ttl + time.Second)
-	tick("propagated")
-	if got := signs(d, KeyStateStandby, "KSK"); len(got) != 1 {
-		t.Fatalf("propagated, the KSKs standby and signing are %v", got)
-	}
-	if cols, err = d.l.columnsOf(ksks[0]); err != nil || !cols.DS.Bool {
-		t.Errorf("standby, its KSK has ds=%v (%v), want 1", cols.DS.Bool, err)
-	}
-	d.wire.parentDS[ksks[0]] = true
-	d.wire.parentTTL = time.Hour
-	tick("its DS served")
-	d.clock.Advance(time.Hour + time.Second)
-	tick("the DS TTL passed")
-	if s := d.state(ksks[0]); s != KeyStateActive {
-		t.Fatalf("the DS TTL passed, its KSK is %s", s)
-	}
-	if got := signs(d, KeyStateActive, "KSK"); len(got) != 1 {
-		t.Errorf("active, the KSKs signing are %v", got)
+		if d.l.dist[id] != nil {
+			t.Errorf("key %d applied, and its record stays", id)
+		}
+		if s := d.state(id); s != KeyStateActive {
+			t.Errorf("key %d applied, and it is %s", id, s)
+		}
 	}
 
-	// a later key of a role does not sign beside the first (P5)
+	// with nobody else to confirm, no record
+	one := newDriverRig(t, "alone.adding.example.", driverPolicy)
+	one.wire.signsAtNaming = true
+	one.wire.parentDS[0] = true
+	if err := one.l.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := one.keysIn(KeyStateActive, "KSK"); len(got) != 1 || one.l.dist[got[0]] != nil {
+		t.Errorf("alone, its active KSKs are %v, with records %v", got, one.l.dist)
+	}
+
+	// a later key of a role takes the table's way
 	l := driverPolicy
 	l.StandbyZSK = 2
 	two := newDriverRig(t, "later.adding.example.", l)
 	two.wire.signsAtNaming = true
 	two.wire.parentDS[0] = true
-	for i := range 3 {
-		if err := two.l.Tick(); err != nil {
-			t.Fatalf("tick %d: %v", i, err)
-		}
-	}
-	inv, err := tdns.GetKeyInventory(two.kdb, two.l.Zone)
-	if err != nil {
+	if err := two.l.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	zsks, signing := 0, 0
-	for _, it := range inv {
-		if roleOf(it.Flags) == "ZSK" {
-			zsks++
-			if it.Sign {
-				signing++
-			}
-		}
+	if err := two.l.Tick(); err != nil {
+		t.Fatal(err)
 	}
-	if zsks < 2 || signing != 1 {
-		t.Errorf("%d ZSKs, %d of them signing: want more than one, and one signing", zsks, signing)
+	if active := two.keysIn(KeyStateActive, "ZSK"); len(active) != 1 {
+		t.Errorf("its active ZSKs are %v, want one", active)
+	}
+	if len(two.keysIn(KeyStatePublished, "ZSK")) == 0 {
+		t.Errorf("a later ZSK is not on the table's way: published %v, standby %v", two.keysIn(KeyStatePublished, "ZSK"), two.keysIn(KeyStateStandby, "ZSK"))
 	}
 
 	// a provider that serves: only T9 sets sign (P1)
 	o := newDriverRig(t, "serves.adding.example.", driverPolicy)
 	o.tick("minted")
-	if got := append(signs(o, KeyStateMpdist, "KSK"), append(signs(o, KeyStatePublished, "KSK"), signs(o, KeyStateStandby, "KSK")...)...); len(got) != 0 {
-		t.Errorf("a provider that serves signs with %v before T9", got)
+	if got := o.keysIn(KeyStateActive, "KSK"); len(got) != 0 {
+		t.Errorf("a provider that serves has its KSKs %v active at once", got)
 	}
 }
 
-// A joiner's keys that it already holds start over at its keys' step: nothing says
-// they have propagated, and an active key would read as if they had. They go on
-// signing, its KSK's DS leaves the DS set until T8, and T3, T8 and T9 run. A key that
-// has been through T3 in this joining stays where it is, and a provider that does not
-// join leaves its keys alone.
-func TestAJoinersKeysStartOverAtItsKeysStep(t *testing.T) {
-	d := newDriverRig(t, "startover.adding.example.", driverPolicy, "p2")
+// A key left on its way, for a provider no NS record names with no active key of its
+// role, has T9 with no wait for the parent: its DS goes there at a step that waits for
+// this key. With an active KSK, or for a provider that serves, the wait stands.
+func TestALoneKSKOnItsWayDoesNotWaitForItsOwnDS(t *testing.T) {
+	ksk := KeyView{State: KeyStateStandby, SEP: true}
+	for _, c := range []struct {
+		what string
+		z    ZoneView
+		want bool
+	}{
+		{"no NS names it, and no active KSK", ZoneView{SignsAtNaming: true, NoActiveOfRole: true}, true},
+		{"no NS names it, and an active KSK", ZoneView{SignsAtNaming: true}, false},
+		{"it serves, with no active KSK", ZoneView{NoActiveOfRole: true}, false},
+	} {
+		if got := parentDSWaitMet(ksk, c.z); got != c.want {
+			t.Errorf("%s: %v, want %v", c.what, got, c.want)
+		}
+	}
+}
+
+// A joiner's keys go to the other signers once more at its keys' step, whatever their
+// states: they were made before those signers named it, so they refused them, or never
+// had them, and its agent's set does not change for them. They stay as they are. Once
+// for the step, also once applied; again for another, and a rejection from before is
+// gone. A provider that does not join sends nothing.
+func TestAJoinersKeysGoOutOnceMoreAtItsKeysStep(t *testing.T) {
+	d := newDriverRig(t, "again.adding.example.", driverPolicy, "p2")
 	d.wire.parentDS[0] = true
-	gen := func(role string) uint16 {
+	gen := func(state, role string) uint16 {
 		t.Helper()
-		pkc, _, err := d.kdb.GenerateKeypair(d.l.Zone, "tdns", tdns.DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, role, nil)
+		pkc, _, err := d.kdb.GenerateKeypair(d.l.Zone, "tdns", state, dns.TypeDNSKEY, dns.ED25519, role, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return pkc.KeyId
 	}
-	ksk, zsk := gen("KSK"), gen("ZSK")
+	ksk, zsk, standby := gen(tdns.DnskeyStateActive, "KSK"), gen(tdns.DnskeyStateActive, "ZSK"), gen(tdns.DnskeyStateStandby, "ZSK")
+	resent := func() []uint16 {
+		d.wire.mu.Lock()
+		defer d.wire.mu.Unlock()
+		out := slices.Clone(d.wire.resends)
+		d.wire.resends = nil
+		return out
+	}
 	tick := func(what string) {
 		t.Helper()
 		if err := d.l.Tick(); err != nil {
 			t.Fatalf("%s: %v", what, err)
 		}
 	}
+	resent()
 	tick("not joining")
-	if s := d.state(ksk); s != KeyStateActive {
-		t.Fatalf("not joining, its KSK is %s", s)
+	if got := resent(); len(got) != 0 {
+		t.Fatalf("not joining, resent %v", got)
 	}
-	d.wire.joiningSince = time.Now()
-	if err := d.l.StartOver(); err != nil {
+	since := time.Now()
+	d.wire.joiningSince = since
+	if err := d.l.DistributeAtJoining(); err != nil {
 		t.Fatal(err)
 	}
-	// the agent holds them already: only a resend has it distribute them (#256)
-	d.wire.mu.Lock()
-	resent := slices.Clone(d.wire.resends)
-	d.wire.mu.Unlock()
-	if !slices.Contains(resent, ksk) || !slices.Contains(resent, zsk) {
-		t.Errorf("starting over, resent %v: want both keys resent", resent)
-	}
-	for _, id := range []uint16{ksk, zsk} {
-		if s := d.state(id); s != KeyStateMpdist {
-			t.Fatalf("at its keys' step key %d is %s, want mpdist", id, s)
+	got := resent()
+	for _, id := range []uint16{ksk, zsk, standby} {
+		if !slices.Contains(got, id) {
+			t.Errorf("at its keys' step, resent %v: want key %d", got, id)
 		}
-		cols, err := d.l.columnsOf(id)
-		if err != nil || !cols.Sign || cols.DS.Bool {
-			t.Fatalf("key %d's columns %+v (%v), want it signing with no ds", id, cols, err)
-		}
-		if _, _, err := d.l.Confirm(id, "p2", "applied", ""); err != nil {
-			t.Fatal(err)
-		}
-		if s := d.state(id); s != KeyStatePublished {
-			t.Fatalf("every signer applied it, and key %d is %s", id, s)
+		if d.l.dist[id] == nil {
+			t.Errorf("at its keys' step, key %d has no record", id)
 		}
 	}
-	d.clock.Advance(driverPolicy.PropagationDelay + d.wire.ttl + time.Second)
-	tick("propagated")
-	if s := d.state(ksk); s != KeyStateStandby {
-		t.Fatalf("propagated, its KSK is %s, want standby, and no second start", s)
-	}
-	d.wire.parentDS[ksk] = true
-	d.wire.parentTTL = time.Hour
-	tick("its DS served")
-	d.clock.Advance(time.Hour + time.Second)
-	tick("the DS TTL passed")
-	tick("and again")
 	if s := d.state(ksk); s != KeyStateActive {
-		t.Fatalf("the DS TTL passed, its KSK is %s, want active", s)
+		t.Errorf("at its keys' step its KSK is %s, want it left active", s)
 	}
-	// keys from an earlier time, published before this joining began, a standby
-	// key among them
-	pkc, _, err := d.kdb.GenerateKeypair(d.l.Zone, "earlier", tdns.DnskeyStateStandby, dns.TypeDNSKEY, dns.ED25519, "ZSK", nil)
+	if s := d.state(standby); s != KeyStateStandby {
+		t.Errorf("at its keys' step its standby ZSK is %s, want it left standby", s)
+	}
+	if _, _, err := d.l.Confirm(ksk, "p2", "rejected", "not named here"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.l.Confirm(zsk, "p2", "applied", ""); err != nil {
+		t.Fatal(err)
+	}
+	tick("the same step")
+	if got := resent(); len(got) != 0 {
+		t.Errorf("the same step, resent %v, want nothing", got)
+	}
+	if d.l.dist[zsk] != nil {
+		t.Errorf("applied, and the ZSK's record came back: %+v", d.l.dist[zsk])
+	}
+	d.wire.joiningSince = since.Add(time.Hour)
+	tick("another step")
+	if got := resent(); !slices.Contains(got, ksk) || !slices.Contains(got, zsk) {
+		t.Errorf("another step, resent %v: want both keys", got)
+	}
+	if rec := d.l.dist[ksk]; rec == nil || len(rec.Rejected) != 0 {
+		t.Errorf("another step, the KSK's record is %+v: want one with no rejection", rec)
+	}
+	d.wire.joiningSince = time.Time{}
+	tick("past its keys' step")
+	if got := resent(); len(got) != 0 {
+		t.Errorf("past its keys' step, resent %v, want nothing", got)
+	}
+
+	// with nobody else to send them to, nothing
+	alone := newDriverRig(t, "again.alone.adding.example.", driverPolicy)
+	alone.wire.parentDS[0] = true
+	pkc, _, err := alone.kdb.GenerateKeypair(alone.l.Zone, "tdns", tdns.DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, "KSK", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d.wire.joiningSince = time.Now().Add(time.Hour)
-	tick("an earlier time")
-	if s := d.state(ksk); s != KeyStateMpdist {
-		t.Errorf("published before its keys' step began, its KSK is %s, want mpdist", s)
+	alone.wire.joiningSince = since
+	if err := alone.l.DistributeAtJoining(); err != nil {
+		t.Fatal(err)
 	}
-	if s := d.state(pkc.KeyId); s != KeyStateMpdist {
-		t.Errorf("published before its keys' step began, its standby ZSK is %s, want mpdist", s)
+	if alone.l.dist[pkc.KeyId] != nil {
+		t.Errorf("alone, it has a record: %+v", alone.l.dist[pkc.KeyId])
 	}
 }
