@@ -147,11 +147,14 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// An origin that does not vote in the zone is refused at once,
 			// before its edit is kept: also on a zone whose edits wait for
 			// manual approval, where it would otherwise wait to be refused
-			// only when approved.
-			if refusal := originVoteRefusal(dns.Fqdn(zone), senderID, localAgents[senderID], msg.Operations, msg.Records); refusal != nil && !removal {
-				refusal.DistributionID, refusal.Nonce = msg.DistributionID, msg.Nonce
-				combinerSendConfirmation(tm, deliveredBy, refusal)
-				continue
+			// only when approved. A removal is judged first: originVoteRefusal
+			// warns of what it refuses.
+			if !removal {
+				if refusal := originVoteRefusal(dns.Fqdn(zone), senderID, localAgents[senderID], msg.Operations, msg.Records); refusal != nil {
+					refusal.DistributionID, refusal.Nonce = msg.DistributionID, msg.Nonce
+					combinerSendConfirmation(tm, deliveredBy, refusal)
+					continue
+				}
 			}
 
 			// Persist all incoming edits to CombinerPendingEdits first.
