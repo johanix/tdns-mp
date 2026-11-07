@@ -396,18 +396,22 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 
 	if len(s.InstructionMembers) > 0 {
 		// what each member tells, first hand (plan S5a); Hold is its
-		// signer's confirmation of the hold (S6)
+		// signer's confirmation of the hold (S6), CaughtUp whether it has
+		// caught up in the zone (S18a)
 		fmt.Fprintln(w, "\nInstructions, per member:")
-		fmt.Fprintf(w, "  %-6s  %-6s  %-8s  %-4s  %-8s  %s\n", "Active", "Newest", "Rollover", "Hold", "Heard", "Identity")
+		fmt.Fprintf(w, "  %-6s  %-6s  %-8s  %-4s  %-8s  %-8s  %s\n", "Active", "Newest", "Rollover", "Hold", "CaughtUp", "Heard", "Identity")
 		for _, m := range s.InstructionMembers {
-			rollover, hold := "no", "no"
+			rollover, hold, caughtUp := "no", "no", "no"
 			if m.Rollover {
 				rollover = "yes"
 			}
 			if m.Hold {
 				hold = "yes"
 			}
-			fmt.Fprintf(w, "  %-6s  %-6s  %-8s  %-4s  %-8s  %s%s\n", serialOrDash(m.Active), serialOrDash(m.Newest), rollover, hold,
+			if m.CaughtUp {
+				caughtUp = "yes"
+			}
+			fmt.Fprintf(w, "  %-6s  %-6s  %-8s  %-4s  %-8s  %-8s  %s%s\n", serialOrDash(m.Active), serialOrDash(m.Newest), rollover, hold, caughtUp,
 				clockOrDash(m.Heard), termSafe(m.Identity), memberNotes(m))
 		}
 	}

@@ -382,4 +382,7 @@ type InternalMpConf struct {
 	// reconciles: what the agent and the auditor keep of their zones'
 	// reconciliations in memory (reconcile.go).
 	reconciles reconcileBook
+	// transfers: the agent's transfer confirmations for a server role's
+	// step (server_role.go).
+	transfers transferBook
 }

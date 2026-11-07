@@ -66,6 +66,7 @@ type PeerSyncRequest struct {
 	CatchUp        *CatchUp                 `json:"catch_up,omitempty"` // a request for the zone's state, or its answer
 	Acting         *ActingHandover          `json:"acting,omitempty"`   // a hand-over, on an update to the agent's combiner (S10)
 	Instr          *MsgStamp                // the sender's stamp, set at every send (S5b)
+	Withdraw       *Withdraw                // the leader's withdrawal of another provider's records (S16)
 }
 
 // PeerSyncResponse is the receiver's confirmation of a PeerSyncRequest.

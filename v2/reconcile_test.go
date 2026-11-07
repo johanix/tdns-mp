@@ -220,8 +220,8 @@ func TestDoneWaitsForEveryVotingMembersParts(t *testing.T) {
 // with them. The last step hands V's lists.
 func TestUntilTheFirstStepThePartsKeepTheSetsTheyHold(t *testing.T) {
 	r := newReconcileRig(t, "keep.reconcile.example.", roleA)
-	// v gives n a server role and leaves the NS to the owner: kinds of change
-	// the judge refuses until their steps exist (S18a, S19), here as if one did
+	// v gives n a server role (S18a) and leaves the NS to the owner, a kind
+	// of change the judge refuses until S19, here as if it did not
 	r.v = jAt(t, 42, `servers="a,b,n" nsmgmt="owner" suffix="v"`, freezeRecords...)
 	r.holdUnjudged(r.v, time.Now())
 	r.hear(roleN, tells(r.n, r.v), true) // a voting member under V: its payload encryption
@@ -240,8 +240,16 @@ func TestUntilTheFirstStepThePartsKeepTheSetsTheyHold(t *testing.T) {
 	r.holdsToo(roleB)
 	r.holdsToo(roleN)
 	r.turn(time.Now())
+	// n's server role first (S18a): its step changes no set
+	if h = r.wanted(); h.Step != 1 || !slices.Equal(providerLabels(h.Sets.Servers), []string{"a", "b"}) {
+		t.Fatalf("the server role's step: step %d, servers %v", h.Step, providerLabels(h.Sets.Servers))
+	}
+	r.partsTake()
+	r.holdsToo(roleB)
+	r.holdsToo(roleN)
+	r.turn(time.Now())
 	h = r.wanted()
-	if got := providerLabels(h.Sets.Servers); h.Step != 1 || !slices.Equal(got, []string{"a", "b", "n"}) || h.Sets.NSmgmt != rolesFor(r.v, r.v, 0).NSmgmt {
+	if got := providerLabels(h.Sets.Servers); h.Step != 2 || !slices.Equal(got, []string{"a", "b", "n"}) || h.Sets.NSmgmt != rolesFor(r.v, r.v, 0).NSmgmt {
 		t.Errorf("the last step's sets: step %d, servers %v, nsmgmt %d", h.Step, got, h.Sets.NSmgmt)
 	}
 }
