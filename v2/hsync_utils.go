@@ -1078,6 +1078,13 @@ func (mpzd *MPZoneData) hasPubkey() bool {
 	return mpzd.roles().Pubkey
 }
 
+// hasPubcds: the zone's instructions carry the pubcds flag: the customer's
+// word that its providers may publish the zone's CDS and CDNSKEY in zones of
+// their own (combiner_signal_cds.go).
+func (mpzd *MPZoneData) hasPubcds() bool {
+	return mpzd.roles().Pubcds
+}
+
 // mpDataLocks is a lock per zone (canonicalName), held while the zone's
 // multi-provider data is computed and set and acted on: by a refresh
 // (MPPreRefresh) and by a hand-over (actBySignerHandover, actByHandover),
@@ -1711,6 +1718,13 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 		if err := mpzd.withdrawZoneSignalKeysWithoutConsent(NewHsyncDB(mpzd.KeyDB)); err != nil {
 			lg.Error("failed to load publish instructions; the zone's at-ns publication is not checked against the customer's consent until the provider zone's next refresh",
 				"zone", mpzd.ZoneName, "err", err)
+		}
+	}
+	// A refresh can change the apex the _dsboot names carry, and the
+	// nameservers they sit under.
+	if tdns.Globals.App.Type == AppTypeMPCombiner {
+		if err := mpzd.syncDsbootNames(); err != nil {
+			lg.Error("the zone's _dsboot names could not follow the refresh; tried again every minute", "zone", mpzd.ZoneName, "err", err)
 		}
 	}
 

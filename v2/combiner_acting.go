@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,11 @@ type actingStore struct {
 	hdb   *HsyncDB // nil: in memory only
 	zones map[string]*heldHandover
 	owed  map[string]bool // zones whose combine by the hand-over held failed
+	// zones whose _dsboot names the last sync left behind, by key: their names
+	dsbootOwed map[string]string
+	// zones whose agent handed no instructions since the last hand-over of
+	// some, by key: their _dsboot names go (handedNone). In memory only.
+	none map[string]bool
 }
 
 type heldHandover struct {
@@ -127,6 +133,16 @@ func (s *actingStore) get(zone string) (heldHandover, bool) {
 	return heldHandover{}, false
 }
 
+// zoneNames are the zones the part holds a hand-over for, by their keys.
+func (s *actingStore) zoneNames() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Sorted(maps.Keys(s.zones))
+}
+
 // reading is the instructions the part was handed for the zone and acts by,
 // whatever its own copy says (from S7); nil when it holds none.
 func (s *actingStore) reading(zone string) *Instructions {
@@ -174,6 +190,33 @@ func (s *actingStore) owe(zone string, owed bool) {
 	}
 }
 
+// oweDsboot notes whether the last sync of the zone's _dsboot names failed.
+func (s *actingStore) oweDsboot(zone string, owed bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !owed {
+		delete(s.dsbootOwed, handoverKey(zone))
+		return
+	}
+	if s.dsbootOwed == nil {
+		s.dsbootOwed = map[string]string{}
+	}
+	s.dsbootOwed[handoverKey(zone)] = zone
+}
+
+// zonesOwingDsboot are the zones whose last sync of the _dsboot names failed.
+func (s *actingStore) zonesOwingDsboot() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Sorted(maps.Values(s.dsbootOwed))
+}
+
 // take stores a hand-over from the agent by: refused when its records do not
 // give the serial and digest it names, or when it is older than the one held
 // (errHandoverOlder, with the one held). A hand-over of no instructions drops
@@ -200,6 +243,10 @@ func (s *actingStore) take(h *ActingHandover, by string) (prev *ActingHandover, 
 		}
 	}
 	if in == nil {
+		if s.none == nil {
+			s.none = map[string]bool{}
+		}
+		s.none[key] = true
 		if prev == nil {
 			return nil, false, nil
 		}
@@ -230,7 +277,20 @@ func (s *actingStore) take(h *ActingHandover, by string) (prev *ActingHandover, 
 		}
 	}
 	s.zones[key] = &heldHandover{handover: &stored, reading: in, by: by, since: now}
+	delete(s.none, key)
 	return prev, true, nil
+}
+
+// handedNone: the agent's latest hand-over for the zone was of no
+// instructions. The zone's multi-provider service has ended, and its
+// _dsboot names go; a zone never handed anything says nothing (rule 5).
+func (s *actingStore) handedNone(zone string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.none[handoverKey(zone)]
 }
 
 // ownAgent: sender is one of the combiner's agents (its agents: list; the
@@ -347,7 +407,14 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 	if mpzd.hasPubkey() != pubkeyBefore {
 		if err := mpzd.withdrawZoneSignalKeysWithoutConsent(NewHsyncDB(mpzd.KeyDB)); err != nil {
 			lgCombiner.Error("failed to load publish instructions; the zone's at-ns publication is not checked against the customer's consent", "zone", mpzd.ZoneName, "err", err)
+		} else if pubkeyBefore {
+			lg.Info("the zone's KEY at the _signal names withdrawn", "zone", mpzd.ZoneName)
 		}
+	}
+	// after the combine: the names carry the apex as it now reads. Failed,
+	// it is said as a failed combine is, and the agent hands it again.
+	if err := mpzd.syncDsbootNames(); err != nil && combineErr == nil {
+		combineErr = err
 	}
 	return combineErr
 }
