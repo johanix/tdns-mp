@@ -197,12 +197,15 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 			// the agent's own SDE entry (its current contribution) plus
 			// the in-flight add/delete delta.
 			// Build currentByType from the agent's intended state, not
-			// the raw SDE snapshot. The data repo retains RRs whose
-			// latest tracking state is PendingRemoval until the
-			// combiner confirms the delete, so a naive snapshot read
-			// would re-include them in a REPLACE and fight the
-			// in-flight delete. Filter those out here so the REPLACE
-			// reflects what we actually want the combiner to hold.
+			// the raw SDE snapshot. A delete made by REPLACE takes the
+			// record out of the data repo at once, and only its
+			// tracking waits for the recipients (#194). The legacy
+			// class-overloaded form retains RRs whose latest tracking
+			// state is PendingRemoval until the combiner confirms the
+			// delete, so a naive snapshot read would re-include them in
+			// a REPLACE and fight the in-flight delete. Filter those out
+			// here so the REPLACE reflects what we actually want the
+			// combiner to hold.
 			selfID := AgentId(mp.Identity)
 			zdr := conf.InternalMp.ZoneDataRepo
 			currentByType := make(map[uint16][]dns.RR)
