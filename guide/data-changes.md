@@ -69,9 +69,21 @@ tdns-mpcli agent zone delrr --zone example.com. \
 ```
 
 The record string must match what is currently in the
-SDE. The agent issues a ClassNONE deletion on the
-combiner side, distributed to peers the same way as
-additions.
+SDE. The agent sends a REPLACE of the type's set without
+the record, to its combiner and its peers, the same way
+as additions.
+
+The record leaves the SDE's data at once, so nothing the
+agent sends later names it again. Its tracking stays,
+state PENDING_REMOVAL, until every recipient has
+confirmed the removal; then it is REMOVED. A recipient
+that refuses the removal puts it back to ACCEPTED, with
+the reason "delete rejected: ...". The delete stands:
+the next REPLACE of the type, or a resync, sends it
+again. A recipient that is down holds the record at
+PENDING_REMOVAL until it answers, or until it loses its
+vote (an auditor never holds it). `edits list` shows the
+record in all of these states.
 
 ### 1.3 What records you can add or remove
 

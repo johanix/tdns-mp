@@ -137,6 +137,32 @@ func (zdr *ZoneDataRepo) removeTrackedRR(zone ZoneName, agent AgentId, rrtype ui
 	}
 }
 
+// followsRemoval: a record in this state that the agent's own REPLACE leaves
+// out is followed to its removal (#194). A recipient holds an ACCEPTED or a
+// PENDING record, or may, and names it as removed when it drops it; one whose
+// removal is under way stays under the distribution that started it, as the
+// recipients that have removed it will not name it again. No recipient names
+// an IGNORED or a REJECTED record as removed: it holds nothing to drop.
+func followsRemoval(state RRState) bool {
+	return state == RRStateAccepted || state == RRStatePending || state == RRStatePendingRemoval
+}
+
+// leftOut is what becomes of the tracking of a record that a REPLACE leaves
+// out. The record has left the data, so nothing sends it again. A record of
+// the agent's own that a recipient may hold keeps its tracking, which the data
+// engine marks PENDING_REMOVAL under the REPLACE's distribution
+// (MarkRRsPending): its removal is followed until every recipient has removed
+// it, and a rejection puts it back to ACCEPTED. The tracking of any other is
+// dropped.
+func (zdr *ZoneDataRepo) leftOut(u *SynchedDataUpdate, rrtype uint16, rrStr string) {
+	if u.UpdateType == "local" {
+		if tr := zdr.trackedRR(u.Zone, u.AgentId, rrtype, rrStr); tr != nil && followsRemoval(tr.State) {
+			return
+		}
+	}
+	zdr.removeTrackedRR(u.Zone, u.AgentId, rrtype, rrStr)
+}
+
 // errNoRoleInZone: this provider has no role in the zone, so nothing of its
 // own leaves its agent for it (the membership design, 2.3; issue 137, item 2).
 var errNoRoleInZone = errors.New("this provider has no role in the zone (it is listed under neither servers= nor signers=)")
@@ -621,7 +647,13 @@ func (zdr *ZoneDataRepo) processReplaceOp(synchedDataUpdate *SynchedDataUpdate, 
 	if len(newRRs) == 0 {
 		if hadOld && len(oldRRset.RRs) > 0 {
 			nod.RRtypes.Delete(rrtype)
-			zdr.removeTracking(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype)
+			if synchedDataUpdate.UpdateType == "local" {
+				for _, oldRR := range oldRRset.RRs {
+					zdr.leftOut(synchedDataUpdate, rrtype, oldRR.String())
+				}
+			} else {
+				zdr.removeTracking(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype)
+			}
 			msg = fmt.Sprintf("Replace with empty set: removed %s %s RRset from agent %q",
 				synchedDataUpdate.Zone, dns.TypeToString[rrtype], synchedDataUpdate.AgentId)
 			lgAgent.Info(msg)
@@ -682,7 +714,7 @@ func (zdr *ZoneDataRepo) processReplaceOp(synchedDataUpdate *SynchedDataUpdate, 
 					}
 				}
 				if !found {
-					zdr.removeTrackedRR(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype, oldRR.String())
+					zdr.leftOut(synchedDataUpdate, rrtype, oldRR.String())
 				}
 			}
 		}

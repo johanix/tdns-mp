@@ -769,13 +769,20 @@ func (zdr *ZoneDataRepo) MarkRRsPending(zone ZoneName, agent AgentId, update *Zo
 		switch op.Operation {
 		case "replace":
 			tracked := zdr.getOrCreateTracking(zone, agent, rrtype)
+			kept := map[string]bool{}
 			for _, rrStr := range op.Records {
 				rr, err := dns.NewRR(rrStr)
 				if err != nil {
 					continue
 				}
+				kept[rr.String()] = true
 				zdr.markAddPending(tracked, rr, distID, now)
 			}
+			// what the set leaves out and a recipient may hold is
+			// removed under this distribution (#194): only the agent's
+			// own REPLACE keeps such a record's tracking (leftOut), and
+			// one whose removal is under way stays under its own
+			markRemovals(tracked, kept, distID, now)
 			opsHandled[rrtype] = true
 
 		case "add":
@@ -898,6 +905,20 @@ func (zdr *ZoneDataRepo) markDeletePending(tracked *TrackedRRset, rr dns.RR, dis
 		}
 	}
 	lgEngine.Warn("markDeletePending: no matching tracked RR found", "rr", matchStr)
+}
+
+// markRemovals marks the tracked records of a set that a REPLACE leaves out,
+// ACCEPTED or PENDING, as RRStatePendingRemoval under distID (#194). kept is
+// what the REPLACE holds.
+func markRemovals(tracked *TrackedRRset, kept map[string]bool, distID string, now time.Time) {
+	for i := range tracked.Tracked {
+		tr := &tracked.Tracked[i]
+		if kept[tr.RR.String()] || (tr.State != RRStateAccepted && tr.State != RRStatePending) {
+			continue
+		}
+		tr.beginDistribution(RRStatePendingRemoval, distID, now)
+		lgEngine.Debug("marked RR as pending-removal", "rr", tr.RR.String(), "distID", distID)
+	}
 }
 
 // markAllDeletePending marks all tracked RRs in the RRset as RRStatePendingRemoval (ClassANY delete).
