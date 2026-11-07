@@ -382,7 +382,19 @@ func TestASecondChangeDuringTheDistributionReplacesTheCsync(t *testing.T) {
 	}
 	r.logged(t, 2, logCsyncMade)
 	r.logged(t, 1, logCsyncMade+" zone="+z+fmt.Sprintf(" serial=%d", csync2.Serial)+` why="the difference between the zone's NS set or glue and the parent's has changed"`)
-	if held := r.repo(t)[r.lem.localID][dns.TypeCSYNC]; len(held) != 1 || held[0].RR != second.RR {
+	// the first one's removal is followed under the second's distribution
+	// (#194): it is tracked, and no longer held
+	var held []TrackedRRInfo
+	for _, info := range r.repo(t)[r.lem.localID][dns.TypeCSYNC] {
+		if info.RR == first.RR {
+			if info.State != RRStatePendingRemoval.String() || info.DistributionID != second.DistributionID {
+				t.Errorf("the first CSYNC is %s under %s, want pending-removal under the second's %s", info.State, info.DistributionID, second.DistributionID)
+			}
+			continue
+		}
+		held = append(held, info)
+	}
+	if len(held) != 1 || held[0].RR != second.RR {
 		t.Errorf("the leader's repo holds the CSYNC records %+v, want only the second", held)
 	}
 
