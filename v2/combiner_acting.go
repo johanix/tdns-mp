@@ -386,8 +386,12 @@ func (conf *Config) refreshFromUpstream(mpzd *MPZoneData, lg *slog.Logger) {
 }
 
 // waitsForHandover: the combiner holds no hand-over for the zone, and the
-// zone's copy has a reading, which carries a serial (#308). Its agent hands it one at the combiner's
-// start report; meanwhile the combiner serves what it served (rule 5).
+// reading it acts by meanwhile (readingOf its copy, as activeOr has it)
+// carries a serial. A copy with HSYNC3 alone carries none (107a): the
+// combiner acts by it, provisionally. One that drops HSYNCPARAM while the
+// last good reading lists several providers with roles keeps that reading,
+// and waits. Its agent hands it one at the combiner's start report;
+// meanwhile the combiner serves what it served (rule 5).
 func (mpzd *MPZoneData) waitsForHandover() bool {
 	if _, held := actingHeld.Load().get(mpzd.ZoneName); held {
 		return false
@@ -396,8 +400,8 @@ func (mpzd *MPZoneData) waitsForHandover() bool {
 	if err != nil || apex == nil {
 		return false
 	}
-	in, err := ReadInstructions(apex)
-	return err == nil && in != nil
+	in := readingOf(apex)
+	return in != nil && in.HasParam
 }
 
 // combinerActingLine is what the combiner acts by for the zone, as `zone
