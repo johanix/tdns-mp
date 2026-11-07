@@ -77,7 +77,7 @@ func (conf *Config) APIsingerDistrib() func(w http.ResponseWriter, r *http.Reque
 					"crypto_type": "JOSE",
 					"state":       peer.GetState().String(),
 				}
-				if addr := peer.CurrentAddress(); addr != nil {
+				if addr := peer.DNSCarrierAddress(); addr != nil {
 					uri := dnsEndpointURI(addr.Host, int(addr.Port))
 					peerMaps[i]["address"] = uri
 					peerMaps[i]["dns_uri"] = uri

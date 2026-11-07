@@ -1,6 +1,7 @@
 package tdnsmp
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -22,7 +23,7 @@ func TestProcessDnskeyConfirmationReadsWhatTheAnswerSaysAboutOurKeys(t *testing.
 	theirs := testDnskeyRR(t, "z.example.", 257)
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
 	track := func(dist string) {
-		tm.TrackDnskeyPropagation("z.example.", dist, []uint16{ours.KeyTag()}, nil, []AgentId{"a1", "a2"})
+		tm.TrackDnskeyPropagation(t.Context(), "z.example.", dist, []uint16{ours.KeyTag()}, nil, []AgentId{"a1", "a2"})
 	}
 	waiting := func(dist, step string) {
 		t.Helper()
@@ -91,7 +92,7 @@ func TestProcessDnskeyConfirmationReadsWhatTheAnswerSaysAboutOurKeys(t *testing.
 
 	// a removal: the record shows up among the removed ones, and the
 	// tracker knows the key was removed (its answer goes out as "removed")
-	tm.TrackDnskeyPropagation("z.example.", "d5", []uint16{ours.KeyTag()}, []uint16{ours.KeyTag()}, []AgentId{"a1", "a2"})
+	tm.TrackDnskeyPropagation(t.Context(), "z.example.", "d5", []uint16{ours.KeyTag()}, []uint16{ours.KeyTag()}, []AgentId{"a1", "a2"})
 	if p := tm.pendingDnskeyPropagations["d5"]; !p.Removed[ours.KeyTag()] {
 		t.Errorf("the removed key is not marked removed in the tracker: %+v", p)
 	}
@@ -109,15 +110,62 @@ func testDnskeyRR(t *testing.T, zone string, flags uint16) *dns.DNSKEY {
 	return k
 }
 
+// distinctTags makes n keys with gen, each made again until none of its key
+// tags is an earlier key's: random 16-bit tags collide about once in 65,536
+// pairs, and two keys under one tag share a test's map entry or a key
+// store's row (#331). gen gives a key and its tags, two for a key a test
+// renumbers.
+func distinctTags[K any](n int, gen func(i int) (K, []uint16)) []K {
+	seen := map[uint16]bool{}
+	out := make([]K, 0, n)
+	for i := range n {
+		for {
+			k, tags := gen(i)
+			if !slices.ContainsFunc(tags, func(tag uint16) bool { return seen[tag] }) {
+				for _, tag := range tags {
+					seen[tag] = true
+				}
+				out = append(out, k)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// distinctDnskeys are test keys of zone, one per flags, under distinct tags.
+func distinctDnskeys(t *testing.T, zone string, flags ...uint16) []*dns.DNSKEY {
+	t.Helper()
+	return distinctTags(len(flags), func(i int) (*dns.DNSKEY, []uint16) {
+		k := testDnskeyRR(t, zone, flags[i])
+		return k, []uint16{k.KeyTag()}
+	})
+}
+
+// A key whose tag an earlier key has is made again, and so is one of whose
+// tags any is taken.
+func TestDistinctTagsMakesAKeyAgainWhileItsTagIsTaken(t *testing.T) {
+	made := [][]uint16{{1}, {1}, {2, 1}, {2, 3}, {4}}
+	calls := 0
+	got := distinctTags(3, func(i int) (int, []uint16) {
+		tags := made[calls]
+		calls++
+		return calls, tags
+	})
+	if !slices.Equal(got, []int{1, 4, 5}) || calls != 5 {
+		t.Errorf("the keys kept: %v after %d made, want [1 4 5] after 5", got, calls)
+	}
+}
+
 // The tracker keeps each key's result per agent: a distribution of two
 // keys where one is applied and the other rejected ends with one key
 // propagated and one rejected, not both rejected; an agent that answered
 // for one key only has not answered.
 func TestProcessDnskeyConfirmationKeepsResultsPerKey(t *testing.T) {
-	a := testDnskeyRR(t, "z.example.", 257)
-	b := testDnskeyRR(t, "z.example.", 256)
+	k := distinctDnskeys(t, "z.example.", 257, 256)
+	a, b := k[0], k[1]
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-	tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{a.KeyTag(), b.KeyTag()}, nil, []AgentId{"a1"})
+	tm.TrackDnskeyPropagation(t.Context(), "z.example.", "d1", []uint16{a.KeyTag(), b.KeyTag()}, nil, []AgentId{"a1"})
 	// a partial that applied a and says nothing of b: a1 has not answered
 	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPartial.String(), []string{a.String()}, nil)
 	p := tm.pendingDnskeyPropagations["d1"]
@@ -139,7 +187,7 @@ func TestProcessDnskeyConfirmationKeepsResultsPerKey(t *testing.T) {
 		t.Errorf("final results: %v, want a applied, b rejected", p.Results["a1"])
 	}
 	// a whole rejection rejects every key it did not apply
-	tm.TrackDnskeyPropagation("z.example.", "d2", []uint16{a.KeyTag(), b.KeyTag()}, nil, []AgentId{"a1"})
+	tm.TrackDnskeyPropagation(t.Context(), "z.example.", "d2", []uint16{a.KeyTag(), b.KeyTag()}, nil, []AgentId{"a1"})
 	tm.ProcessDnskeyConfirmation("d2", "a1", transport.ConfirmFailed.String(), nil, []RejectedItemInfo{{Record: a.String(), Reason: "policy"}})
 	if p := tm.pendingDnskeyPropagations["d2"]; p != nil {
 		t.Errorf("a whole rejection left the propagation pending: %+v", p.Results)
@@ -153,7 +201,7 @@ func TestProcessDnskeyConfirmationKeepsResultsPerKey(t *testing.T) {
 func TestProcessDnskeyConfirmationTakesIgnoredAsAnswered(t *testing.T) {
 	ours := testDnskeyRR(t, "z.example.", 256)
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-	tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{ours.KeyTag()}, nil, []AgentId{"a1", "a2"})
+	tm.TrackDnskeyPropagation(t.Context(), "z.example.", "d1", []uint16{ours.KeyTag()}, nil, []AgentId{"a1", "a2"})
 	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmPending.String(), nil, nil)
 	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmIgnored.String(), nil, nil)
 	p := tm.pendingDnskeyPropagations["d1"]
@@ -176,10 +224,11 @@ func TestProcessDnskeyConfirmationTakesIgnoredAsAnswered(t *testing.T) {
 // a no-op (nothing changed). A success covers every key of the
 // distribution: a key the peer did not list was already there.
 func TestProcessDnskeyConfirmationSuccessCoversKeysAlreadyThere(t *testing.T) {
-	ksk, zsk, standby, retired := testDnskeyRR(t, "z.example.", 257), testDnskeyRR(t, "z.example.", 256), testDnskeyRR(t, "z.example.", 256), testDnskeyRR(t, "z.example.", 256)
+	k := distinctDnskeys(t, "z.example.", 257, 256, 256, 256)
+	ksk, zsk, standby, retired := k[0], k[1], k[2], k[3]
 	tags := []uint16{ksk.KeyTag(), zsk.KeyTag(), standby.KeyTag(), retired.KeyTag()}
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-	tm.TrackDnskeyPropagation("z.example.", "d1", tags, nil, []AgentId{"a1", "a2"})
+	tm.TrackDnskeyPropagation(t.Context(), "z.example.", "d1", tags, nil, []AgentId{"a1", "a2"})
 	tm.ProcessDnskeyConfirmation("d1", "a1", transport.ConfirmSuccess.String(), []string{standby.String()}, nil)
 	p := tm.pendingDnskeyPropagations["d1"]
 	if p == nil || !p.ExpectedAgents["a1"] {
@@ -216,7 +265,7 @@ func TestDnskeyPropagationOutcomeKnowsWhoSigns(t *testing.T) {
 	kt := ours.KeyTag()
 	run := func(signing map[AgentId]bool, a1, a2 string) *PendingDnskeyPropagation {
 		tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-		tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{kt}, nil, []AgentId{"a1", "a2"})
+		tm.TrackDnskeyPropagation(t.Context(), "z.example.", "d1", []uint16{kt}, nil, []AgentId{"a1", "a2"})
 		p := tm.pendingDnskeyPropagations["d1"]
 		p.Signing = signing
 		tm.ProcessDnskeyConfirmation("d1", "a1", a1, nil, nil)
@@ -283,7 +332,7 @@ func providersTestZone(t *testing.T, name string, labels, signers []string) *MPZ
 	hdr := func(rrtype uint16) dns.RR_Header {
 		return dns.RR_Header{Name: mpzd.ZoneName, Rrtype: rrtype, Class: dns.ClassINET, Ttl: 3600}
 	}
-	hp := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: signers}}}
+	hp := numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMSigners{Signers: signers}}})
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{Hdr: hdr(core.TypeHSYNCPARAM), Data: hp}}})
 	var h3s []dns.RR
 	for _, label := range labels {
@@ -302,7 +351,7 @@ func providersTestZone(t *testing.T, name string, labels, signers []string) *MPZ
 func TestSigningAgentsAreAskedAgainWhileUnknown(t *testing.T) {
 	ours := testDnskeyRR(t, "late.track.example.", 256)
 	tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-	tm.TrackDnskeyPropagation("late.track.example.", "d1", []uint16{ours.KeyTag()}, nil, []AgentId{"agent.p2.example.", "agent.p3.example."})
+	tm.TrackDnskeyPropagation(t.Context(), "late.track.example.", "d1", []uint16{ours.KeyTag()}, nil, []AgentId{"agent.p2.example.", "agent.p3.example."})
 	p := tm.pendingDnskeyPropagations["d1"]
 	if p.Signing != nil {
 		t.Fatalf("the zone is not here yet, and who signs is %v, want unknown", p.Signing)
@@ -330,7 +379,7 @@ func TestAnAuditorsSuccessCompletesPropagation(t *testing.T) {
 	kt := ours.KeyTag()
 	track := func() *MPTransportBridge {
 		tm := &MPTransportBridge{pendingDnskeyPropagations: map[string]*PendingDnskeyPropagation{}}
-		tm.TrackDnskeyPropagation("z.example.", "d1", []uint16{kt}, nil, []AgentId{"p2", "p3", "aud"})
+		tm.TrackDnskeyPropagation(t.Context(), "z.example.", "d1", []uint16{kt}, nil, []AgentId{"p2", "p3", "aud"})
 		tm.ProcessDnskeyConfirmation("d1", "p2", transport.ConfirmSuccess.String(), []string{ours.String()}, nil)
 		tm.ProcessDnskeyConfirmation("d1", "p3", transport.ConfirmIgnored.String(), nil, nil)
 		return tm

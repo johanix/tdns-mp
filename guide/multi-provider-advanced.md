@@ -124,7 +124,7 @@ parentsync:
          algorithm:  ED25519
 
 # How long an elected leader holds the role; 60m is the
-# default.
+# default. The value takes a unit (60m, 3600s).
 # delegationsync:
 #    leader-election-ttl: 60m
 ```
@@ -153,15 +153,71 @@ and applies the changes.
 **Flow:**
 
 1. The agent detects a change to delegation data.
-2. The agent publishes a CSYNC record (for NS/glue changes)
-   or a CDS record (for DS changes) at the zone apex.
-3. The agent sends a NOTIFY with the appropriate QTYPE
-   (CSYNC or CDS) to the parent's NOTIFY receiver address
-   (from the DSYNC RRset).
+2. A CSYNC record (for NS/glue changes) or a CDS record
+   (for DS changes) is published at the zone apex. For a
+   multi-provider zone the CSYNC is made by the leader
+   agent and the CDS is served by the signer; see below.
+3. The elected leader agent sends a NOTIFY with the
+   appropriate QTYPE (CSYNC or CDS) to the parent's NOTIFY
+   receiver address (from the DSYNC RRset). A NOTIFY(CDS)
+   goes out only once the agent's own copy of the zone, which
+   it transfers from its signer, carries a CDS RRset.
 4. The parent's scanner queries the child for the published
    records, authenticates them under the parent zone's
    delegation policy (section 2.3), and applies the changes
    to the parent zone.
+
+A multi-provider zone has one CSYNC, and the leader agent
+makes it. A change of the NS set reaches every provider as
+a SYNC, the leader among them. When the leader then finds
+the zone's NS set or glue differing from the parent's, and
+a provider signs the zone, it makes a CSYNC with the
+immediate flag and sends it to every provider as a
+contribution: to the other agents, each of which hands it
+to its combiner, and to its own combiner. Its serial field
+is the time it was made, or one more than the newest CSYNC
+the leader knows of for the zone if that is later. A
+combiner serves the newest CSYNC it has been sent and
+makes none itself; an agent takes a CSYNC only from the
+agent it knows as the zone's leader, and rejects any
+other. The leader makes a new CSYNC only when that
+difference changes: an election, an operator's request and
+the leader's own checks of the parent make none.
+
+The NOTIFY(CSYNC) leaves when every provider has given its
+final confirmation of the CSYNC, and the wait described
+next has passed since the last of them. While
+confirmations are missing the agent logs which providers
+it waits for, at once and then every 10 minutes; there is
+no time-out. If a provider rejects the CSYNC the sync has
+failed: nothing is sent, the agent asks again after a
+delay, and that attempt distributes a new CSYNC. A
+NOTIFY(CDS) of the same sync leaves together with the
+NOTIFY(CSYNC). A parent that takes UPDATE gets its UPDATE
+at once; the CSYNC is distributed all the same.
+
+A NOTIFY only asks the parent to scan, and a scan that
+comes before the zone's nameservers serve the change finds
+nothing to do. For a multi-provider zone the leader agent
+therefore holds the NOTIFY of a change before it sends it,
+for the largest `dnssec.kasp.propagation-delay` among the
+providers that serve the zone (HSYNCPARAM `servers=`).
+Each agent tells the other agents its own value in its
+beats; a provider whose value is not known is left out.
+The wait has a ceiling, `delegationsync.notify-wait-max`
+in the agent's configuration, 10 minutes by default: a
+provider that announces more is waited for that long and
+no longer, and the agent says so once in its log. An
+UPDATE is not held.
+
+Nor does the leader count the sync as done when the NOTIFY
+has been sent. It compares the parent with the zone again
+30 seconds after the NOTIFY has left, sends the NOTIFY
+again (at once) if they still differ, and repeats this
+with growing delays for about an hour. If the parent still
+differs then, the agent logs a warning, and the next
+change of the delegation's data, or the next election,
+starts over.
 
 ### 1.4 Scheme Selection
 
@@ -391,6 +447,22 @@ multi-provider:
         allowed-rrtypes: [ KEY ]
 ```
 
+The provider zone itself is configured in the combiner as a
+customer zone is: a secondary of the provider's own primary,
+with the `multi-provider` option. The combiner's start-up
+re-apply and the combine onto a refreshed copy are attached
+only to zones with that option, so without it a restart or a
+refresh does not put the `_signal` KEYs back. The zone has no
+HSYNC records, and the combiner does not expect any.
+
+```yaml
+zones:
+   - name:       alpha.example.net.
+     type:       secondary
+     primaries:  [ { addr: '192.0.2.1:53', key: NOKEY } ]
+     options:    [ multi-provider ]
+```
+
 When the agent sends a Publish instruction with
 `locations: ["at-ns"]`, the combiner:
 
@@ -402,6 +474,29 @@ When the agent sends a Publish instruction with
 When NS records change (providers added or removed), the
 combiner resyncs: it diffs the current NS set against the
 stored set and adds/removes `_signal` KEYs accordingly.
+
+The combiner stores the instruction. The provider zone's
+own source does not have the `_signal` KEYs, so when the
+combiner starts it publishes them again from the stored
+instructions, as soon as the provider zone has loaded. A
+customer zone that has not loaded by then is asked for its
+consent (below) when it has. A refresh of the provider
+zone from its source keeps them in the same way: the
+combiner puts them onto the incoming zone before it is
+served.
+
+The `_signal` names need the customer's consent: the
+`pubkey` flag in the zone's HSYNCPARAM record. The agent
+asks for `at-ns` only when the flag is there, and the
+combiner looks again each time it acts on a stored
+instruction (an NS change, a restart, a refresh or
+`edits reapply` of the provider zone), and when a
+refresh of the customer's zone changes its HSYNCPARAM.
+If the zone does not say `pubkey`, the combiner retracts
+the `_signal` KEYs it had published for that zone and
+keeps the instruction for the apex only.
+When the customer adds the flag again, the agent's next
+Publish instruction puts the `_signal` KEYs back.
 
 
 ## 4. Provider-to-Provider Synchronization
@@ -510,10 +605,21 @@ Key properties:
   the gossip protocol.
 - The leader has a TTL, `delegationsync.leader-election-ttl`
   (default 60m). Re-election is triggered automatically
-  before expiry.
+  before expiry. The value takes a unit: a bare number such as
+  `300` is read as nanoseconds. A lease below one minute is
+  refused with an error in the log, and the default is used.
 - If the group degrades (a member becomes unreachable), the
   leader is invalidated immediately.
 
 The leader is responsible for parent-facing operations
 (delegation sync, key publication) on behalf of the entire
-provider group.
+provider group. It takes them up when it is elected, for
+the zones the group has then, and for a zone that joins
+the group later (its set of providers changed) when that
+zone arrives.
+
+A group whose last zone has left it is gone, and its
+election with it. If the group comes back later, it elects
+a leader as a new group does. A lease renewal is called
+for the zones and the voting members the group has when
+the renewal is due.

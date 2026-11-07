@@ -16,7 +16,11 @@ import (
 // waits a cadence (DefaultPublishCadence, 5 s). With a zero default cadence
 // no zone is ever busy, so the gate publishes in the caller and the tests
 // keep their reading. The daemons run with the real default.
+//
+// The loggers the tests capture are made swappable here, before any test
+// runs, and not written after that (logTo, #276).
 func TestMain(m *testing.M) {
 	tdns.DefaultPublishCadence = 0
+	lg, lgAgent, lgEngine, lgSigner = swappable(lg), swappable(lgAgent), swappable(lgEngine), swappable(lgSigner)
 	os.Exit(m.Run())
 }

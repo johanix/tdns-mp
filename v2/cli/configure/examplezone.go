@@ -34,7 +34,7 @@ func ensureExampleZone(cv CoordinatedValues, l fsLayout, w io.Writer) (bool, err
 			return false, nil
 		}
 		for _, id := range []string{cv.Agent.Identity, cv.Auditor.Identity} {
-			if id != "" && !named[dns.CanonicalName(id)] {
+			if id != "" && !named[core.CanonicalizeName(dns.Fqdn(id))] {
 				fmt.Fprintf(w, "  WARNING: %s has no HSYNC3 record for %s; add one, or remove the file and re-run to regenerate it\n", path, id)
 			}
 		}
@@ -73,7 +73,7 @@ func hsync3Identities(zone, path string) (map[string]bool, error) {
 			continue
 		}
 		if h, isHsync3 := prr.Data.(*core.HSYNC3); isHsync3 {
-			ids[dns.CanonicalName(h.Identity)] = true
+			ids[core.CanonicalizeName(dns.Fqdn(h.Identity))] = true
 		}
 	}
 	return ids, zp.Err()

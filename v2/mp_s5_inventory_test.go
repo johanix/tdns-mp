@@ -189,18 +189,14 @@ func TestSyncherGatesForOwnedAndMultiProviderZones(t *testing.T) {
 	if syncherPublishesDNSKEYCDS(conf, zd) {
 		t.Error("no parentsync: no CDS")
 	}
-	// setup: no election manager, anything goes; with one, the leader only
-	if !mpSetupAllowed(conf, zd) {
-		t.Error("with no election manager the setup is refused")
-	}
-	lem := NewLeaderElectionManager("agent.us.example.", time.Minute, func(ZoneName, string, map[string][]string) error { return nil })
-	conf.InternalMp.LeaderElectionManager = lem
-	if mpSetupAllowed(conf, zd) {
-		t.Error("a multi-provider zone with no leader elected: the setup ran")
+	// tdns's setup: never for a multi-provider zone, its key is the leader's
+	// key set-up's (step 7b); a zone tdns runs alone runs it
+	if setupArmRuns(zd) {
+		t.Error("a multi-provider zone: tdns's setup ran")
 	}
 	plain := &tdns.ZoneData{ZoneName: "plain.example.", Options: map[tdns.ZoneOption]bool{tdns.OptParentSync: true}}
-	if !mpSetupAllowed(conf, plain) {
-		t.Error("a zone tdns runs alone is gated on a leader")
+	if !setupArmRuns(plain) {
+		t.Error("a zone tdns runs alone: tdns's setup did not run")
 	}
 	// the combiner's hint: nothing without a keystore that knows the DS
 	// set; with one, the ds=1 KSKs, not every served SEP key

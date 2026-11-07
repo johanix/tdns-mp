@@ -20,6 +20,7 @@ package tdnsmp
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -50,6 +51,10 @@ type peerEnv struct {
 	Registry *AgentRegistry
 	Bridge   *MPTransportBridge
 	MsgQs    *MsgQs
+
+	// Cert is the peer's own certificate, when integEnvConfig.Certificates
+	// gave it one: its bridge loaded it from files, as an agent does.
+	Cert tls.Certificate
 }
 
 // integEnv is the two-peer fixture returned by newIntegEnv. Both peers
@@ -87,9 +92,32 @@ type integEnvConfig struct {
 	// integControlZone and is refused.
 	ControlZoneIsIdentity bool
 
+	// Discovery, when set, gives each peer a resolver of its own over the
+	// records of that zone, to discover the other through
+	// (discovery_harness_test.go). Without it a discovery fails before its
+	// first query.
+	Discovery *discoveryZone
+
+	// Keys, when set, gives the peer with that identity payload crypto with
+	// the key pair as its own. Without it the peers run without payload
+	// crypto.
+	Keys map[string]*harnessKey
+
 	// Role is the role the bridge is built for. Empty is the agent's; an
 	// auditor peer takes roleAuditor.
 	Role string
+
+	// AuthorizedPeers, when set, is what the bridge's AuthorizedPeers
+	// callback returns, as a combiner's configured agents are. It takes
+	// the place of AuthorizeAllPeers.
+	AuthorizedPeers []string
+
+	// CombinerID is the agent's combiner, as the agent's config names it.
+	CombinerID string
+
+	// Certificates gives each peer a self-signed certificate of its own,
+	// which its bridge loads from files as its HTTPS client certificate.
+	Certificates bool
 }
 
 // newIntegEnv builds two in-process peers, "Alice" and "Bob", each
@@ -154,9 +182,6 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		Ping:              make(chan *AgentMsgReport, 4),
 		KeystateInventory: make(chan *KeystateInventoryMsg, 4),
 		KeystateSignal:    make(chan *KeystateSignalMsg, 4),
-		EditsResponse:     make(chan *EditsResponseMsg, 4),
-		ConfigResponse:    make(chan *ConfigResponseMsg, 4),
-		AuditResponse:     make(chan *AuditResponseMsg, 4),
 		StatusUpdate:      make(chan *StatusUpdateMsg, 4),
 	}
 
@@ -177,6 +202,9 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		alice := dns.Fqdn("alice.agent.example.")
 		bob := dns.Fqdn("bob.agent.example.")
 		authorizedPeers = func() []string { return []string{alice, bob} }
+	}
+	if cfg != nil && cfg.AuthorizedPeers != nil {
+		authorizedPeers = func() []string { return cfg.AuthorizedPeers }
 	}
 
 	controlZone := integControlZone
@@ -203,6 +231,19 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 		GetZone:      tdns.Zones.Get,
 		GetZoneNames: tdns.Zones.Keys,
 	}
+	if cfg != nil {
+		bridgeCfg.CombinerID = cfg.CombinerID
+	}
+	if cfg != nil && cfg.Discovery != nil {
+		imr := harnessImr(t, cfg.Discovery)
+		bridgeCfg.GetImrEngine = func() *Imr { return imr }
+	}
+	if cfg != nil && cfg.Keys[identity] != nil {
+		bridgeCfg.PayloadCrypto = cfg.Keys[identity].payloadCrypto(t)
+	}
+	if cfg != nil && cfg.Certificates {
+		bridgeCfg.ClientCertFile, bridgeCfg.ClientKeyFile, pe.Cert = writeAgentCert(t, identity)
+	}
 	bridge, err := NewMPTransportBridge(bridgeCfg)
 	if err != nil {
 		t.Fatalf("NewMPTransportBridge(%s): %v", identity, err)
@@ -222,6 +263,10 @@ func newPeer(t *testing.T, identity, chunkMode string, cfg *integEnvConfig) *pee
 //
 // Pass identities as the FQDNs that should appear in HSYNC3. The
 // harness derives a short label by stripping the first DNS label.
+//
+// With identities, the zone also gets an HSYNCPARAM that lists every
+// label in servers=, at serial 1: a reading needs HSYNCPARAM and its
+// serial (#308), and every provider seeded serves and votes.
 //
 // To create a zone with NO HSYNC3, pass identities=nil. To create a
 // zone where HSYNC3 exists but excludes some identity, just omit it
@@ -273,6 +318,11 @@ func seedZoneWithHSYNC3(t *testing.T, zoneName string, identities ...string) *td
 			rrset.RRs = append(rrset.RRs, prr)
 		}
 		apex.RRtypes.Set(core.TypeHSYNC3, rrset)
+		servers := make([]string, len(identities))
+		for i, ident := range identities {
+			servers[i] = shortLabel(dns.Fqdn(ident))
+		}
+		setHSYNCPARAM(apex, zoneName, &core.HSYNCPARAMServers{Servers: servers})
 	}
 	zd.Data.Set(zoneName, *apex)
 	// GetOwner/GetRRset read the published snapshot, not zd.Data, since
@@ -291,25 +341,17 @@ func seedZoneWithHSYNC3(t *testing.T, zoneName string, identities ...string) *td
 	return zd
 }
 
-// addHSYNCPARAMServers adds an HSYNCPARAM RRset to a seeded zone granting the
-// "servers" role to the given HSYNC3 labels. Identities present in HSYNC3 but
-// absent from any role become non-participants — the role-less case.
+// addHSYNCPARAMServers replaces a seeded zone's HSYNCPARAM with one granting
+// the "servers" role to the given HSYNC3 labels, at the next serial.
+// Identities present in HSYNC3 but absent from any role become
+// non-participants — the role-less case.
 func addHSYNCPARAMServers(t *testing.T, zd *tdns.ZoneData, serverLabels ...string) {
 	t.Helper()
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil || apex == nil {
 		t.Fatalf("apex not found for %s: %v", zd.ZoneName, err)
 	}
-	hp := &core.HSYNCPARAM{
-		Value: []core.HSYNCPARAMKeyValue{
-			&core.HSYNCPARAMServers{Servers: serverLabels},
-		},
-	}
-	prr := &dns.PrivateRR{
-		Hdr:  dns.RR_Header{Name: zd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
-		Data: hp,
-	}
-	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{prr}})
+	setHSYNCPARAM(apex, zd.ZoneName, &core.HSYNCPARAMServers{Servers: serverLabels})
 	zd.Data.Set(zd.ZoneName, *apex)
 	// Re-baseline the published snapshot from the updated working set.
 	zd.InstallInitialSnapshot()
@@ -331,21 +373,35 @@ func seedAuditedZone(t *testing.T, zoneName, auditor string, providers ...string
 	for i, p := range providers {
 		servers[i] = shortLabel(p)
 	}
-	hp := &core.HSYNCPARAM{
-		Value: []core.HSYNCPARAMKeyValue{
-			&core.HSYNCPARAMServers{Servers: servers},
-			&core.HSYNCPARAMAuditors{Auditors: []string{shortLabel(auditor)}},
-		},
-	}
-	prr := &dns.PrivateRR{
-		Hdr:  dns.RR_Header{Name: zd.ZoneName, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
-		Data: hp,
-	}
-	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{prr}})
+	setHSYNCPARAM(apex, zd.ZoneName,
+		&core.HSYNCPARAMServers{Servers: servers},
+		&core.HSYNCPARAMAuditors{Auditors: []string{shortLabel(auditor)}})
 	zd.Data.Set(zd.ZoneName, *apex)
 	zd.InstallInitialSnapshot()
 	Zones.Invalidate(zd.ZoneName)
 	return zd
+}
+
+// setHSYNCPARAM sets the apex's HSYNCPARAM to the keys given and serial=,
+// one above the serial of the HSYNCPARAM it replaces (1 for the first): an
+// edit of the instructions raises the owner's serial.
+func setHSYNCPARAM(apex *tdns.OwnerData, zone string, keys ...core.HSYNCPARAMKeyValue) {
+	serial := uint32(1)
+	if rrs := apex.RRtypes.GetOnlyRRSet(core.TypeHSYNCPARAM).RRs; len(rrs) == 1 {
+		if prr, ok := rrs[0].(*dns.PrivateRR); ok {
+			if hp, ok := prr.Data.(*core.HSYNCPARAM); ok {
+				if prev, ok := hp.GetSerial(); ok {
+					serial = prev + 1
+				}
+			}
+		}
+	}
+	hp := &core.HSYNCPARAM{Value: append(keys, &core.HSYNCPARAMSerial{Value: serial})}
+	prr := &dns.PrivateRR{
+		Hdr:  dns.RR_Header{Name: zone, Rrtype: core.TypeHSYNCPARAM, Class: dns.ClassINET, Ttl: 3600},
+		Data: hp,
+	}
+	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{prr}})
 }
 
 // shortLabel takes an FQDN and returns its first label, used as a
@@ -513,12 +569,17 @@ func buildConfirmMessageContext(t *testing.T, tm *MPTransportBridge, senderID, z
 		ctx.Data["transport"] = tm.DNSTransport
 	}
 	if tm.ChunkHandler != nil && tm.ChunkHandler.OnConfirmationReceived != nil {
-		// Repackage as the type alias HandleConfirmation expects.
+		// HandleConfirmation type-asserts transport.ConfirmationCallback
 		cb := tm.ChunkHandler.OnConfirmationReceived
-		ctx.Data["on_confirmation_received"] = func(distributionID string, senderID string, status transport.ConfirmStatus,
-			zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, ignored []string, truncated bool, nonce string) {
-			cb(distributionID, senderID, status, zone, applied, removed, rejected, ignored, truncated, nonce)
-		}
+		ctx.Data["on_confirmation_received"] = transport.ConfirmationCallback(cb)
 	}
 	return ctx
+}
+
+// confirmIn is a confirmation as HandleConfirmation hands it to the
+// bridge's OnConfirmationReceived (tdns-transport P2).
+func confirmIn(distributionID, senderID string, status transport.ConfirmStatus, zone string, applied, removed []string,
+	rejected []transport.RejectedItemDTO, ignored []string, truncated bool, nonce string) *transport.IncomingConfirmation {
+	return &transport.IncomingConfirmation{DistributionID: distributionID, PeerID: senderID, Status: status, Zone: zone,
+		AppliedRecords: applied, RemovedRecords: removed, RejectedItems: rejected, IgnoredRecords: ignored, Truncated: truncated, Nonce: nonce}
 }

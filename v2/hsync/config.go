@@ -20,6 +20,9 @@ type Config struct {
 	HelloFastAttempts  int
 	HelloFastSpacing   time.Duration
 	DiscoverySemLimit  int
+	// PeerHold is how long a peer that no zone names any more is kept
+	// before the reconcile loop removes it (pruneUnsharedPeers).
+	PeerHold time.Duration
 }
 
 // DefaultConfig returns the engine's defaults: what a daemon runs with for
@@ -35,5 +38,6 @@ func DefaultConfig() Config {
 		HelloFastAttempts:  3,                // hello_fast_attempts
 		HelloFastSpacing:   2 * time.Second,  // hello_fast_interval
 		DiscoverySemLimit:  8,
+		PeerHold:           24 * time.Hour, // peer_hold
 	}
 }

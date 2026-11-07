@@ -17,21 +17,21 @@ import (
 	"strings"
 
 	tdns "github.com/johanix/tdns/v2"
-	"github.com/miekg/dns"
 )
 
 // unlistedMultiProviderZones is the set difference the gate is about: the
 // multi-provider zones in served that listed does not name, sorted. Names
-// are compared as FQDNs, case-insensitively, as the keystore keys them.
+// are compared as FQDNs, case-insensitively, as the key machine's take
+// reads the list (lifecycleZoneName).
 func unlistedMultiProviderZones(served, listed []string) []string {
 	have := map[string]bool{}
 	for _, z := range listed {
-		have[strings.ToLower(dns.Fqdn(z))] = true
+		have[lifecycleZoneName(z)] = true
 	}
 	seen := map[string]bool{}
 	var out []string
 	for _, z := range served {
-		name := strings.ToLower(dns.Fqdn(z))
+		name := lifecycleZoneName(z)
 		if have[name] || seen[name] {
 			continue
 		}
@@ -54,14 +54,14 @@ func unlistedMultiProviderZones(served, listed []string) []string {
 func (conf *Config) signedMultiProviderZones() []string {
 	mp := map[string]bool{}
 	for _, z := range conf.InternalMp.MPZoneNames {
-		mp[strings.ToLower(dns.Fqdn(z))] = true
+		mp[lifecycleZoneName(z)] = true
 	}
 	if len(mp) == 0 || conf.Config == nil {
 		return nil
 	}
 	var out []string
 	for _, zc := range conf.Config.Zones {
-		name := strings.ToLower(dns.Fqdn(zc.Name))
+		name := lifecycleZoneName(zc.Name)
 		if mp[name] && zc.DnssecPolicy != "" {
 			out = append(out, name)
 		}

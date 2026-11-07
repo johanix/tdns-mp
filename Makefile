@@ -80,6 +80,40 @@ check-no-mutators:
 		exit 1; \
 	fi
 
-check: check-no-mutators
+# check-names keeps DNS names compared and folded by the DNS rule (RFC 4343:
+# US-ASCII case only), through core.EqualNames and core.CanonicalizeName
+# (canonicalName and sameName in v2), never by hand (#287). Three parts:
+#  - tdns's namecheck (tools/namecheck in tdns), the parser tdns gates its
+#    own tree with, at the tdns commit v2/go.mod pins: no map key built by a
+#    lossy fold, no strings.EqualFold on a name, no name tested folded and
+#    then used unfolded. Its first run fetches it; later runs take it from
+#    the module cache.
+#  - no dns.CanonicalName at all, tests included: it is only ever applied to
+#    a name, and it rewrites any octet that is not valid UTF-8, so two names
+#    can share one key. canonicalName replaces it.
+#  - every strings.ToLower and strings.EqualFold outside the tests carries a
+#    trailing "not-a-name:" comment saying what it folds (a keyword, an RR
+#    type, an option), per site as with "mp-private:" above. namecheck does
+#    not see a name folded by hand behind a helper's return; this does.
+NAMECHECK_VERSION = $(shell awk '$$1 == "github.com/johanix/tdns/v2" { sub(/^v2\.0\.0-/, "v0.0.0-", $$2); print $$2 }' v2/go.mod)
 
-.PHONY: check check-no-mutators
+check-names:
+	@go run github.com/johanix/tdns/tools/namecheck@$(NAMECHECK_VERSION) v2 cmd
+	@violations=$$(grep -RnE 'dns\.CanonicalName\(' v2 cmd --include='*.go' || true); \
+	if [ -n "$$violations" ]; then \
+		echo "dns.CanonicalName rewrites non-UTF-8 octets; use canonicalName:"; \
+		echo "$$violations"; \
+		exit 1; \
+	fi
+	@violations=$$(grep -RnE 'strings\.(ToLower|EqualFold)\(' v2 cmd --include='*.go' \
+		| grep -v '_test\.go' \
+		| grep -v 'not-a-name:' || true); \
+	if [ -n "$$violations" ]; then \
+		echo "hand-folding: use canonicalName or sameName for a DNS name, or mark the site not-a-name: <what it folds>:"; \
+		echo "$$violations"; \
+		exit 1; \
+	fi
+
+check: check-no-mutators check-names
+
+.PHONY: check check-no-mutators check-names

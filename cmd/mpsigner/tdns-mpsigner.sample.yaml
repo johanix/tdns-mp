@@ -60,7 +60,9 @@ listeners:
    transports:     [ do53 ]
 
 authengine:
-   # Keep the SOA serial served to the agent across restarts.
+   # Keep the SOA serial served to the agent across restarts. For the
+   # zones this signer signs: a zone it only relays always has the
+   # upstream signer's serial.
    outbound-soa-serial:  persist
 
 apiserver:

@@ -72,12 +72,14 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 	// never discovered via DNS, so this is their only address source.
 	if ar.TransportManager != nil {
 		cpeer := ar.TransportManager.PeerRegistry.GetOrCreate(string(combinerID))
-		cpeer.SetDiscoveryAddress(&transport.Address{
+		if err := cpeer.SetDNSCarrierAddress(&transport.Address{
 			Host:      host,
 			Port:      uint16(port),
 			Transport: "udp",
-		})
-		cpeer.DNSEndpoint = dnsEndpointURI(host, port)
+		}); err != nil {
+			return fmt.Errorf("combiner address: %w", err)
+		}
+		cpeer.SetDNSEndpoint(dnsEndpointURI(host, port))
 		// Infra peers beat on the slow StartInfraBeatLoop cadence, not the
 		// agent beat interval. Match the decay thresholds to it, else a
 		// healthy combiner false-decays to INTERRUPTED ~5 min after each
@@ -160,11 +162,13 @@ func performCombinerConnectivityCheck(conf *Config) error {
 		combinerID = dns.Fqdn(mp.Combiner.Identity)
 	}
 	peer := transport.NewPeer(combinerID)
-	peer.SetDiscoveryAddress(&transport.Address{
+	if err := peer.SetDNSCarrierAddress(&transport.Address{
 		Host:      host,
 		Port:      uint16(port),
 		Transport: "udp",
-	})
+	}); err != nil {
+		return fmt.Errorf("combiner address: %w", err)
+	}
 
 	// Send ping with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

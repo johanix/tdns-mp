@@ -53,6 +53,8 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 	if tm != nil {
 		tm.Start(ctx) // D3: router dispatch (chunk handler registered at init)
 		lgCombiner.Info("combiner incoming message router started")
+		// the start report: the agent hands every zone over (plan S10)
+		go conf.reportCombinerStart(ctx, tm)
 	}
 
 	// Start combiner message handler

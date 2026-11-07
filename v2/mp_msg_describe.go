@@ -194,7 +194,7 @@ func (t *msgText) describeOperation(depth int, op core.RROperation, prev map[uin
 			t.add(depth+1, "key %d (no record in this operation): %s", ks.KeyTag, describeKeyState(ks, prev))
 		}
 	}
-	if prev != nil && op.Operation == "replace" && strings.EqualFold(op.RRtype, "DNSKEY") {
+	if prev != nil && op.Operation == "replace" && strings.EqualFold(op.RRtype, "DNSKEY") { // not-a-name: an RR type
 		var gone []uint16
 		for tag := range prev {
 			if _, ok := states[tag]; !ok && !seen[tag] {
@@ -425,6 +425,9 @@ func (m *KeystateSignalMsg) Describe() string {
 		for _, fk := range m.ForeignKeys {
 			t.add(2, "provider %s: key %d: %s", fk.Provider, fk.KeyTag, describeKeyState(fk.KeyState, nil))
 		}
+	}
+	if len(m.ForeignSpoken) > 0 {
+		t.add(1, "providers that have spoken: %s", strings.Join(m.ForeignSpoken, " "))
 	}
 	return t.String()
 }

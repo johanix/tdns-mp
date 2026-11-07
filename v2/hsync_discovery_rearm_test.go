@@ -22,11 +22,22 @@ func TestRearmFailedDiscovery(t *testing.T) {
 	// ERROR at the top level but a mechanism already discovered: established
 	// on that path, not re-armed.
 	known := reg.GetOrCreate("known.example.")
+	known.SetMechanismAddress("DNS", &transport.Address{Host: "192.0.2.1", Port: 53, Transport: "udp"})
 	known.SetMechanismState("DNS", transport.PeerStateKnown, "discovered")
 	known.SetState(transport.PeerStateError, "stale failure")
 	rearmFailedDiscovery(reg, "known.example.")
 	if got := known.GetState(); got != transport.PeerStateError {
 		t.Errorf("known peer: state %v, want ERROR untouched", got)
+	}
+
+	// A mechanism past NEEDED that has no address is not discovered, whatever
+	// its state says: the peer is re-armed (#84).
+	noAddress := reg.GetOrCreate("no-address.example.")
+	noAddress.SetMechanismState("DNS", transport.PeerStateIntroducing, "DNS hello accepted and authorized")
+	noAddress.SetState(transport.PeerStateError, "discovery failed")
+	rearmFailedDiscovery(reg, "no-address.example.")
+	if got := noAddress.GetState(); got != transport.PeerStateNeeded {
+		t.Errorf("peer with an introduced mechanism and no address: state %v, want NEEDED", got)
 	}
 
 	// Not in ERROR: untouched.

@@ -4,7 +4,8 @@
  * Signer message handler goroutine.
  * Consumes beat, hello, ping, and RFI messages from MsgQs.
  * Handles RFI KEYSTATE by querying KeyDB and pushing a complete
- * KEYSTATE inventory back to the requesting agent.
+ * KEYSTATE inventory back to the requesting agent, and the agent's
+ * hand-over (KEYSTATE "acting", plan S11).
  */
 
 package tdnsmp
@@ -16,6 +17,7 @@ import (
 
 	"github.com/johanix/tdns-transport/v2/transport"
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 )
 
 var lgSigner = tdns.Logger("signer")
@@ -55,8 +57,7 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			// OPERATIONAL means). State is set on the outbound beat path.
 			if peerRegistry != nil {
 				peer := peerRegistry.GetOrCreate(senderID)
-				peer.LastBeatReceived = time.Now()
-				peer.SetMechanismLastBeatRecv("DNS", peer.LastBeatReceived)
+				peer.SetMechanismLastBeatRecv("DNS", time.Now())
 			}
 
 		case report := <-msgQs.Hello:
@@ -70,7 +71,7 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			// OPERATIONAL (that requires an outbound beat round-trip).
 			if peerRegistry != nil {
 				peer := peerRegistry.GetOrCreate(senderID)
-				peer.LastBeatReceived = time.Now()
+				peer.SetLastBeatReceived(time.Now())
 			}
 
 		case report := <-msgQs.Ping:
@@ -96,12 +97,26 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 				continue
 			}
 
-			// what the other providers said about their keys (#58): the
-			// owner of the zone's key lifecycle writes ds on their rows
-			// from it; for a zone nobody here owns it has no reader
+			// the agent's hand-over (plan S11): what the signer acts by
+			if sigMsg.Signal == "acting" {
+				conf.signerTakeHandover(sigMsg)
+				continue
+			}
+
+			// what the other providers said about their keys (#58), and
+			// which providers have spoken (S7): the owner of the zone's key
+			// lifecycle writes ds on their rows from it; for a zone nobody
+			// here owns it has no reader
 			if sigMsg.Signal == "foreign" {
-				if e := conf.InternalMp.KeyLifecycle; e == nil || !e.Foreign(sigMsg.Zone, sigMsg.ForeignKeys) {
+				if e := conf.InternalMp.KeyLifecycle; e == nil || !e.ForeignWord(sigMsg.Zone, sigMsg.ForeignKeys, sigMsg.ForeignSpoken) {
 					lgSigner.Debug("KEYSTATE foreign for a zone whose key lifecycle is not run here; dropped", "zone", sigMsg.Zone)
+					continue
+				}
+				// a foreign DNSKEY an incoming zone lacked was kept until the
+				// key states relayed for its provider, or the zone owner,
+				// let it go; these key states may do that (#207)
+				if mpzd, ok := Zones.Get(dns.Fqdn(sigMsg.Zone)); ok && mpzd.dropWithdrawnForeignDNSKEYs(conf.MpConfig()) {
+					sendResignRequest(tdns.Conf.Internal.ResignQ, mpzd.ZoneName)
 				}
 				continue
 			}
@@ -133,7 +148,7 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 
 			switch rfiType {
 			case "KEYSTATE":
-				if err := sendKeystateInventoryToAgent(ctx, conf, tm, senderID, zone); err != nil {
+				if err := sendKeystateInventoryToAgent(ctx, conf, tm, senderID, zone, nil); err != nil {
 					lgSigner.Error("Failed to send KEYSTATE inventory", "agent", senderID, "zone", zone, "err", err)
 				}
 			default:
@@ -148,6 +163,13 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 // KeysChanged (every key row write, state or column), so the agents learn
 // about the change and distribute it to the peers.
 func pushKeystateInventoryToAllAgents(conf *Config, zone string) {
+	pushKeystateInventory(conf, zone, nil)
+}
+
+// pushKeystateInventory is pushKeystateInventoryToAllAgents with the keys
+// whose distribution the key lifecycle sends again marked (resend): the
+// agents distribute those again even when nothing changed (#256).
+func pushKeystateInventory(conf *Config, zone string, resend []uint16) {
 	mp := conf.MpConfig()
 	if mp == nil || len(mp.Agents) == 0 {
 		return
@@ -161,38 +183,106 @@ func pushKeystateInventoryToAllAgents(conf *Config, zone string) {
 		if agent.Identity == "" {
 			continue
 		}
-		if err := sendKeystateInventoryToAgent(context.Background(), conf, tm, agent.Identity, zone); err != nil {
+		if err := sendKeystateInventoryToAgent(context.Background(), conf, tm, agent.Identity, zone, resend); err != nil {
 			lgSigner.Error("pushKeystateInventoryToAllAgents: failed", "zone", zone, "agent", agent.Identity, "err", err)
 		}
 	}
 }
 
+// inventoryRequest is the KEYSTATE inventory a signer sends its agent, with
+// the keys its key lifecycle sends again marked (resend, #256), and its
+// marks (plan S6, S11).
+func inventoryRequest(sender, zone string, inventory []KeyInventoryEntry, owned bool, resend []uint16, marks inventoryMarks) *PeerKeystateRequest {
+	return &PeerKeystateRequest{
+		SenderID:     sender,
+		Zone:         zone,
+		Signal:       "inventory",
+		KeyInventory: inventory,
+		Owned:        owned,
+		Resend:       resend,
+		Acting:       marks.acting,
+		NotSigning:   marks.notSigning,
+		Rollover:     marks.rollover,
+		WaitsOn:      marks.waitsOn,
+		Hold:         marks.hold,
+		Timestamp:    time.Now(),
+	}
+}
+
+// inventoryMarks are what a signer's inventory says beside its keys (plan
+// S11): the hand-over it holds for the zone (nil: none), that it does not
+// sign the zone by what it acts by, whether a key rollover is under way at
+// this provider (rolloverUnderWay, on its own state), for each key waiting
+// in mpdist or mpremove, the other signers whose "applied" is missing, and
+// whether it holds the zone's key machine (plan S6), which a signer that
+// does not sign the zone confirms the same way.
+type inventoryMarks struct {
+	acting     *ActingHandover
+	notSigning bool
+	rollover   bool
+	waitsOn    map[uint16][]string
+	hold       bool
+}
+
+// inventoryMarksOf are the zone's marks, given its key inventory. A zone
+// this provider does not sign has no rollover under way: its key machine
+// does not run there. One the machine runs is judged with what the machine
+// knows beside the rows; one it does not run yet, by its rows alone.
+func (conf *Config) inventoryMarksOf(zone string, items []KeyInventoryItem) inventoryMarks {
+	m := inventoryMarks{hold: conf.InternalMp.SignerHolds.held(zone)}
+	if held, ok := actingHeld.Load().get(zone); ok {
+		m.acting = held.handover
+	}
+	if mpzd, ok := Zones.Get(zone); ok {
+		// under the zone's lock: a hand-over replaces MPdata under it
+		mpzd.Lock()
+		notSigning := mpzd.MP != nil && mpzd.MP.MPdata != nil && !mpzd.MP.MPdata.WeAreSigner
+		mpzd.Unlock()
+		if notSigning {
+			m.notSigning = true
+			return m
+		}
+	}
+	var f rolloverFlags
+	if e := conf.InternalMp.KeyLifecycle; e != nil {
+		if l := e.driver(zone); l != nil {
+			var err error
+			if f, err = l.RolloverFlags(); err != nil {
+				lgSigner.Error("key lifecycle: whether a rollover is under way could not be read; the inventory says one is", "zone", zone, "err", err)
+				f.PropagationPending = true
+			}
+			if m.waitsOn, err = l.WaitsOn(); err != nil {
+				lgSigner.Error("key lifecycle: what the keys in flight wait on could not be read", "zone", zone, "err", err)
+			}
+		}
+	}
+	m.rollover = rolloverUnderWay(items, f)
+	return m
+}
+
 // sendKeystateInventoryToAgent queries KeyDB for all keys in the zone and sends
 // a complete KEYSTATE inventory message back to the requesting agent.
-func sendKeystateInventoryToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, agentID string, zone string) error {
+func sendKeystateInventoryToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, agentID string, zone string, resend []uint16) error {
 	hdb := NewHsyncDB(conf.Config.Internal.KeyDB)
 	if hdb == nil {
 		return fmt.Errorf("KeyDB not available")
 	}
 
-	// Only include keys if we are a signer for this zone.
-	// Non-signers send empty inventory so the agent gets a response.
-	var items []KeyInventoryItem
-	if zd, ok := Zones.Get(zone); ok && zd.MP != nil && zd.MP.MPdata != nil && !zd.MP.MPdata.WeAreSigner {
-		lgSigner.Debug("not a signer for zone, sending empty inventory", "zone", zone)
-	} else {
-		var err error
-		items, err = GetKeyInventory(hdb, zone)
-		if err != nil {
-			return fmt.Errorf("GetKeyInventory failed: %w", err)
-		}
+	// The real inventory, a zone this provider does not sign included,
+	// marked as not signing: its agent withdraws nothing from it (plan
+	// S11). Such a zone's keys are not the DS set's source, so it is not
+	// said to be owned: its key machine does not run there.
+	items, err := GetKeyInventory(hdb, zone)
+	if err != nil {
+		return fmt.Errorf("GetKeyInventory failed: %w", err)
 	}
+	marks := conf.inventoryMarksOf(zone, items)
 
-	lgSigner.Debug("KeyDB inventory queried", "zone", zone, "keys", len(items))
+	lgSigner.Debug("KeyDB inventory queried", "zone", zone, "keys", len(items), "notSigning", marks.notSigning)
 
 	inventory := inventoryEntriesOf(items)
 	owned := false
-	if o := conf.InternalMp.KeyLifecycleOwner; o != nil {
+	if o := conf.InternalMp.KeyLifecycleOwner; o != nil && !marks.notSigning {
 		if zd, ok := tdns.Zones.Get(zone); ok && zd != nil {
 			owned = o.Owns(zd)
 		}
@@ -212,14 +302,7 @@ func sendKeystateInventoryToAgent(ctx context.Context, conf *Config, tm *MPTrans
 	}
 
 	// Build and send KEYSTATE inventory
-	req := &PeerKeystateRequest{
-		SenderID:     conf.MpConfig().Identity,
-		Zone:         zone,
-		Signal:       "inventory",
-		KeyInventory: inventory,
-		Owned:        owned,
-		Timestamp:    time.Now(),
-	}
+	req := inventoryRequest(conf.MpConfig().Identity, zone, inventory, owned, resend, marks)
 
 	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

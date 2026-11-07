@@ -582,7 +582,43 @@ func NewAgentZoneCmd(role, kind string) *cobra.Command {
 		newAgentZoneAddRRCmd(kind),
 		newAgentZoneDelRRCmd(kind),
 		newAgentZoneEditsCmd(kind),
+		newAgentZoneInstructionsCmd(kind),
 	)
+	return c
+}
+
+// newAgentZoneInstructionsCmd is the serials the agent keeps of a zone's
+// instructions (design rule 3); `agent parentsync status` shows them.
+func newAgentZoneInstructionsCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "instructions",
+		Short: "The serials the agent keeps of a zone's instructions",
+	}
+	forget := &cobra.Command{
+		Use:   "forget",
+		Short: "Forget a steady zone's stored serials",
+		Long: `Clear the serials this agent keeps of a zone's instructions: the one
+exception to never giving a serial up. The agent refuses unless the zone is
+steady here. Run it at every agent of the zone together. Its uses: a zone the
+owner re-creates at a lower serial, and an agent left behind by a jump of the
+serial of 2^31 or more.
+
+Example:
+  tdns-mpcli agent zone instructions forget --zone example.com.`,
+		Args: cobra.NoArgs,
+		// A refusal comes back as an error; the caller of Execute prints it.
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			amr, err := sendAgentParentSyncCmd(cmd, "instructions-forget")
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), amr.Msg)
+			return nil
+		},
+	}
+	c.AddCommand(forget)
 	return c
 }
 

@@ -37,6 +37,25 @@
       </tr>
     </tbody>
   </table>
+  <p><small>Instructions: {{.MPView.Instructions}}</small></p>
+  {{if .MPView.InstructionMembers}}
+  <table role="grid">
+    <thead>
+      <tr><th>Active</th><th>Newest</th><th>Rollover</th><th>Heard</th><th>Identity</th></tr>
+    </thead>
+    <tbody>
+      {{range .MPView.InstructionMembers}}
+      <tr>
+        <td>{{with .Active}}{{.Serial}}{{else}}-{{end}}</td>
+        <td>{{with .Newest}}{{.Serial}}{{else}}-{{end}}</td>
+        <td>{{if .Rollover}}yes{{else}}no{{end}}</td>
+        <td>{{if .Heard.IsZero}}-{{else}}{{.Heard.Format "15:04:05"}}{{end}}</td>
+        <td>{{.Identity}}{{if .Self}} (this auditor){{end}}{{if .Lags}} (lags){{end}}{{if .OtherDigest}} (another digest){{end}}{{if .Error}} (owner error: {{.Error}}){{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{end}}
 </section>
 
 <section>

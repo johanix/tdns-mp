@@ -17,10 +17,10 @@ import (
 
 // IMR command tree for tdns-mpcli. Mirrors the tdns library's
 // factory-based layout so adding more daemons (or more commands)
-// stays one-line. Today the only tdns-mp app with an IMR is
-// tdns-mpagent, so only the agent tree gets this subtree.
+// stays one-line. tdns-mpagent and tdns-mpauditor both serve /imr
+// for their embedded IMR, so both trees get this subtree.
 
-func newAgentImrCmd(kind string) *cobra.Command {
+func newImrCmd(kind string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "imr",
 		Short: "IMR (Internal Recursive Resolver) cache commands",

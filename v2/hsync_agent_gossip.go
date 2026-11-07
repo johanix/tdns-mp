@@ -20,11 +20,15 @@ func newAgentGossipPort(ar *AgentRegistry) hsync.GossipPort {
 	return &agentGossipPort{gst: ar.GossipStateTable, ar: ar}
 }
 
-func (g *agentGossipPort) MergeGossip(msg *hsync.GossipMessage) {
+func (g *agentGossipPort) MergeGossip(msg *hsync.GossipMessage, from string, group *hsync.ProviderGroupInfo, fromAnswer bool) {
 	if g == nil || g.gst == nil || msg == nil {
 		return
 	}
-	g.gst.MergeGossip(msg)
+	var pg *ProviderGroup
+	if group != nil {
+		pg = &ProviderGroup{GroupHash: group.GroupHash, Members: group.Members, VotingMembers: group.VotingMembers}
+	}
+	g.gst.MergeGossip(msg, from, pg, fromAnswer)
 }
 
 func (g *agentGossipPort) CheckGroupState(groupHash string, members []string) {

@@ -120,7 +120,7 @@ func newAuditorWebServer(conf *Config, auth *AuditWebAuth, secure bool) (*audito
 				return ""
 			}
 		},
-		"lower": strings.ToLower,
+		"lower": strings.ToLower, // not-a-name: a template helper; no template folds a name with it
 		"zonePath": func(z string) string {
 			return url.PathEscape(z)
 		},
@@ -444,6 +444,12 @@ func (s *auditorWebServer) buildZoneDetailData(r *http.Request, zone string) *We
 		local = sm.LocalIdentity
 	}
 	d.MPView = SnapshotZoneMPView(zone, sm, ar, local)
+	if d.MPView != nil {
+		d.MPView.Instructions = s.conf.instructionsLine(zone)
+		if tm := s.conf.InternalMp.MPTransport; tm != nil {
+			d.MPView.InstructionMembers = tm.stamps.members(zone)
+		}
+	}
 	d.Gossip = SnapshotGossipForZone(ar, zone)
 	if sm != nil {
 		d.ZoneConfigErrors = sm.SnapshotZoneConfigErrors(zone)

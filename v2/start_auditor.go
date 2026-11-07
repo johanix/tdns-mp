@@ -53,6 +53,7 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		tdns.StartEngine(&tdns.Globals.App, "ImrEngine", func() error {
 			return conf.Config.ImrEngine(ctx, true)
 		})
+		conf.warnWhileDnssecNotEnforced(ctx, lgAuditor)
 	} else {
 		lgAuditor.Info("NOT starting imrengine (explicitly set to false)",
 			"app", tdns.Globals.App.Name, "mode", tdns.AppTypeToString[tdns.Globals.App.Type])
@@ -69,6 +70,11 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 			return fmt.Errorf("%s receive path: %w", "auditor", err)
 		}
 	}
+	// The auditor takes a thaw from any voting member (plan S7).
+	tdns.StartEngine(&tdns.Globals.App, "Thaws", func() error {
+		conf.runThaws(ctx)
+		return nil
+	})
 
 	// Phase B: in-memory audit state and the auditor engine. Constructed
 	// before RefreshEngine starts: the first zone load reports every
@@ -80,6 +86,9 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	conf.InternalMp.AuditStateManager = stateManager
 	ar.AuditState = stateManager
 	auditorEngine := NewAuditorEngine(conf, stateManager)
+	// The zones are in their groups before their first load, by the serials
+	// stored (plan S9).
+	conf.placeGroupsAtStart()
 
 	tdns.StartEngineNoError(&tdns.Globals.App, "RefreshEngine", func() {
 		tdns.RefreshEngine(ctx, conf.Config)
@@ -87,10 +96,21 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	tdns.StartEngine(&tdns.Globals.App, "Notifier", func() error {
 		return tdns.Notifier(ctx, conf.Config, conf.Config.Internal.NotifyQ)
 	})
+	// The reader of ResignQ, as in StartMPAgent. The identity set-up the
+	// auditor shares with the agent (SetupAgentAutoZone) registers the
+	// identity zone for periodic re-signing on that queue; with no engine
+	// reading it the zone was signed once, at the start, and an auditor that
+	// ran for longer than its signatures were valid served expired ones.
+	tdns.StartEngineNoError(&tdns.Globals.App, "ResignerEngine", func() {
+		tdns.ResignerEngine(ctx, conf.Config.Internal.ResignQ)
+	})
 
 	// Reliable message queue for outbound BEATs/HELLOs.
 	if conf.InternalMp.TransportManager != nil {
 		conf.InternalMp.MPTransport.StartReliableQueue(ctx)
+		// Discovered peers are looked up again when their DNS data expires,
+		// as the agent's are (#260).
+		conf.InternalMp.TransportManager.StartDiscoveryRefresh(ctx)
 	}
 
 	// Provider group recomputation. HSYNC changes reach RecomputeGroups

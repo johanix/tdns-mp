@@ -55,6 +55,15 @@ func init() {
 	tdns.AppTypeToString[AppTypeMPAuditor] = "mpauditor"
 
 	tdns.StringToAppType["mpsigner"] = AppTypeMPSigner
+	// The signer's zones follow tdns-auth's origination rule: a zone it
+	// signs (MPPreRefresh switches inline-signing on for exactly those)
+	// keeps a serial of its own, a zone it only relays serves the SOA it
+	// received, serial and RRSIG together (tdns-mp #144). Registered here
+	// so it holds before MainInit parses the zones and before the refresh
+	// engine loads the first one. The signer's app type alone: the
+	// combiner changes the zones it holds as a secondary, and the agent
+	// and the auditor keep their own rules.
+	tdns.RegisterOriginationRuleAppType(AppTypeMPSigner)
 	tdns.StringToAppType["mpagent"] = AppTypeMPAgent
 	// delegation-sync setup runs for the multi-provider agent as for
 	// tdns-agent (key lifecycle ownership design §4.2, S5)

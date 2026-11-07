@@ -4,9 +4,11 @@
 package tdnsmp
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -239,6 +241,259 @@ func TestSyncIdentityDelegationQueuesSetupFirst(t *testing.T) {
 	}
 }
 
+// identitySyncRig runs the real syncIdentityDelegation for a notify-only
+// identity zone (no SIG(0) setup: every request is an explicit sync) at the
+// given pace, against a fake syncher: the test reads the delegation sync
+// queue, which is unbuffered, and answers each ask itself. The agent's log is
+// captured with its debug lines, which carry every attempt and the interval
+// to the next.
+type identitySyncRig struct {
+	q      chan tdns.DelegationSyncRequest
+	done   chan struct{}
+	cancel context.CancelFunc
+	log    lockedBuffer // read once done is closed; a goroutine an earlier test left may write to it too (#276)
+	asks   int
+}
+
+func newIdentitySyncRig(t *testing.T, zone string, pace identitySyncPace) *identitySyncRig {
+	t.Helper()
+	r := &identitySyncRig{q: make(chan tdns.DelegationSyncRequest), done: make(chan struct{})}
+	savedPace := identitySync
+	logTo(t, lgAgent, slog.NewJSONHandler(&r.log, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	identitySync = pace
+	conf := &Config{Config: &tdns.Config{}}
+	conf.Config.Internal.DelegationSyncQ = r.q
+	conf.Config.Internal.ImrReady = tdns.NewImrReadiness()
+	conf.Config.Internal.ImrReady.Publish()
+	conf.Config.ParentSync.Schemes = []string{"notify"}
+	zd, _, _ := newIdentityTestZone(t, zone)
+	ctx, cancel := context.WithCancel(context.Background())
+	r.cancel = cancel
+	go func() {
+		conf.syncIdentityDelegation(ctx, zd)
+		close(r.done)
+	}()
+	// The goroutine reads the logger and the pace: the pace is put back once
+	// it has ended, and the logger's handler after that (logTo's cleanup,
+	// registered first, runs last).
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-r.done:
+		case <-time.After(5 * time.Second):
+			t.Error("syncIdentityDelegation is still running after its context ended")
+		}
+		identitySync = savedPace
+	})
+	return r
+}
+
+// next is the syncher's next ask. The test ends here if the sync stopped
+// asking, or asks for something else than an explicit sync with an answer.
+func (r *identitySyncRig) next(t *testing.T) tdns.DelegationSyncRequest {
+	t.Helper()
+	select {
+	case req := <-r.q:
+		r.asks++
+		if req.Command != "EXPLICIT-SYNC-DELEGATION" || req.Response == nil {
+			t.Fatalf("ask %d = %q (response channel %v), want EXPLICIT-SYNC-DELEGATION with a response channel", r.asks, req.Command, req.Response != nil)
+		}
+		return req
+	case <-r.done:
+		t.Fatalf("syncIdentityDelegation ended after %d asks with the parent not in sync", r.asks)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no ask after the first %d", r.asks)
+	}
+	return tdns.DelegationSyncRequest{}
+}
+
+// refuse answers the next n asks the way a parent that is down, or says no,
+// makes both synchers answer: an error with the reason in its text. The
+// parent's rcode is not passed on; Rcode stays 0.
+func (r *identitySyncRig) refuse(t *testing.T, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		r.next(t).Response <- tdns.DelegationSyncStatus{Error: true,
+			ErrorMsg: "every available sync scheme failed: UPDATE failed: parent REFUSED the delegation UPDATE"}
+	}
+}
+
+// ended waits for syncIdentityDelegation to return.
+func (r *identitySyncRig) ended(t *testing.T, when string) {
+	t.Helper()
+	select {
+	case <-r.done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("syncIdentityDelegation did not return %s", when)
+	}
+}
+
+// identitySyncLine is one logged attempt.
+type identitySyncLine struct {
+	Level   string        `json:"level"`
+	Msg     string        `json:"msg"`
+	Attempt int           `json:"attempt"`
+	Next    time.Duration `json:"next"`
+	line    string
+}
+
+// says: the line's log message is this one.
+func (l identitySyncLine) says(message string) bool {
+	return l.Msg == "identity zone: "+message
+}
+
+// logged returns the attempts in the captured log, in order.
+func (r *identitySyncRig) logged(t *testing.T) []identitySyncLine {
+	t.Helper()
+	var out []identitySyncLine
+	for _, line := range strings.Split(r.log.String(), "\n") {
+		if line == "" {
+			continue
+		}
+		l := identitySyncLine{line: line}
+		if err := json.Unmarshal([]byte(line), &l); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if l.Attempt > 0 {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// A parent that is unreachable, or refuses the DS, for longer than the fast
+// attempts used to end the sync for the life of the process: twelve attempts,
+// "gave up", and nothing queued another (tdns-mp #74). Now the sync goes on
+// past them, at an interval that doubles up to the cap and no further, until
+// the analysis says the parent is in sync; and it does not write a warning
+// per attempt.
+func TestSyncIdentityDelegationKeepsAskingUntilInSync(t *testing.T) {
+	// The real number of fast attempts, at a thousandth of the real pace or
+	// less: 1 ms between them, then 2, 4 and 8 ms, the cap; a reminder is
+	// due after four intervals at the cap.
+	pace := identitySyncPace{fast: identitySync.fast, interval: time.Millisecond, max: 8 * time.Millisecond, remind: 32 * time.Millisecond}
+	const refusals = 30
+	r := newIdentitySyncRig(t, "agent.keepsasking.example.", pace)
+	r.refuse(t, refusals)
+	r.next(t).Response <- tdns.DelegationSyncStatus{InSync: true}
+	r.ended(t, "after the parent was in sync")
+	if r.asks != refusals+1 {
+		t.Errorf("%d asks, want one per refusal and the one answered in sync (%d)", r.asks, refusals+1)
+	}
+
+	lines := r.logged(t)
+	if len(lines) != refusals+1 {
+		t.Fatalf("%d attempts in the log, want %d:\n%s", len(lines), refusals+1, r.log.String())
+	}
+	var warned []int
+	for i, l := range lines[:refusals] {
+		attempt := i + 1
+		want := pace.max
+		switch {
+		case attempt < pace.fast:
+			want = pace.interval
+		case attempt == pace.fast:
+			want = 2 * pace.interval
+		case attempt == pace.fast+1:
+			want = 4 * pace.interval
+		}
+		if l.Attempt != attempt || l.Next != want {
+			t.Errorf("log entry %d: attempt %d with %s to the next, want attempt %d and %s", attempt, l.Attempt, l.Next, attempt, want)
+		}
+		if l.Next > pace.max {
+			t.Errorf("attempt %d: %s to the next, over the cap of %s", attempt, l.Next, pace.max)
+		}
+		switch l.Level {
+		case "WARN":
+			warned = append(warned, attempt)
+		case "DEBUG":
+		default:
+			t.Errorf("attempt %d is logged at %s: %s", attempt, l.Level, l.line)
+		}
+	}
+	if last := lines[refusals-1]; last.Next != pace.max {
+		t.Errorf("after %d refusals the interval is %s, want the cap of %s", refusals, last.Next, pace.max)
+	}
+	// The first refusal; the last of the fast attempts; then 2+4+8+8+8+8 ms
+	// of waiting take it past the 32 ms to the next reminder, at attempt 18,
+	// and four intervals of 8 ms to each one after that.
+	if fmt.Sprint(warned) != fmt.Sprint([]int{1, pace.fast, 18, 22, 26, 30}) {
+		t.Errorf("warnings at attempts %v, want %v: the first refusal, the end of the fast attempts, then one per %s of waiting",
+			warned, []int{1, pace.fast, 18, 22, 26, 30}, pace.remind)
+	}
+	if last := lines[refusals]; last.Level != "INFO" || last.Attempt != refusals+1 || !last.says("delegation in sync with the parent") {
+		t.Errorf("the last log entry is %s, want the parent in sync at attempt %d, at info level", last.line, refusals+1)
+	}
+}
+
+// An answer without an error is a sync the parent accepted. The synchers
+// send the scheme's message with it; the sync must not need one to tell an
+// acceptance from a refusal, which comes as an error. Either way the first
+// one is told at info level, as sent, and no warning is written.
+func TestSyncIdentityDelegationTellsAnAcceptedSyncAsSent(t *testing.T) {
+	pace := identitySyncPace{fast: identitySync.fast, interval: time.Millisecond, max: 8 * time.Millisecond, remind: time.Hour}
+	for i, tc := range []struct {
+		name   string
+		answer tdns.DelegationSyncStatus
+	}{
+		{"with the scheme's message", tdns.DelegationSyncStatus{Msg: "SendUpdate(example.) returned rcode NOERROR"}},
+		{"with no message", tdns.DelegationSyncStatus{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newIdentitySyncRig(t, fmt.Sprintf("agent.accepted%d.example.", i), pace)
+			r.next(t).Response <- tc.answer
+			r.next(t).Response <- tdns.DelegationSyncStatus{InSync: true}
+			r.ended(t, "after the parent was in sync")
+			lines := r.logged(t)
+			if len(lines) != 2 {
+				t.Fatalf("%d attempts in the log, want 2:\n%s", len(lines), r.log.String())
+			}
+			if l := lines[0]; l.Level != "INFO" || l.Attempt != 1 || !l.says("delegation sent to the parent") {
+				t.Errorf("the accepted sync is logged as %s, want \"delegation sent to the parent\" at info level", l.line)
+			}
+			if l := lines[1]; l.Level != "INFO" || l.Attempt != 2 || !l.says("delegation in sync with the parent") {
+				t.Errorf("the second attempt is logged as %s, want the parent in sync at info level", l.line)
+			}
+		})
+	}
+}
+
+// The sync runs for as long as the parent disagrees, so it must end with
+// its context wherever it is waiting: for the next attempt, for the syncher
+// to take its ask, or for the syncher's answer.
+func TestSyncIdentityDelegationStopsWhenItsContextEnds(t *testing.T) {
+	quick := identitySyncPace{fast: identitySync.fast, interval: time.Millisecond, max: 8 * time.Millisecond, remind: time.Hour}
+	hourly := identitySyncPace{fast: identitySync.fast, interval: time.Hour, max: time.Hour, remind: time.Hour}
+	for i, tc := range []struct {
+		name     string
+		pace     identitySyncPace
+		refusals int
+		then     func(t *testing.T, r *identitySyncRig) // what the syncher does before the context ends
+	}{
+		{"an hour to the second attempt", hourly, 1, nil},
+		{"past the fast attempts, between two asks", quick, quick.fast + 1, nil},
+		{"past the fast attempts, the syncher takes no ask", quick, quick.fast + 1,
+			func(t *testing.T, r *identitySyncRig) { time.Sleep(50 * time.Millisecond) }},
+		{"past the fast attempts, the syncher gives no answer", quick, quick.fast + 1,
+			func(t *testing.T, r *identitySyncRig) { r.next(t) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newIdentitySyncRig(t, fmt.Sprintf("agent.stops%d.example.", i), tc.pace)
+			r.refuse(t, tc.refusals)
+			if tc.then != nil {
+				tc.then(t, r)
+			}
+			r.cancel()
+			r.ended(t, "when its context ended")
+			for _, l := range r.logged(t) {
+				if l.Level == "INFO" {
+					t.Errorf("the sync logged %s; the parent never was in sync, and nothing was accepted", l.line)
+				}
+			}
+		})
+	}
+}
+
 // The identity zone becomes a parentsync child only when a scheme is configured
 // and the resolver is running: without it the parent and its DSYNC records
 // cannot be found, and the sync would wait for a readiness that never comes.
@@ -262,6 +517,168 @@ func TestIdentityZoneParentSync(t *testing.T) {
 			t.Errorf("%s: identityZoneParentSync = %v, want %v", tc.name, got, tc.want)
 		}
 	}
+}
+
+// configListedIdentityZone is an agent whose identity zone is listed in the
+// config: registered by the config parser, not loaded yet, and named among
+// the configured zones SetupAgent is handed.
+func configListedIdentityZone(t *testing.T, zone string) (*Config, *tdns.ZoneData) {
+	t.Helper()
+	kdb := newMPTestKeyDB(t)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.Config.Internal.KeyDB = kdb
+	conf.InternalMp.IdentityReady = newIdentityReadiness()
+	mp := &MultiProviderConf{Role: "agent", Identity: zone, SupportedMechanisms: []string{"dns"}}
+	mp.Dns.Addresses.Listen = []string{"127.0.0.1:5300"}
+	conf.SetMpConfig(mp)
+	zd := &tdns.ZoneData{
+		ZoneName:  zone,
+		ZoneStore: tdns.MapZone,
+		ZoneType:  tdns.Primary,
+		Logger:    log.New(io.Discard, "", 0),
+		Options:   map[tdns.ZoneOption]bool{},
+		KeyDB:     kdb,
+	}
+	tdns.Zones.Set(zone, zd)
+	t.Cleanup(func() {
+		tdns.Zones.Remove(zone)
+		Zones.Invalidate(zone)
+	})
+	return conf, zd
+}
+
+// notSyncedWarnings is the warnings in a captured agent log that tell the
+// operator a config-listed identity zone is not synced with its parent.
+func notSyncedWarnings(t *testing.T, logs fmt.Stringer, zone string) int {
+	t.Helper()
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec struct {
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+			Zone  string `json:"zone"`
+		}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if rec.Msg != configIdentityZoneNotSynced {
+			continue
+		}
+		if rec.Level != "WARN" || rec.Zone != zone {
+			t.Errorf("the warning was logged at level %s for zone %q, want WARN for %q", rec.Level, rec.Zone, zone)
+		}
+		n++
+	}
+	return n
+}
+
+// tdns-mp #73: only the identity zone the daemon builds becomes a parentsync
+// child. One listed in the config does not, and with a parentsync: block
+// configured that used to pass in silence: no CDS, no DS at the parent, and a
+// TLSA no validating peer trusts. Now the set-up says so, once, in the log
+// only, under the condition that makes a daemon-built zone a parentsync
+// child, and under no other. The daemon starts all the same.
+func TestAConfigListedIdentityZoneIsWarnedAbout(t *testing.T) {
+	off := false
+	for _, tc := range []struct {
+		name    string
+		zone    string
+		schemes []string
+		imr     *bool
+		want    bool
+	}{
+		{"parentsync configured", "agent.listed-sync.example.", []string{"notify", "update"}, nil, true},
+		{"no parentsync", "agent.listed-plain.example.", nil, nil, false},
+		// A daemon-built zone would not be synced here either.
+		{"parentsync without the resolver", "agent.listed-noimr.example.", []string{"notify", "update"}, &off, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conf, zd := configListedIdentityZone(t, tc.zone)
+			conf.Config.ParentSync.Schemes = tc.schemes
+			conf.Config.Imr.Active = tc.imr
+			logs := captureAgentLog(t)
+
+			if err := conf.SetupAgent(context.Background(), []string{tc.zone}); err != nil {
+				t.Fatalf("SetupAgent: %v", err)
+			}
+
+			want := 0
+			if tc.want {
+				want = 1
+			}
+			if n := notSyncedWarnings(t, logs, tc.zone); n != want {
+				t.Errorf("the warning was logged %d time(s), want %d; log: %s", n, want, logs)
+			}
+			var onZone []string
+			for _, e := range zd.ErrorList() {
+				if e.Type != tdns.ConfigWarning {
+					t.Errorf("the zone carries a %s: %s", tdns.ErrorTypeToString[e.Type], e.Msg)
+					continue
+				}
+				onZone = append(onZone, e.Msg)
+			}
+			// The warning is the log's alone: an entry on the zone would keep
+			// the operator from bumping its serial by hand.
+			if len(onZone) != 0 {
+				t.Errorf("the zone's warnings: %q, want none: the warning goes to the log only", onZone)
+			}
+			if tc.want {
+				// What is not done, what that costs, and what to do about it.
+				for _, part := range []string{"no CDS", "no DS is sent", "not synced", "TLSA", "daemon builds it", "by hand"} {
+					if !strings.Contains(configIdentityZoneNotSynced, part) {
+						t.Errorf("the warning does not say %q: %s", part, configIdentityZoneNotSynced)
+					}
+				}
+			}
+
+			// A warning and nothing else: the zone is still served, it has not
+			// been made a parentsync child behind the operator's back, and its
+			// first-load callbacks are in place as before.
+			if zd.HasServiceImpactingError() {
+				t.Errorf("the zone is taken out of service: %v", zd.ErrorList())
+			}
+			if zd.Options[tdns.OptParentSync] {
+				t.Error("the config-listed zone was given the parentsync option")
+			}
+			if zdp, ok := Zones.Get(tc.zone); !ok || len(zdp.OnFirstLoad) == 0 {
+				t.Error("no first-load callback registered on the config-listed identity zone")
+			}
+		})
+	}
+
+	// The zone the daemon builds is the supported path: it becomes the
+	// parentsync child, and there is nothing to warn about.
+	t.Run("built by the daemon", func(t *testing.T) {
+		kdb := newMPTestKeyDB(t)
+		conf, _ := identityTestConfig(t, kdb)
+		ctx := startIdentityUpdater(t, kdb)
+		conf.Config.ParentSync.Schemes = []string{"notify", "update"}
+		// The resolver is active and never ready: the delegation sync waits
+		// for it and stops with the test.
+		conf.Config.Internal.ImrReady = tdns.NewImrReadiness()
+		conf.Config.Internal.DelegationSyncQ = make(chan tdns.DelegationSyncRequest, 8)
+		logs := captureAgentLog(t)
+
+		if err := conf.SetupAgent(ctx, nil); err != nil {
+			t.Fatalf("SetupAgent: %v", err)
+		}
+		zd, ok := tdns.Zones.Get(identityTestZone)
+		if !ok {
+			t.Fatal("the identity zone is not registered")
+		}
+		if !zd.Options[tdns.OptParentSync] {
+			t.Error("the daemon-built identity zone is not a parentsync child")
+		}
+		if n := notSyncedWarnings(t, logs, identityTestZone); n != 0 {
+			t.Errorf("the warning was logged %d time(s) for a daemon-built zone; log: %s", n, logs)
+		}
+		if zd.HasError(tdns.ConfigWarning) {
+			t.Errorf("the daemon-built zone carries a warning: %v", zd.ErrorList())
+		}
+	})
 }
 
 const (
@@ -322,14 +739,13 @@ func installParentSync(t *testing.T, config string) tdns.ParentSyncConf {
 	return conf.ParentSync
 }
 
-// captureAgentLog points lgAgent at a buffer for the rest of the test.
-func captureAgentLog(t *testing.T) *bytes.Buffer {
+// captureAgentLog points lgAgent at a buffer for the rest of the test. The
+// buffer is locked: a goroutine an earlier test left may write to it (#276).
+func captureAgentLog(t *testing.T) *lockedBuffer {
 	t.Helper()
-	var buf bytes.Buffer
-	saved := lgAgent
-	lgAgent = slog.New(slog.NewJSONHandler(&buf, nil))
-	t.Cleanup(func() { lgAgent = saved })
-	return &buf
+	buf := &lockedBuffer{}
+	logTo(t, lgAgent, slog.NewJSONHandler(buf, nil))
+	return buf
 }
 
 // An absent algorithm is the default and not a problem; only a name that is

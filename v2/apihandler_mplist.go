@@ -37,7 +37,9 @@ func (conf *Config) APImplist() func(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			resp.MPZones[zname] = MPZoneInfoFromMPZoneData(zd)
+			info := MPZoneInfoFromMPZoneData(zd)
+			conf.InternalMp.Instructions.fillMPZoneInfo(zname, &info)
+			resp.MPZones[zname] = info
 		}
 	}
 }

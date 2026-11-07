@@ -30,7 +30,7 @@ func (e *Engine) sendHeartbeats() string {
 	} else if e.deps.Gossip != nil && e.deps.ProviderGroups != nil {
 		e.deps.Gossip.RefreshLocalStates(e.registry, e.deps.ProviderGroups, e.deps.LocalBeatInterval)
 		for _, pg := range e.deps.ProviderGroups.Groups() {
-			e.deps.Gossip.CheckGroupState(pg.GroupHash, pg.Members)
+			e.deps.Gossip.CheckGroupState(pg.GroupHash, pg.VotingMembers)
 		}
 	}
 
@@ -66,8 +66,10 @@ func (e *Engine) sendBeatToPeer(ctx context.Context, peer *Peer) {
 }
 
 // beatPeerOnce beats one peer and reports whether the beat was acknowledged.
+// It beats only a peer object the registry holds, and does not store the peer
+// back: the object is the stored one, or the peer is gone (#132).
 func (e *Engine) beatPeerOnce(ctx context.Context, peer *Peer) bool {
-	if e.deps.Transport == nil {
+	if e.deps.Transport == nil || !e.stillStored(peer) {
 		return false
 	}
 	seq := e.beatOutboundSequence(peer.ID)
@@ -83,7 +85,6 @@ func (e *Engine) beatPeerOnce(ctx context.Context, peer *Peer) bool {
 	if ok {
 		e.noteBeatSucceeded(peer)
 	}
-	e.registry.S.Set(peer.ID, peer)
 	e.storeHook(peer)
 	// A beat that moved the peer (to OPERATIONAL, or back from a decay) is
 	// news the other peers should get soon, in this agent's gossip row.
@@ -93,7 +94,13 @@ func (e *Engine) beatPeerOnce(ctx context.Context, peer *Peer) bool {
 	return ok
 }
 
+// runDeferredTasks runs the tasks that wait on the peer. A peer object the
+// registry no longer holds has its tasks left where they are: nothing is sent
+// to a peer that is gone.
 func (e *Engine) runDeferredTasks(peer *Peer) {
+	if !e.stillStored(peer) {
+		return
+	}
 	peer.Mu.Lock()
 	tasks := peer.Deferred
 	peer.Deferred = nil

@@ -16,7 +16,9 @@ multi-provider:
    supported_mechanisms: [ dns ]
    long_term_jose_priv_key: /etc/tdns/keys/auditor.jose.priv.json
    # Agent identities authorized to communicate with the auditor, in
-   # addition to those found through HSYNC3.
+   # addition to those found through HSYNC3. This says who may talk to
+   # the auditor, not that a link to it is kept: a peer that no zone
+   # names is removed after peer_hold, as any other peer is.
    # authorized_peers:
    #    - agent.alpha.example.
    #    - agent.bravo.example.
@@ -56,6 +58,7 @@ multi-provider:
          reconcile:           60
          hello_fast_attempts: 3
          hello_fast_interval: 2
+         peer_hold:           86400
 
 service:
    name:           TDNS-MPAUDITOR

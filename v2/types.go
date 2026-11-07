@@ -224,7 +224,15 @@ type KeyInventorySnapshot struct {
 	Zone      string
 	Inventory []KeyInventoryItem
 	Owned     bool // the signer's own state machine runs the zone's keys (S3): the DS set's source (S5)
-	Received  time.Time
+	// The signer's marks (plan S11): it does not sign the zone, a rollover
+	// is under way there, and what each of its keys in mpdist or mpremove
+	// waits on.
+	NotSigning bool
+	Rollover   bool
+	WaitsOn    map[uint16][]string
+	Hold       bool // the signer holds the zone's key machine (plan S6)
+	Received   time.Time
+	seq        uint64 // the inventory's KeystateInventoryMsg.seq
 }
 
 // END.1 (E1.a): AgentId and ZoneName are now ALIASES of the hsync types, so the
@@ -246,6 +254,8 @@ type ZoneUpdate struct {
 	RRs        []dns.RR                 // local updates can be per RR
 	Operations []core.RROperation       // explicit operations (takes precedence over RRsets/RRs)
 	Publish    *core.PublishInstruction // KEY/CDS publication instruction for combiner
+	CatchUp    *CatchUp                 `json:"catch_up,omitempty"` // on the answer to a request for the zone's state
+	Acting     *ActingHandover          `json:"acting,omitempty"`   // a hand-over to this agent's combiner (S10)
 }
 
 // OwnerData matches tdns.OwnerData; alias keeps *tdns.ZoneData.Data map types aligned.
@@ -259,6 +269,19 @@ type ZoneRefreshAnalysis struct {
 	HsyncStatus       *HsyncStatus
 	DnskeyChanged     bool
 	DnskeyStatus      *DnskeyStatus
+	// What the catch-up asks for at the refresh (catchup.go, afterRefresh):
+	// the agent's standing in the served zone and in the incoming one,
+	// whether this is the zone's first load, and the identities that became
+	// voting members.
+	StandingBefore standing
+	StandingAfter  standing
+	FirstLoad      bool
+	NewVoters      []AgentId
+	// KeyChanged: the apex KEY RRset changed (step 7b's key check).
+	KeyChanged bool
+	// ActiveBefore: the zone's active instructions before the refresh, for
+	// the hook at activation (onActiveChanged).
+	ActiveBefore *Instructions
 }
 
 // Transaction API types
@@ -311,11 +334,10 @@ func NewMsgQs() *MsgQs {
 		SynchedDataCmd:    make(chan *SynchedDataCmd, 100),
 		Confirmation:      make(chan *ConfirmationDetail, 100),
 		KeystateInventory: make(chan *KeystateInventoryMsg, 10),
-		KeystateSignal:    make(chan *KeystateSignalMsg, 10),
-		EditsResponse:     make(chan *EditsResponseMsg, 10),
-		ConfigResponse:    make(chan *ConfigResponseMsg, 10),
-		AuditResponse:     make(chan *AuditResponseMsg, 10),
-		StatusUpdate:      make(chan *StatusUpdateMsg, 10),
+		// a message per zone in a burst, as a transition of many zones
+		// sends: one that finds these full is dropped after its ack
+		KeystateSignal: make(chan *KeystateSignalMsg, 1024),
+		StatusUpdate:   make(chan *StatusUpdateMsg, 1024),
 	}
 }
 
@@ -329,8 +351,10 @@ func NewMsgQs() *MsgQs {
 type MPdata struct {
 	WeAreProvider bool                     // At least one of our agent identities matches an HSYNC3 Identity
 	OurLabel      string                   // Our provider label from the matching HSYNC3 record
-	WeAreSigner   bool                     // Our label appears in HSYNCPARAM signers (or zone is unsigned)
-	OtherSigners  int                      // Count of other signers in HSYNCPARAM
-	ZoneSigned    bool                     // HSYNCPARAM signers= is non-empty (zone uses multi-signer)
+	WeAreSigner   bool                     // Our label is in Sets.Signing
+	OtherSigners  int                      // Count of the other providers in Sets.KeySigners
+	ZoneSigned    bool                     // Sets.Signing is non-empty (zone uses multi-signer)
+	Sets          Roles                    // The sets the data is computed from: the step's (plan S13)
+	Leaving       bool                     // We sign by the step's sets, though signers= no longer names us (plan S13)
 	Options       map[tdns.ZoneOption]bool // MP-specific options (future: migrate from zd.Options)
 }

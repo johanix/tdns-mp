@@ -111,6 +111,24 @@ func (ar *AgentRegistry) effectiveAgentState(id AgentId) AgentState {
 	return st
 }
 
+// peerChain is the DNSSEC verdict on the discovery data of the peer, when it
+// is not secure: "insecure" or "bogus". Empty when it is secure, or not
+// known (#260).
+func (ar *AgentRegistry) peerChain(id AgentId) string {
+	if ar.TransportManager == nil {
+		return ""
+	}
+	peer, ok := ar.TransportManager.PeerRegistry.Get(string(id))
+	if !ok {
+		return ""
+	}
+	switch c := peer.DiscoveryStatus().Chain(); c {
+	case transport.ChainInsecure, transport.ChainBogus:
+		return c.String()
+	}
+	return ""
+}
+
 // isKnownLegacy reports whether the identity is an established peer (in the
 // registry) that shares no participant zone with us — the LEGACY condition
 // the sync gate rejects.

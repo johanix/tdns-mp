@@ -20,6 +20,7 @@ import (
 	"github.com/miekg/dns"
 
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 )
 
 // AuditZoneSummary is the JSON shape returned by /auditor "zones"
@@ -63,7 +64,7 @@ func markLocalAuditors(localIdentity string, out []AuditProviderSummary) {
 	}
 	localIdentity = dns.Fqdn(localIdentity)
 	for i := range out {
-		if out[i].Identity != "" && strings.EqualFold(dns.Fqdn(out[i].Identity), localIdentity) {
+		if out[i].Identity != "" && core.EqualNames(dns.Fqdn(out[i].Identity), localIdentity) {
 			out[i].Local = true
 		}
 	}
@@ -546,15 +547,13 @@ type GossipMatrixDTO struct {
 type GossipMemberRow struct {
 	Reporter string `json:"reporter"`
 	// Label is the reporter's role label in the zone of a zone view: the
-	// column the reporter is. An identity that holds several labels (one
-	// agent serving as two providers) has them all, in column order. Empty
+	// column the reporter is. An identity is under one label (#306). Empty
 	// in the group view, and for a reporter with no label in the zone.
 	Label            string            `json:"label,omitempty"`
 	Timestamp        time.Time         `json:"timestamp,omitempty"`
 	BeatInterval     uint32            `json:"beat_interval,omitempty"`
 	SecondsSinceBeat int64             `json:"seconds_since_beat,omitempty"`
 	PeerStates       map[string]string `json:"peer_states"`
-	Zones            []string          `json:"zones,omitempty"`
 }
 
 // GossipElectionDTO is the per-group election state.
@@ -678,9 +677,6 @@ func gossipMemberRow(reporter string, ms *MemberState, now time.Time) GossipMemb
 			row.PeerStates[k] = v
 		}
 	}
-	if len(ms.Zones) > 0 {
-		row.Zones = append([]string(nil), ms.Zones...)
-	}
 	return row
 }
 
@@ -779,7 +775,7 @@ func snapshotGossipMatrix(ar *AgentRegistry, pg *ProviderGroup, groupHash, zone 
 // no label in the zone keeps only its identity and comes after the
 // labelled rows.
 func labelZoneGossipRows(dto *GossipMatrixDTO) {
-	canon := func(id string) string { return strings.ToLower(dns.Fqdn(id)) }
+	canon := canonicalName
 	labels := make(map[string][]string, len(dto.ColumnLabels))
 	first := make(map[string]int, len(dto.ColumnLabels))
 	for i, lbl := range dto.ColumnLabels {

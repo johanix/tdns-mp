@@ -34,7 +34,7 @@ func TestAVoteThatOvertakesTheCallIsCounted(t *testing.T) {
 	lem.mu.RUnlock()
 	t.Cleanup(func() {
 		le.mu.Lock()
-		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer} {
+		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer} {
 			if tm != nil {
 				tm.Stop()
 			}
@@ -121,7 +121,7 @@ func TestZoneElectionCountsAVoteThatOvertakesTheCall(t *testing.T) {
 	le := lem.getOrCreate(zone)
 	t.Cleanup(func() {
 		le.mu.Lock()
-		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer} {
+		for _, tm := range []*time.Timer{le.ReelectTimer, le.VoteTimer, le.ConfirmTimer, le.RetryTimer} {
 			if tm != nil {
 				tm.Stop()
 			}

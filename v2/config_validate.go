@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -36,6 +37,9 @@ func ValidateMPConfig(mp *MultiProviderConf) error {
 	if err := ValidateAgentSupportedMechanisms(mp); err != nil {
 		return err
 	}
+	if err := ValidatePartAgents(mp); err != nil {
+		return err
+	}
 	if err := ValidateCryptoFiles(mp); err != nil {
 		return err
 	}
@@ -44,6 +48,70 @@ func ValidateMPConfig(mp *MultiProviderConf) error {
 	}
 	if err := ValidateSyncengineIntervals(mp); err != nil {
 		return err
+	}
+	if err := ValidateTransitions(mp); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateTransitions rejects a negative
+// multi-provider.transitions.leaving-timeout or no-role-timeout, and a
+// leaving-timeout that is not above the beat interval: a telling heard
+// longer ago than it does not count for the thaw (plan S7), and with beats
+// further apart none would ever count.
+func ValidateTransitions(mp *MultiProviderConf) error {
+	if t := mp.Transitions.LeavingTimeout; t < 0 {
+		return fmt.Errorf("multi-provider.transitions.leaving-timeout: %d is negative", t)
+	}
+	if t := mp.Transitions.NoRoleTimeout; t < 0 {
+		return fmt.Errorf("multi-provider.transitions.no-role-timeout: %d is negative", t)
+	}
+	if beat := hsyncConfigFromMp(mp).BeatInterval; leavingTimeoutFor(mp) <= beat {
+		return fmt.Errorf("multi-provider.transitions.leaving-timeout: %s is not above the beat interval (%s)", leavingTimeoutFor(mp), beat)
+	}
+	return nil
+}
+
+// leavingTimeoutDefault is multi-provider.transitions.leaving-timeout's
+// default.
+const leavingTimeoutDefault = time.Hour
+
+// leavingTimeoutFor is multi-provider.transitions.leaving-timeout, or its
+// default.
+func leavingTimeoutFor(mp *MultiProviderConf) time.Duration {
+	if mp != nil && mp.Transitions.LeavingTimeout > 0 {
+		return time.Duration(mp.Transitions.LeavingTimeout) * time.Second
+	}
+	return leavingTimeoutDefault
+}
+
+// noRoleTimeoutDefault is multi-provider.transitions.no-role-timeout's
+// default.
+const noRoleTimeoutDefault = 15 * time.Minute
+
+// noRoleTimeoutFor is multi-provider.transitions.no-role-timeout, or its
+// default.
+func noRoleTimeoutFor(mp *MultiProviderConf) time.Duration {
+	if mp != nil && mp.Transitions.NoRoleTimeout > 0 {
+		return time.Duration(mp.Transitions.NoRoleTimeout) * time.Second
+	}
+	return noRoleTimeoutDefault
+}
+
+// ValidatePartAgents refuses an empty entry in multi-provider.agents, which
+// the checks after it and the role's start would read, and a multi-provider
+// combiner or signer with more than one agent: each acts by what its agent
+// hands it (plan S10 and S11, 7.3 item 5), so it must be clear whose
+// hand-over counts. It runs before the checks that read the entries.
+func ValidatePartAgents(mp *MultiProviderConf) error {
+	for i, a := range mp.Agents {
+		if a == nil {
+			return fmt.Errorf("multi-provider.agents[%d] is empty", i)
+		}
+	}
+	if (mp.Role == "combiner" || mp.Role == "signer") && len(mp.Agents) > 1 {
+		return fmt.Errorf("a multi-provider %s has more than one agent (multi-provider.agents lists %d)", mp.Role, len(mp.Agents))
 	}
 	return nil
 }
@@ -65,12 +133,28 @@ func ValidateSyncengineIntervals(mp *MultiProviderConf) error {
 		{"reconcile", iv.Reconcile},
 		{"hello_fast_attempts", iv.HelloFastAttempts},
 		{"hello_fast_interval", iv.HelloFastInterval},
+		{"catchup_outage", iv.CatchupOutage},
+		{"peer_hold", iv.PeerHold},
 	} {
 		if k.v < 0 {
 			return fmt.Errorf("multi-provider.syncengine.intervals.%s: %d is negative", k.name, k.v)
 		}
 	}
+	// An outage shorter than the beat interval would be every gap between
+	// two beats.
+	if beat := hsyncConfigFromMp(mp).BeatInterval; catchUpOutageFor(mp) <= beat {
+		return fmt.Errorf("multi-provider.syncengine.intervals.catchup_outage: %s is not above the beat interval (%s)", catchUpOutageFor(mp), beat)
+	}
 	return nil
+}
+
+// catchUpOutageFor is multi-provider.syncengine.intervals.catchup_outage,
+// or its default.
+func catchUpOutageFor(mp *MultiProviderConf) time.Duration {
+	if mp != nil && mp.Syncengine.Intervals.CatchupOutage > 0 {
+		return time.Duration(mp.Syncengine.Intervals.CatchupOutage) * time.Second
+	}
+	return catchUpOutageDefault
 }
 
 // ValidateAgentNameservers ensures agent.local.nameservers are
@@ -114,7 +198,7 @@ func ValidateAgentSupportedMechanisms(mp *MultiProviderConf) error {
 	seen := make(map[string]bool)
 
 	for i, m := range mechanisms {
-		m = strings.ToLower(strings.TrimSpace(m))
+		m = strings.ToLower(strings.TrimSpace(m)) // not-a-name: a transport mechanism
 		if m == "" {
 			return fmt.Errorf("agent.supported_mechanisms: empty entry at index %d", i)
 		}

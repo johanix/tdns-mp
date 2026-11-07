@@ -18,15 +18,22 @@ type Registry struct {
 	S           core.ConcurrentMap[PeerID, *Peer]
 	mu          sync.RWMutex
 	LocalID     PeerID
-	helloCancel map[PeerID]context.CancelFunc
+	helloCancel map[PeerID]helloRun
 	transport   TransportBridge
+}
+
+// helloRun is a running hello retrier: the peer object it greets, and how to
+// stop it.
+type helloRun struct {
+	peer   *Peer
+	cancel context.CancelFunc
 }
 
 func NewRegistry(localID PeerID, transport TransportBridge) *Registry {
 	return &Registry{
 		S:           core.NewStringer[PeerID, *Peer](),
 		LocalID:     localID,
-		helloCancel: make(map[PeerID]context.CancelFunc),
+		helloCancel: make(map[PeerID]helloRun),
 		transport:   transport,
 	}
 }
@@ -35,18 +42,20 @@ func (r *Registry) SetTransport(tb TransportBridge) {
 	r.transport = tb
 }
 
-func (r *Registry) AddZoneToPeer(id PeerID, zone ZoneName) {
-	peer, exists := r.S.Get(id)
-	if !exists {
-		return
-	}
-	peer.Mu.Lock()
-	if peer.Zones == nil {
-		peer.Zones = make(map[ZoneName]bool)
-	}
-	peer.Zones[zone] = true
-	peer.Mu.Unlock()
-	r.S.Set(id, peer)
+// AddZoneToPeer adds the zone to the stored peer, and reports whether the
+// registry held one. The zone is added under the lock of the peer's shard, so
+// a peer that is removed meanwhile is not stored again, and a removal that
+// tests the peer's zones sees the new one (#132).
+func (r *Registry) AddZoneToPeer(id PeerID, zone ZoneName) bool {
+	return r.S.UpdateIf(id, func(peer *Peer) (*Peer, bool) {
+		peer.Mu.Lock()
+		if peer.Zones == nil {
+			peer.Zones = make(map[ZoneName]bool)
+		}
+		peer.Zones[zone] = true
+		peer.Mu.Unlock()
+		return peer, true
+	})
 }
 
 func (r *Registry) GetPeersForZone(zone ZoneName) []*Peer {
@@ -62,13 +71,16 @@ func (r *Registry) GetPeersForZone(zone ZoneName) []*Peer {
 	return peers
 }
 
+// RemovePeerFromZone takes the zone off the stored peer, under the lock of
+// the peer's shard as AddZoneToPeer adds one. A peer that is not stored is
+// left alone.
 func (r *Registry) RemovePeerFromZone(zone ZoneName, id PeerID) {
-	if peer, ok := r.S.Get(id); ok {
+	r.S.UpdateIf(id, func(peer *Peer) (*Peer, bool) {
 		peer.Mu.Lock()
 		delete(peer.Zones, zone)
 		peer.Mu.Unlock()
-		r.S.Set(id, peer)
-	}
+		return peer, true
+	})
 }
 
 func (r *Registry) RecomputeSharedZones(peer *Peer) {
@@ -84,29 +96,41 @@ func (r *Registry) RecomputeSharedZones(peer *Peer) {
 	}
 }
 
-func (r *Registry) setHelloCancel(id PeerID, cancel context.CancelFunc) {
+// registerHello registers a hello retrier for peer and returns its context,
+// unless one is already registered for the identity. The test and the
+// registration are one step, so two callers cannot both start one.
+func (r *Registry) registerHello(peer *Peer) (context.Context, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if existing, ok := r.helloCancel[id]; ok {
-		existing()
+	if _, ok := r.helloCancel[peer.ID]; ok {
+		return nil, false
 	}
-	r.helloCancel[id] = cancel
+	ctx, cancel := context.WithCancel(context.Background())
+	r.helloCancel[peer.ID] = helloRun{peer: peer, cancel: cancel}
+	return ctx, true
 }
 
-func (r *Registry) clearHelloCancel(id PeerID) {
+// clearHelloCancel takes a finished retrier's registration off. A retrier of
+// a peer object that was removed leaves alone the registration of a retrier
+// for the new object under the same identity (#132).
+func (r *Registry) clearHelloCancel(peer *Peer) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.helloCancel, id)
+	if run, ok := r.helloCancel[peer.ID]; ok && run.peer == peer {
+		run.cancel()
+		delete(r.helloCancel, peer.ID)
+	}
 }
 
-// cancelHello stops any running hello retrier for the peer and clears its
-// registration (used by RemovePeer before dropping the peer object).
-func (r *Registry) cancelHello(id PeerID) {
+// cancelHello stops the hello retrier running for the removed peer object
+// and clears its registration. A retrier registered for a new object under
+// the same identity is left alone.
+func (r *Registry) cancelHello(peer *Peer) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if existing, ok := r.helloCancel[id]; ok {
-		existing()
-		delete(r.helloCancel, id)
+	if run, ok := r.helloCancel[peer.ID]; ok && run.peer == peer {
+		run.cancel()
+		delete(r.helloCancel, peer.ID)
 	}
 }
 

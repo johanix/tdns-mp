@@ -17,9 +17,10 @@ import (
 )
 
 // APIimr handles the /imr management API endpoint for tdns-mpagent
-// (and any other tdns-mp app that hosts an in-process IMR). It mirrors
-// tdns.APIimr but lives here so the handler can use tdns-mp's own
-// AgentMgmtPost / AgentMgmtResponse types and the Imr wrapper.
+// and tdns-mpauditor (and any other tdns-mp app that hosts an
+// in-process IMR). It mirrors tdns.APIimr but lives here so the
+// handler can use tdns-mp's own AgentMgmtPost / AgentMgmtResponse
+// types and the Imr wrapper.
 //
 // MP-specific commands continue to be served by APIagent at /agent.
 // Keeping the IMR commands on a separate /imr endpoint means tdns-mp
@@ -145,12 +146,16 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			identity = dns.Fqdn(identity)
+			if identity == "." {
+				// every name is at or below the root (dns.IsSubDomain)
+				resp.Error = true
+				resp.ErrorMsg = "agent_id (--id) is an agent's identity, not the root"
+				return
+			}
 			var entries []map[string]any
-			idCanon := strings.ToLower(identity)
 			for item := range imr.Cache.RRsets.IterBuffered() {
 				cr := item.Val
-				name := strings.ToLower(cr.Name)
-				if name != idCanon && !strings.HasSuffix(name, "."+idCanon) {
+				if !dns.IsSubDomain(identity, cr.Name) {
 					continue
 				}
 				entry := map[string]any{

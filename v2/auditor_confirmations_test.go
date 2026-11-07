@@ -18,8 +18,12 @@ package tdnsmp
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"net"
+	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -143,7 +147,9 @@ func introduce(t *testing.T, from, to *fleetPeer) {
 		t.Fatal(err)
 	}
 	peer := from.Bridge.PeerRegistry.GetOrCreate(to.Identity)
-	peer.SetDiscoveryAddress(&transport.Address{Host: host, Port: uint16(port), Transport: "tcp"})
+	addr := &transport.Address{Host: host, Port: uint16(port), Transport: "tcp"}
+	setDNSCarrier(t, peer, addr)
+	peer.SetMechanismAddress("DNS", addr)
 	peer.PreferredTransport = "DNS"
 }
 
@@ -348,11 +354,12 @@ func TestTheAuditorShowsWhichMemberADistributionWaitsFor(t *testing.T) {
 	if d := f.distribution(zone, fleetP1, "d0"); d.State != "unseen" {
 		t.Errorf("a distribution the auditor has only seen confirmations of is %q, want unseen: %+v", d.State, d)
 	}
-	if got := f.awaitConfirmation(origin, fleetP2, "d0"); got != "PENDING" {
-		t.Fatalf("the first word from p2 on d0 is %s, want PENDING", got)
-	}
-	if got := f.awaitConfirmation(origin, fleetP2, "d0"); got != "SUCCESS" {
-		t.Fatalf("the second word from p2 on d0 is %s, want SUCCESS", got)
+	// p2's PENDING and its final word are two sends, and the combiner
+	// answers here at once: the final word may reach the originator first.
+	words := []string{f.awaitConfirmation(origin, fleetP2, "d0"), f.awaitConfirmation(origin, fleetP2, "d0")}
+	slices.Sort(words)
+	if !slices.Equal(words, []string{"PENDING", "SUCCESS"}) {
+		t.Fatalf("p2's words on d0 are %v, want PENDING and SUCCESS", words)
 	}
 	copies := aud.receivedFrom(fleetP2)
 	if copies != 1 {
@@ -514,7 +521,7 @@ func TestACopyChangesNothingAtAPeerThatIsNoAuditor(t *testing.T) {
 	if err := p3.Bridge.ReliableQueue.Enqueue(&transport.OutgoingMessage{DistributionID: "own1", RecipientID: fleetP2, Zone: zone, Payload: own}); err != nil {
 		t.Fatal(err)
 	}
-	p3.Bridge.TrackDnskeyPropagation(zone, "own1", []uint16{4711}, nil, []AgentId{fleetP2})
+	p3.Bridge.TrackDnskeyPropagation(f.ctx, ZoneName(zone), "own1", []uint16{4711}, nil, []AgentId{fleetP2})
 	zdr, err := NewZoneDataRepo()
 	if err != nil {
 		t.Fatal(err)
@@ -605,25 +612,31 @@ func TestACopyBeforeTheDistributionAndADistributionFromBeforeTheStart(t *testing
 //
 // The receive pipeline stamps a transport sender on every message it
 // routes, so the copy without one is handed to the bridge's callback as the
-// parser leaves it, before that stamp. And no sync API endpoint takes the
-// confirm verb: a copy cannot come in over HTTPS, where the transport's
-// sender would be the one the body names.
+// parser leaves it, before that stamp. Over HTTPS the sync API takes the
+// confirm verb on /msg, and the sender is the client certificate's
+// identity: the endpoint refuses a confirmation whose body names another,
+// and the sync API's TLSA check refuses a request without a certificate.
 func TestACopyWithoutATransportSenderIsNotBelieved(t *testing.T) {
 	const zone = "sender.audit.example."
 	seedAuditedZone(t, zone, fleetAuditor, fleetP1, fleetP2, fleetP3)
 	f := newAuditFleet(t)
 	aud := f.peers[fleetAuditor]
 
-	body, err := json.Marshal(&DnsConfirmCopyPayload{
-		DnsConfirmPayload: transport.DnsConfirmPayload{
-			Type: transport.VerbConfirm, SenderID: fleetP2, Zone: zone,
-			DistributionID: "d4", Status: "SUCCESS", Timestamp: time.Now().Unix(),
-		},
-		Originator: fleetP1,
-	})
-	if err != nil {
-		t.Fatal(err)
+	copyOf := func(distID string) []byte {
+		t.Helper()
+		body, err := json.Marshal(&DnsConfirmCopyPayload{
+			DnsConfirmPayload: transport.DnsConfirmPayload{
+				Type: transport.VerbConfirm, SenderID: fleetP2, Zone: zone,
+				DistributionID: distID, Status: "SUCCESS", Timestamp: time.Now().Unix(),
+			},
+			Originator: fleetP1,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
 	}
+	body := copyOf("d4")
 	// the copy as the pipeline's parser hands it on
 	parsed := func(transportSender string) *transport.IncomingMessage {
 		t.Helper()
@@ -651,24 +664,29 @@ func TestACopyWithoutATransportSenderIsNotBelieved(t *testing.T) {
 	aud.Bridge.routeIncomingMessage(parsed(fleetP3))
 	unbooked("a copy that names another sender than the one that sent it")
 
-	// over HTTPS: every endpoint refuses the verb before the pipeline
+	// over HTTPS, posted to /msg under the client certificate of identity
 	srv := apiEndpointsServer(t, aud.peerEnv)
-	for _, path := range []string{"/api/v1/hello", "/api/v1/beat", "/api/v1/sync/ping", "/api/v1/msg"} {
-		res, err := srv.Client().Post(srv.URL+path, "application/json", bytes.NewReader(body))
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	post := func(identity string, body []byte) map[string]interface{} {
+		t.Helper()
+		client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			RootCAs: pool, Certificates: []tls.Certificate{clientCert(t, identity)}}}}
+		res, err := client.Post(srv.URL+"/api/v1/msg", "application/json", bytes.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer res.Body.Close()
 		var reply map[string]interface{}
-		err = json.NewDecoder(res.Body).Decode(&reply)
-		res.Body.Close()
-		if err != nil {
+		if err := json.NewDecoder(res.Body).Decode(&reply); err != nil {
 			t.Fatal(err)
 		}
-		if reply["Error"] != true {
-			t.Errorf("%s took a confirmation copy: %v", path, reply)
-		}
+		return reply
 	}
-	unbooked("a copy posted to the sync API endpoints")
+	if reply := post(fleetP3, copyOf("d5")); reply["Error"] != true {
+		t.Errorf("/api/v1/msg took a copy naming p2 under p3's certificate: %v", reply)
+	}
+	unbooked("a copy naming p2 posted over HTTPS under p3's certificate")
 
 	// the same copy from the sender the transport established
 	aud.Bridge.routeIncomingMessage(parsed(fleetP2))
@@ -677,6 +695,14 @@ func TestACopyWithoutATransportSenderIsNotBelieved(t *testing.T) {
 	}
 	if !f.sm.Reporters()[fleetP2] {
 		t.Error("p2 sent a copy and is not known as a member that sends them")
+	}
+
+	// and over HTTPS under p2's own certificate
+	if reply := post(fleetP2, copyOf("d5")); reply["Error"] == true {
+		t.Errorf("/api/v1/msg refused p2's copy under p2's certificate: %v", reply)
+	}
+	if state, status, _ := f.memberState(zone, fleetP1, "d5", fleetP2); state != "confirmed" || status != "SUCCESS" {
+		t.Errorf("the copy from p2 over HTTPS: p2 in d5 is %q %q, want confirmed, SUCCESS; view: %+v", state, status, f.view(zone))
 	}
 }
 

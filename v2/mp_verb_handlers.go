@@ -70,6 +70,13 @@ func handleAppSync(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 		return fmt.Errorf("invalid message type for sync handler: %s", syncMsg.Token())
 	}
 
+	// A SYNC's sender is a voting member of the zone (design 3.3). The
+	// refusal is on the wire, with its reason.
+	if why := syncSenderRefusal(ZoneName(syncMsg.Zone), syncMsg.SenderID); why != "" {
+		lgTransport.Warn(why, "peer", ctx.PeerID, "distrib", ctx.DistributionID)
+		return refuseWithReason(ctx, why)
+	}
+
 	ctx.SetHandledType("sync")
 
 	// Create sync acknowledgment response — format must match extractConfirmFromResponse
@@ -108,6 +115,18 @@ func handleAppRfi(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 		return fmt.Errorf("invalid message type for rfi handler: %s", rfiMsg.Token())
 	}
 
+	// On an agent and an auditor an RFI from a peer is held to its
+	// sender's standing in the zone, by the RFI's type (the plan's 3.2).
+	// The agent's own combiner and signer are not peers.
+	if tm != nil && (tm.role == roleAgent || tm.role == roleAuditor) && !tm.ownInfraPeer(rfiMsg.SenderID) {
+		if p, err := ParseSyncPayload(rfiMsg.Payload); err == nil {
+			if why := tm.rfiSenderRefusal(ZoneName(rfiMsg.Zone), rfiMsg.SenderID, p.RfiType, p.RfiSubtype); why != "" {
+				lgTransport.Warn(why, "peer", ctx.PeerID, "distrib", ctx.DistributionID)
+				return refuseWithReason(ctx, why)
+			}
+		}
+	}
+
 	ctx.SetHandledType("rfi")
 
 	// Create RFI acknowledgment response — format must match extractConfirmFromResponse
@@ -132,7 +151,7 @@ func handleAppRfi(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 
 // handleAppKeystate processes KEYSTATE messages for key lifecycle signaling.
 // Used for agent↔signer communication about DNSKEY propagation status.
-// Signals: propagated, rejected, removed (agent→signer), published, retired (signer→agent).
+// Signals: propagated, rejected, removed, foreign, acting (agent→signer), published, retired, inventory (signer→agent).
 func handleAppKeystate(tm *MPTransportBridge, ctx *transport.MessageContext) error {
 	lgTransport.Debug("processing keystate", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
@@ -160,6 +179,11 @@ func handleAppKeystate(tm *MPTransportBridge, ctx *transport.MessageContext) err
 		// full inventory signal — KeyInventory carries the data, KeyTag not required
 	case "foreign":
 		// the other providers' key states — ForeignKeys carries the data
+	case "acting":
+		// the agent's hand-over to its signer (plan S11) — Acting carries it
+		if keystate.Acting == nil {
+			return fmt.Errorf("keystate acting without a hand-over")
+		}
 	default:
 		return fmt.Errorf("unknown keystate signal: %q", keystate.Signal)
 	}
@@ -167,7 +191,7 @@ func handleAppKeystate(tm *MPTransportBridge, ctx *transport.MessageContext) err
 	if keystate.Zone == "" {
 		return fmt.Errorf("keystate message missing zone")
 	}
-	if keystate.Signal == "inventory" || keystate.Signal == "foreign" {
+	if keystate.Signal == "inventory" || keystate.Signal == "foreign" || keystate.Signal == "acting" {
 		// Empty inventory is valid (signer has no keys for this zone).
 		// The recipient decides what to do with it. So is an empty set of
 		// foreign key states (nobody has said anything).
@@ -181,6 +205,7 @@ func handleAppKeystate(tm *MPTransportBridge, ctx *transport.MessageContext) err
 		TypeToken: "keystate",
 		SenderID:  keystate.GetSenderID(),
 		Zone:      keystate.Zone,
+		Mechanism: arrivedOn(ctx),
 		Payload:   ctx.ChunkPayload,
 	})
 
@@ -245,10 +270,12 @@ func handleAppEdits(tm *MPTransportBridge, ctx *transport.MessageContext) error 
 	// Store for processing by the agent
 	ctx.SetHandledType("edits")
 	ctx.SetIncoming(&transport.IncomingMessage{
-		TypeToken: "edits",
-		SenderID:  edits.GetSenderID(),
-		Zone:      edits.Zone,
-		Payload:   ctx.ChunkPayload,
+		TypeToken:       "edits",
+		SenderID:        edits.GetSenderID(),
+		TransportSender: ctx.PeerID, // the answer is matched on this sender, not the one the payload names
+		Zone:            edits.Zone,
+		Mechanism:       arrivedOn(ctx),
+		Payload:         ctx.ChunkPayload,
 	})
 
 	// Create confirmation response using standard "confirm" type
@@ -301,10 +328,12 @@ func handleAppConfig(tm *MPTransportBridge, ctx *transport.MessageContext) error
 
 	ctx.SetHandledType("config")
 	ctx.SetIncoming(&transport.IncomingMessage{
-		TypeToken: "config",
-		SenderID:  config.GetSenderID(),
-		Zone:      config.Zone,
-		Payload:   ctx.ChunkPayload,
+		TypeToken:       "config",
+		SenderID:        config.GetSenderID(),
+		TransportSender: ctx.PeerID, // the answer is matched on this sender, not the one the payload names
+		Zone:            config.Zone,
+		Mechanism:       arrivedOn(ctx),
+		Payload:         ctx.ChunkPayload,
 	})
 
 	confirmPayload := struct {
@@ -356,10 +385,12 @@ func handleAppAudit(tm *MPTransportBridge, ctx *transport.MessageContext) error 
 
 	ctx.SetHandledType("audit")
 	ctx.SetIncoming(&transport.IncomingMessage{
-		TypeToken: "audit",
-		SenderID:  audit.GetSenderID(),
-		Zone:      audit.Zone,
-		Payload:   ctx.ChunkPayload,
+		TypeToken:       "audit",
+		SenderID:        audit.GetSenderID(),
+		TransportSender: ctx.PeerID, // the answer is matched on this sender, not the one the payload names
+		Zone:            audit.Zone,
+		Mechanism:       arrivedOn(ctx),
+		Payload:         ctx.ChunkPayload,
 	})
 
 	confirmPayload := struct {
@@ -415,6 +446,7 @@ func handleAppStatusUpdate(tm *MPTransportBridge, ctx *transport.MessageContext)
 		TypeToken: "status-update",
 		SenderID:  statusUpdate.GetSenderID(),
 		Zone:      statusUpdate.Zone,
+		Mechanism: arrivedOn(ctx),
 		Payload:   ctx.ChunkPayload,
 	})
 
@@ -461,4 +493,14 @@ func handleAppRelocate(tm *MPTransportBridge, ctx *transport.MessageContext) err
 
 	lgTransport.Debug("relocate processed", "peer", ctx.PeerID)
 	return nil
+}
+
+// arrivedOn is the mechanism the message in ctx arrived on, for a handler
+// that sets a rebuilt message in its place: a SYNC's confirmations go back
+// on it.
+func arrivedOn(ctx *transport.MessageContext) string {
+	if in, ok := ctx.Incoming(); ok {
+		return in.Mechanism
+	}
+	return ""
 }

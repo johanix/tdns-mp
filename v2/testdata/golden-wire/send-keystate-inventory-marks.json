@@ -1,0 +1,50 @@
+{
+  "MessageType": "keystate",
+  "MyIdentity": "me.example.",
+  "YourIdentity": "you.example.",
+  "Zone": "zone1.example.",
+  "KeyTag": 0,
+  "Algorithm": 0,
+  "Signal": "inventory",
+  "Message": "full set",
+  "KeyInventory": [
+    {
+      "key_tag": 12345,
+      "algorithm": 15,
+      "flags": 257,
+      "state": "mpdist",
+      "keyrr": "zone1.example. 3600 IN DNSKEY 257 3 15 dGVzdA=="
+    }
+  ],
+  "Time": "2026-01-02T03:04:05Z",
+  "Acting": {
+    "zone": "zone1.example.",
+    "serial": 42,
+    "digest": "9c01aa47b2e3f650",
+    "records": [
+      "x"
+    ],
+    "newest": 42,
+    "phase": "steady",
+    "sets": {
+      "signing": [
+        {
+          "label": "us",
+          "identity": "me.example."
+        }
+      ],
+      "nsmgmt": 0,
+      "parentsync": 0,
+      "hold": true
+    },
+    "made": "2026-01-02T03:04:05Z"
+  },
+  "NotSigning": true,
+  "Rollover": true,
+  "WaitsOn": {
+    "12345": [
+      "p2"
+    ]
+  },
+  "Hold": true
+}

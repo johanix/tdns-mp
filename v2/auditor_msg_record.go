@@ -85,8 +85,8 @@ func detectMsgObservations(zs *AuditZoneState, senderID string,
 	msg *AgentMsgPostPlus, rrtypes []string) {
 	hasDNSKEY := false
 	for _, t := range rrtypes {
-		if strings.EqualFold(t, "DNSKEY") || strings.EqualFold(t, "CDS") ||
-			strings.EqualFold(t, "CDNSKEY") {
+		if strings.EqualFold(t, "DNSKEY") || strings.EqualFold(t, "CDS") || // not-a-name: RR types
+			strings.EqualFold(t, "CDNSKEY") { // not-a-name: an RR type
 			hasDNSKEY = true
 			break
 		}

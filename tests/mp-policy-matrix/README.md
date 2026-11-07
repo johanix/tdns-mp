@@ -130,7 +130,9 @@ checks. Adding a cell is one line.
   the upstream signer made except the SOA's. The static assertion
   "downstream of pN serves pN's RRSIG over SOA" is red for every
   downstream provider until that is fixed in the daemon. Found on the
-  rig's first run.
+  rig's first run. Expected to turn green with tdns-mp #144: the signer
+  now serves a zone it does not sign at the upstream's serial, so the
+  SOA and its RRSIG are the upstream's; this awaits a run of the rig.
 - G rolls a ZSK only; a KSK roll and the removal of the rolled-out key
   (retired, then withdrawn once the peers confirm) are not asserted yet.
 - F and G were added with B-MP and have not been run yet; the pin they

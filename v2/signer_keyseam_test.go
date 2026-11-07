@@ -37,6 +37,7 @@ func newMPTestKeyDB(t *testing.T) *tdns.KeyDB {
 	if err != nil {
 		t.Fatalf("NewKeyDB: %v", err)
 	}
+	t.Cleanup(func() { kdb.DB.Close() })
 	return kdb
 }
 
@@ -130,7 +131,9 @@ func rrsigTagsOf(t *testing.T, zd *tdns.ZoneData, owner string, rrtype uint16) [
 
 // Mode 4. The other signers' DNSKEYs arrive in the incoming zone; they are
 // kept as foreign rows, served in the DNSKEY RRset, never signing; a key
-// that leaves the incoming zone leaves the store; mode 2 keeps none.
+// that leaves the incoming zone stays in the store until the key states
+// relayed for its provider, or the zone owner, let it go (#207); mode 2
+// keeps none.
 func TestSignerForeignKeysAreServedAndNeverSign(t *testing.T) {
 	kdb := newMPTestKeyDB(t)
 	if err := NewHsyncDB(kdb).InitHsyncTables(); err != nil {
@@ -163,8 +166,9 @@ func TestSignerForeignKeysAreServedAndNeverSign(t *testing.T) {
 		incoming.Data.Set(mpzd.ZoneName, apex)
 	}
 	setIncomingDnskeys(foreign[0], foreign[1])
+	others := []string{"alpha"}
 
-	changed, err := mpzd.syncForeignDNSKEYs(incoming, true)
+	changed, err := mpzd.syncForeignDNSKEYs(incoming, true, others)
 	if err != nil || !changed {
 		t.Fatalf("syncForeignDNSKEYs: changed=%v err=%v", changed, err)
 	}
@@ -176,7 +180,7 @@ func TestSignerForeignKeysAreServedAndNeverSign(t *testing.T) {
 	if len(mpzd.GetRemoteDNSKEYs()) != 2 {
 		t.Fatalf("RemoteDNSKEYs = %d, want 2", len(mpzd.GetRemoteDNSKEYs()))
 	}
-	if changed, err := mpzd.syncForeignDNSKEYs(incoming, true); err != nil || changed {
+	if changed, err := mpzd.syncForeignDNSKEYs(incoming, true, others); err != nil || changed {
 		t.Fatalf("a second sync of the same set: changed=%v err=%v", changed, err)
 	}
 
@@ -200,16 +204,17 @@ func TestSignerForeignKeysAreServedAndNeverSign(t *testing.T) {
 		}
 	}
 
-	// One foreign key gone from the incoming zone: its row goes.
+	// One foreign key gone from the incoming zone, and no relayed key states
+	// for its provider: its row stays.
 	setIncomingDnskeys(foreign[0])
-	if changed, err := mpzd.syncForeignDNSKEYs(incoming, true); err != nil || !changed {
-		t.Fatalf("sync after a foreign key left: changed=%v err=%v", changed, err)
+	if changed, err := mpzd.syncForeignDNSKEYs(incoming, true, others); err != nil || changed {
+		t.Fatalf("sync after a foreign key left the incoming zone: changed=%v err=%v", changed, err)
 	}
-	if n := mpCountByCreator(t, kdb, mpzd.ZoneName, "foreign"); n != 1 {
-		t.Fatalf("%d foreign rows after one key left, want 1", n)
+	if n := mpCountByCreator(t, kdb, mpzd.ZoneName, "foreign"); n != 2 {
+		t.Fatalf("%d foreign rows after one key left the incoming zone, want both kept", n)
 	}
 	// Mode 2: none.
-	if changed, err := mpzd.syncForeignDNSKEYs(incoming, false); err != nil || !changed {
+	if changed, err := mpzd.syncForeignDNSKEYs(incoming, false, nil); err != nil || !changed {
 		t.Fatalf("sync in single-signer mode: changed=%v err=%v", changed, err)
 	}
 	if n := mpCountByCreator(t, kdb, mpzd.ZoneName, "foreign"); n != 0 {
@@ -241,23 +246,33 @@ func TestMPKeystoreMigration(t *testing.T) {
 		{DnskeyStateMpremove, "ZSK", false, dns.ED25519},
 		{DnskeyStateForeign, "ZSK", false, dns.ED25519},
 	}
-	oldIDs := map[string]uint16{}
-	var renumberedOld uint16
-	for i, r := range rows {
-		pkc, err := tdns.GenerateKeyMaterial(zone, dns.TypeDNSKEY, r.alg, r.role)
+	// The rows are keyed by (zone, key tag): the keys' tags are distinct,
+	// the renumbered key's under both its numbers (#331).
+	keys := distinctTags(len(rows), func(i int) (*tdns.PrivateKeyCache, []uint16) {
+		pkc, err := tdns.GenerateKeyMaterial(zone, dns.TypeDNSKEY, rows[i].alg, rows[i].role)
 		if err != nil {
 			t.Fatalf("GenerateKeyMaterial: %v", err)
 		}
-		dnskey := pkc.DnskeyRR
-		privatekey := pkc.PrivateKey
+		if i != 2 {
+			return pkc, []uint16{pkc.DnskeyRR.KeyTag()}
+		}
+		// A key minted under the signer's old MLDSA44 number, 18. The key
+		// material is ED25519; what the migration rewrites is the number in
+		// the record, to 199, and the tag with it.
+		pkc.DnskeyRR.Algorithm = 18
+		renumbered := pkc.DnskeyRR
+		renumbered.Algorithm = 199
+		return pkc, []uint16{pkc.DnskeyRR.KeyTag(), renumbered.KeyTag()}
+	})
+	oldIDs := map[string]uint16{}
+	var renumberedOld uint16
+	for i, r := range rows {
+		dnskey := keys[i].DnskeyRR
+		privatekey := keys[i].PrivateKey
 		if r.state == DnskeyStateForeign {
 			privatekey = ""
 		}
 		if i == 2 {
-			// A key minted under the signer's old MLDSA44 number, 18. The
-			// key material is ED25519; what the migration rewrites is the
-			// number in the record, and the tag with it.
-			dnskey.Algorithm = 18
 			renumberedOld = dnskey.KeyTag()
 		}
 		confirmed := 0
@@ -580,10 +595,8 @@ func TestMPKeystoreMigrationRefusesTakenKeyIDs(t *testing.T) {
 // signer's, in two zones. Every unrelated row moves with its state, the
 // copies are skipped, and the log's counts add up to the rows read.
 func TestMPKeystoreMigrationMixedTable(t *testing.T) {
-	var logbuf bytes.Buffer
-	saved := lgSigner
-	lgSigner = slog.New(slog.NewJSONHandler(&logbuf, nil))
-	t.Cleanup(func() { lgSigner = saved })
+	var logbuf lockedBuffer
+	logTo(t, lgSigner, slog.NewJSONHandler(&logbuf, nil))
 
 	kdb := newMPTestKeyDB(t)
 	createOldMPKeystore(t, kdb)

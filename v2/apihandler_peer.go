@@ -10,15 +10,14 @@
 package tdnsmp
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
@@ -141,7 +140,8 @@ func APIpeer(conf *Config, tm *transport.TransportManager, ar *AgentRegistry) fu
 	}
 }
 
-// doPeerPing pings any known peer via DNS CHUNK or API.
+// doPeerPing pings any known peer via DNS CHUNK or API, over that
+// transport only (pingOn).
 // Role-agnostic: works for agent, combiner, signer, or any role
 // with a TransportManager. The peer must be in the PeerRegistry
 // or have static config (combiner, signer, multi-provider agent).
@@ -171,67 +171,56 @@ func doPeerPing(conf *Config, peerID string, useAPI bool) *PeerResponse {
 		}
 	}
 
-	if useAPI {
-		if peer.APIEndpoint == "" {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("peer %q has no API endpoint configured", peerID)
-			return resp
-		}
-		url := strings.TrimSuffix(peer.APIEndpoint, "/") + "/ping"
-		body := tdns.PingPost{Msg: fmt.Sprintf("peer ping %s", peerID), Pings: 1}
-		data, _ := json.Marshal(body)
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(data))
-		if err != nil {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("build request: %v", err)
-			return resp
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
-		client := &http.Client{
-			Timeout: 10 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-			},
-		}
-		res, err := client.Do(req)
-		if err != nil {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("apiping to %s failed: %v", peerID, err)
-			return resp
-		}
-		defer res.Body.Close()
-		if res.StatusCode != http.StatusOK {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("peer %s API returned %d", peerID, res.StatusCode)
-			return resp
-		}
-		var pr tdns.PingResponse
-		if err := json.NewDecoder(res.Body).Decode(&pr); err != nil {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("decode ping response from %s: %v", peerID, err)
-			return resp
-		}
-		resp.Msg = fmt.Sprintf("ping ok (api transport): %s responded", peerID)
-		return resp
-	}
-
-	// DNS CHUNK ping
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	pingResp, err := tm.SendPing(ctx, peer)
+	msg, err := pingOn(ctx, tm, peer, useAPI)
 	if err != nil {
 		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("ping to %s failed: %v", peerID, err)
+		resp.ErrorMsg = fmt.Sprintf("ping to %s: %v", peerID, err)
 		return resp
+	}
+	resp.Msg = msg
+	return resp
+}
+
+// pingOn pings peer over the transport named, the API (useAPI) or DNS, and
+// over that one only: the other is not tried, as Send would. Through the API the
+// peer's certificate is checked against its TLSA, this node presents its
+// client certificate, and the address dialed is the one discovery found.
+// Over DNS it is the address the DNS carrier dials. It returns the text of
+// the reply, which names the transport.
+func pingOn(ctx context.Context, tm *transport.TransportManager, peer *transport.Peer, useAPI bool) (string, error) {
+	nonce := make([]byte, 8)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("ping nonce: %w", err)
+	}
+	req := &transport.PingRequest{
+		SenderID:  tm.LocalID,
+		Nonce:     hex.EncodeToString(nonce),
+		Timestamp: time.Now(),
+	}
+	mech := "dns"
+	var pingResp *transport.PingResponse
+	var err error
+	switch {
+	case useAPI && tm.APITransport == nil:
+		return "", fmt.Errorf("API transport not configured")
+	case useAPI:
+		mech = "api"
+		pingResp, err = tm.APITransport.Ping(ctx, peer, req)
+	case tm.DNSTransport == nil:
+		return "", fmt.Errorf("DNS transport not configured")
+	default:
+		pingResp, err = tm.DNSTransport.Ping(ctx, peer, req)
+	}
+	if err != nil {
+		return "", fmt.Errorf("ping over %s failed: %w", mech, err)
 	}
 	if !pingResp.OK {
-		resp.Error = true
-		resp.ErrorMsg = fmt.Sprintf("peer %s did not acknowledge (responder: %s)", peerID, pingResp.ResponderID)
-		return resp
+		return "", fmt.Errorf("no acknowledgement over %s (responder: %s)", mech, pingResp.ResponderID)
 	}
-	resp.Msg = fmt.Sprintf("ping ok (dns transport): %s echoed nonce %s rtt=%s", pingResp.ResponderID, pingResp.Nonce, pingResp.RTT.Round(time.Microsecond))
-	return resp
+	return fmt.Sprintf("ping ok (%s transport): %s echoed nonce %s rtt=%s",
+		mech, pingResp.ResponderID, pingResp.Nonce, pingResp.RTT.Round(time.Microsecond)), nil
 }
 
 // lookupStaticPeer checks all static peer configurations (agent-side: combiner, signer;
@@ -243,7 +232,7 @@ func (conf *Config) lookupStaticPeer(peerID string) *transport.Peer {
 		dns.Fqdn(mp.Combiner.Identity) == peerID && mp.Combiner.Address != "" {
 		if peer := peerFromAddress(peerID, mp.Combiner.Address); peer != nil {
 			if mp.Combiner.ApiBaseUrl != "" {
-				peer.APIEndpoint = mp.Combiner.ApiBaseUrl
+				peer.SetAPIEndpoint(mp.Combiner.ApiBaseUrl)
 			}
 			return peer
 		}
@@ -280,11 +269,14 @@ func peerFromAddress(peerID string, address string) *transport.Peer {
 		return nil
 	}
 	peer := transport.NewPeer(peerID)
-	peer.SetDiscoveryAddress(&transport.Address{
+	if err := peer.SetDNSCarrierAddress(&transport.Address{
 		Host:      host,
 		Port:      uint16(port),
 		Transport: "udp",
-	})
-	peer.DNSEndpoint = dnsEndpointURI(host, port) // S2 display
+	}); err != nil {
+		lgApi.Warn("invalid address for static peer", "address", address, "peer", peerID, "err", err)
+		return nil
+	}
+	peer.SetDNSEndpoint(dnsEndpointURI(host, port)) // S2 display
 	return peer
 }

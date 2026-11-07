@@ -53,12 +53,8 @@ func buildDispatchContext(t *testing.T, tm *MPTransportBridge, senderHint, distI
 	ctx.Data["response_peer_id"] = senderHint
 	if tm.ChunkHandler != nil {
 		if cb := tm.ChunkHandler.OnConfirmationReceived; cb != nil {
-			// Same repackaging as buildConfirmMessageContext: HandleConfirmation
-			// type-asserts the unnamed func type.
-			ctx.Data["on_confirmation_received"] = func(distributionID string, senderID string, status transport.ConfirmStatus,
-				zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, ignored []string, truncated bool, nonce string) {
-				cb(distributionID, senderID, status, zone, applied, removed, rejected, ignored, truncated, nonce)
-			}
+			// HandleConfirmation type-asserts transport.ConfirmationCallback
+			ctx.Data["on_confirmation_received"] = transport.ConfirmationCallback(cb)
 		}
 		if tm.ChunkHandler.GossipForPeer != nil {
 			ctx.Data["gossip_for_peer"] = tm.ChunkHandler.GossipForPeer
@@ -101,12 +97,18 @@ type dispatchCase struct {
 	// unhandled marks a verb the agent router has no handler for: it must be
 	// REFUSED on the wire and must NOT reach any MP queue.
 	unhandled bool
+	// before, when set, runs before the message is routed (e.g. to register
+	// the request an answer is routed to).
+	before func(env *integEnv, alice string)
 	// observe asserts the MP-side delivery.
 	observe func(t *testing.T, env *integEnv, alice, distID string)
 }
 
 func dispatchCases() []dispatchCase {
 	rr := dispatchZone + " 3600 IN TXT \"dispatch\""
+	var editsAnswer <-chan *EditsResponseMsg
+	var configAnswer <-chan *ConfigResponseMsg
+	var auditAnswer <-chan *AuditResponseMsg
 	return []dispatchCase{
 		{name: "hello", verb: "hello",
 			build: func(a, b, d string) interface{} {
@@ -177,7 +179,7 @@ func dispatchCases() []dispatchCase {
 					t.Fatal("rfi did not reach MsgQs.Msg")
 				}
 				if m.MessageType != AgentMsgRfi || string(m.OriginatorID) != alice || m.RfiType != "downstream" ||
-					m.RfiSubtype != "ns" || m.DistributionID != distID {
+					m.RfiSubtype != "ns" || m.DistributionID != distID || m.Nonce != "rfi-"+distID {
 					t.Errorf("rfi msg: %+v", m.AgentMsgPost)
 				}
 			}},
@@ -193,7 +195,9 @@ func dispatchCases() []dispatchCase {
 					t.Errorf("refused update leaked to MsgQs.Msg: %+v", m.AgentMsgPost)
 				}
 			}},
-		{name: "keystate-inventory", verb: "keystate", wantAck: "keystate inventory received",
+		{name: "keystate-inventory", verb: "keystate",
+			before:  func(env *integEnv, alice string) { env.Bob.Bridge.signerID = alice }, // a KEYSTATE comes from Bob's own signer (#254)
+			wantAck: "keystate inventory received",
 			build: func(a, b, d string) interface{} {
 				return &DnsKeystatePayload{MessageType: "keystate", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
 					Signal: "inventory", Timestamp: time.Now().Unix(),
@@ -209,7 +213,9 @@ func dispatchCases() []dispatchCase {
 					t.Errorf("keystate inventory: %+v", *m)
 				}
 			}},
-		{name: "keystate-signal", verb: "keystate", wantAck: "keystate propagated received",
+		{name: "keystate-signal", verb: "keystate",
+			before:  func(env *integEnv, alice string) { env.Bob.Bridge.signerID = alice }, // a KEYSTATE comes from Bob's own signer (#254)
+			wantAck: "keystate propagated received",
 			build: func(a, b, d string) interface{} {
 				return &DnsKeystatePayload{MessageType: "keystate", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
 					Signal: "propagated", KeyTag: 12345, Algorithm: 15, Timestamp: time.Now().Unix()}
@@ -226,12 +232,15 @@ func dispatchCases() []dispatchCase {
 		{name: "edits", verb: "edits", wantAck: "edits received",
 			build: func(a, b, d string) interface{} {
 				return &DnsEditsPayload{MessageType: "edits", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
-					AgentRecords: map[string]map[string][]string{b: {dispatchZone: {rr}}}, Timestamp: time.Now().Unix()}
+					AgentRecords: map[string]map[string][]string{b: {dispatchZone: {rr}}}, Nonce: "dispatch-nonce", Timestamp: time.Now().Unix()}
+			},
+			before: func(env *integEnv, alice string) {
+				editsAnswer, _ = env.Bob.MsgQs.editsWaiters.register(rfiWaitKey(alice, dispatchZone, "", "dispatch-nonce"))
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
-				m, ok := recvWithin(env.Bob.MsgQs.EditsResponse, integTestTimeout)
+				m, ok := recvWithin(editsAnswer, integTestTimeout)
 				if !ok {
-					t.Fatal("edits did not reach MsgQs.EditsResponse")
+					t.Fatal("edits did not reach the waiting request")
 				}
 				if m.SenderID != alice || m.Zone != dispatchZone || len(m.AgentRecords) != 1 {
 					t.Errorf("edits: %+v", *m)
@@ -240,12 +249,15 @@ func dispatchCases() []dispatchCase {
 		{name: "config", verb: "config", wantAck: "config received",
 			build: func(a, b, d string) interface{} {
 				return &DnsConfigPayload{MessageType: "config", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
-					Subtype: "policy", ConfigData: map[string]string{"k": "v"}, Timestamp: time.Now().Unix()}
+					Subtype: "policy", ConfigData: map[string]string{"k": "v"}, Nonce: "dispatch-nonce", Timestamp: time.Now().Unix()}
+			},
+			before: func(env *integEnv, alice string) {
+				configAnswer, _ = env.Bob.MsgQs.configWaiters.register(rfiWaitKey(alice, dispatchZone, "policy", "dispatch-nonce"))
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
-				m, ok := recvWithin(env.Bob.MsgQs.ConfigResponse, integTestTimeout)
+				m, ok := recvWithin(configAnswer, integTestTimeout)
 				if !ok {
-					t.Fatal("config did not reach MsgQs.ConfigResponse")
+					t.Fatal("config did not reach the waiting request")
 				}
 				if m.SenderID != alice || m.Zone != dispatchZone || m.Subtype != "policy" || m.ConfigData["k"] != "v" {
 					t.Errorf("config: %+v", *m)
@@ -254,12 +266,15 @@ func dispatchCases() []dispatchCase {
 		{name: "audit", verb: "audit", wantAck: "audit received",
 			build: func(a, b, d string) interface{} {
 				return &DnsAuditPayload{MessageType: "audit", MyIdentity: a, YourIdentity: b, Zone: dispatchZone,
-					AuditData: map[string]interface{}{"check": "ok"}, Timestamp: time.Now().Unix()}
+					AuditData: map[string]interface{}{"check": "ok"}, Nonce: "dispatch-nonce", Timestamp: time.Now().Unix()}
+			},
+			before: func(env *integEnv, alice string) {
+				auditAnswer, _ = env.Bob.MsgQs.auditWaiters.register(rfiWaitKey(alice, dispatchZone, "", "dispatch-nonce"))
 			},
 			observe: func(t *testing.T, env *integEnv, alice, distID string) {
-				m, ok := recvWithin(env.Bob.MsgQs.AuditResponse, integTestTimeout)
+				m, ok := recvWithin(auditAnswer, integTestTimeout)
 				if !ok {
-					t.Fatal("audit did not reach MsgQs.AuditResponse")
+					t.Fatal("audit did not reach the waiting request")
 				}
 				if m.SenderID != alice || m.Zone != dispatchZone {
 					t.Errorf("audit: %+v", *m)
@@ -291,7 +306,7 @@ func dispatchCases() []dispatchCase {
 				if !ok {
 					t.Fatal("relocate: sender not in PeerRegistry")
 				}
-				addr := peer.CurrentAddress()
+				addr := peer.DNSCarrierAddress()
 				if addr == nil || addr.Host != "192.0.2.3" || addr.Port != 5353 {
 					t.Errorf("relocate: operational address not applied: %+v", addr)
 				}
@@ -349,6 +364,9 @@ func TestTransportDispatch_PerVerb(t *testing.T) {
 			ctx.Peer = alicePeer
 			if string(msgType) != tc.verb {
 				t.Fatalf("pre-parsed type: got %q, want %q", msgType, tc.verb)
+			}
+			if tc.before != nil {
+				tc.before(env, alice)
 			}
 			if err := env.Bob.Bridge.Router.Route(ctx, msgType); err != nil {
 				t.Fatalf("Router.Route(%s): %v", tc.verb, err)

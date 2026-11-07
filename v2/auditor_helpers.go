@@ -16,27 +16,25 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/miekg/dns"
-
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 func normalizeHSYNC3Label(label string) string {
 	return strings.TrimSuffix(label, ".")
 }
 
-// GetAuditors returns the list of auditor labels declared in the
-// zone's apex HSYNCPARAM RRset. Returns nil if the zone has no
-// HSYNCPARAM or no auditors=.
+// GetAuditors returns the auditor labels of the zone's instructions. Nil if
+// the zone has no HSYNCPARAM or no auditors=.
 func (mpzd *MPZoneData) GetAuditors() []string {
 	if mpzd == nil {
 		return nil
 	}
-	hp := mpzd.getHSYNCPARAM()
-	if hp == nil {
+	in := mpzd.instructions()
+	if in == nil || !in.HasParam || len(in.Auditors) == 0 {
 		return nil
 	}
-	return hp.GetAuditors()
+	return slices.Clone(in.Auditors)
 }
 
 // IsAuditorLabel reports whether the given HSYNC3 label is in the
@@ -54,59 +52,46 @@ func (mpzd *MPZoneData) IsAuditorLabel(label string) bool {
 	return false
 }
 
-// hsync3IdentitiesByLabel maps HSYNC3 label → identity FQDN for the
-// zone apex. Includes inactive (State==0) members so declared auditors
-// still appear when a peer is offline.
+// hsync3IdentitiesByLabel maps HSYNC3 label → identity FQDN by the zone's
+// active instructions: ON records only, since an OFF record gives no label
+// (plan S3).
 func (mpzd *MPZoneData) hsync3IdentitiesByLabel() map[string]string {
 	out := make(map[string]string)
 	if mpzd == nil {
 		return out
 	}
-	apex, err := mpzd.GetOwner(mpzd.ZoneName)
-	if err != nil || apex == nil {
-		return out
-	}
-	hsync3RRset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
-	if !exists {
-		return out
-	}
-	for _, rr := range hsync3RRset.RRs {
-		prr, ok := rr.(*dns.PrivateRR)
-		if !ok {
-			continue
+	if in := mpzd.instructions(); in != nil {
+		for _, r := range in.Records {
+			out[r.Label] = r.Identity
 		}
-		h3, ok := prr.Data.(*core.HSYNC3)
-		if !ok || h3.Identity == "" {
-			continue
-		}
-		out[normalizeHSYNC3Label(h3.Label)] = dns.Fqdn(h3.Identity)
 	}
 	return out
 }
 
-// hsync3LabelForIdentity returns the HSYNC3 label for identity at the
-// zone apex, or "" if not listed.
-func (mpzd *MPZoneData) hsync3LabelForIdentity(identity string) string {
-	if mpzd == nil || identity == "" {
-		return ""
-	}
-	identity = dns.Fqdn(identity)
-	for label, id := range mpzd.hsync3IdentitiesByLabel() {
-		if id == identity {
-			return label
-		}
-	}
-	return ""
-}
-
-// IsAuditorIdentity reports whether identity is declared in auditors=
-// for this zone (label resolved via apex HSYNC3).
+// IsAuditorIdentity reports whether identity is declared in auditors= for
+// this zone: one of its ON records in the active instructions, its identity
+// compared as a DNS name, has a label in auditors=. An identity that is also
+// under a label in servers= or signers= (an owner error, shown in the
+// auditor's config errors) is a provider, not an auditor.
 func (mpzd *MPZoneData) IsAuditorIdentity(identity string) bool {
 	if mpzd == nil || identity == "" {
 		return false
 	}
-	label := mpzd.hsync3LabelForIdentity(identity)
-	return label != "" && mpzd.IsAuditorLabel(label)
+	in := mpzd.instructions()
+	if in == nil {
+		return false
+	}
+	auditor := false
+	for _, r := range in.Records {
+		if !core.EqualNames(dns.Fqdn(identity), r.Identity) {
+			continue
+		}
+		if slices.Contains(in.Servers, r.Label) || slices.Contains(in.Signers, r.Label) {
+			return false
+		}
+		auditor = auditor || mpzd.IsAuditorLabel(r.Label)
+	}
+	return auditor
 }
 
 // IsAuditorIdentity reports whether identity is declared as an auditor

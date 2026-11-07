@@ -1,0 +1,1 @@
+{"type":"confirm","sender_id":"a.example.","zone":"z.example.","distribution_id":"d-1","nonce":"n-1","status":"SUCCESS","message":"applied","applied_count":1,"applied_records":["z.example. 3600 IN NS ns1.a.example."],"timestamp":1767323045}

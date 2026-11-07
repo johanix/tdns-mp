@@ -42,8 +42,12 @@ the [tdns Guide](../../tdns/guide/README.md).
    addrr/delrr, DNSSEC key rollover, inspection at
    three layers (SDE / combiner / DNS), recovery and
    resync.
-9. **[The Auditor](auditor.md)** — adding a passive
-   read-only observer to the multi-provider network.
+9. **[Changing the Set of Providers](provider-changes.md)**
+   — adding a provider, removing one and changing a
+   provider's role in a running zone: the required
+   order, and what is still done by hand.
+10. **[The Auditor](auditor.md)** — adding a passive
+    read-only observer to the multi-provider network.
 
 ## Reference
 

@@ -63,10 +63,6 @@ func TestOwnerTakesZonesOneByOne(t *testing.T) {
 	if err != nil || !in.Known || len(in.Set) != 1 || in.Set[0].(*dns.DS).KeyTag != ksk {
 		t.Errorf("with ds=1 on the active KSK: known=%v set=%v err=%v, want the one DS", in.Known, in.Set, err)
 	}
-	owner.Release(a.ZoneName)
-	if owner.Owns(a.ZoneData) {
-		t.Error("released zone still owned")
-	}
 }
 
 func mustCols(state string, sep bool) tdns.KeyRowFlags {

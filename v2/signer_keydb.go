@@ -42,11 +42,20 @@ func GetKeyInventory(hdb *HsyncDB, zonename string) ([]KeyInventoryItem, error) 
 // --- Foreign keys -----------------------------------------------------------
 
 // syncForeignDNSKEYs records the other signers' DNSKEYs found in an incoming
-// zone as foreign rows, served but never signing, and drops the rows for keys
-// that are gone. In single-signer mode no foreign row is kept: whatever
-// DNSKEYs the upstream carried are dropped by the publish, which rebuilds the
-// RRset from the keystore. Reports whether the set changed.
-func (mpzd *MPZoneData) syncForeignDNSKEYs(incoming *tdns.ZoneData, multiSigner bool) (bool, error) {
+// zone as foreign rows, served but never signing. others are the zone's
+// other signers, as the HSYNCPARAM of the incoming zone names them. A row
+// whose key the incoming zone lacks goes only when foreignKeyWithdrawn lets
+// it: when the key states its provider's agent sent our agent, and our
+// agent relayed here, no longer list the key, or when the zone owner no
+// longer names that provider as a signer. One copy without another
+// provider's key is neither, and a combiner that has just started may send
+// such a copy (tdns-mp #207). Until then the row stays, served, and is
+// looked at again when our agent next relays the other providers' key
+// states (dropWithdrawnForeignDNSKEYs). In single-signer mode no foreign row is
+// kept: whatever DNSKEYs the upstream carried are dropped by the publish,
+// which rebuilds the RRset from the keystore. Reports whether the set
+// changed.
+func (mpzd *MPZoneData) syncForeignDNSKEYs(incoming *tdns.ZoneData, multiSigner bool, others []string) (bool, error) {
 	kdb := mpzd.KeyDB
 	if kdb == nil {
 		return false, nil
@@ -119,19 +128,89 @@ func (mpzd *MPZoneData) syncForeignDNSKEYs(incoming *tdns.ZoneData, multiSigner 
 		changed = true
 		lgSigner.Info("persisted new foreign DNSKEY", "zone", zone, "keytag", kt, "flags", dnskey.Flags, "algorithm", alg)
 	}
+	var absent []uint16
 	for kt := range existing {
-		if _, still := current[kt]; still {
+		if _, still := current[kt]; !still {
+			absent = append(absent, kt)
+		}
+	}
+	var kept []uint16
+	dropped := false
+	switch {
+	case !multiSigner:
+		// no other signer: nothing keeps a foreign key
+		kept, dropped = dropWithdrawnForeignRows(kdb, zone, absent, nil)
+	case len(others) == 0:
+		// other signers, and none of them named: whose relayed key states
+		// to weigh is not known, so nothing is dropped
+		kept = absent
+	default:
+		kept, dropped = dropWithdrawnForeignRows(kdb, zone, absent, others)
+	}
+	mpzd.setAbsentForeign(kept)
+	mpzd.SetRemoteDNSKEYs(remote)
+	return changed || dropped, nil
+}
+
+// dropWithdrawnForeignDNSKEYs looks again at the foreign rows that the last
+// incoming zone lacked and that were kept, and drops the ones
+// foreignKeyWithdrawn now lets go. Run when our agent relays the other
+// providers' key states (KEYSTATE "foreign"): when a provider removes a key,
+// the copy of the zone without it may reach this signer from our combiner
+// before our agent relays the key states without it. Reports whether a row
+// went.
+func (mpzd *MPZoneData) dropWithdrawnForeignDNSKEYs(mp *MultiProviderConf) bool {
+	kdb := mpzd.KeyDB
+	if kdb == nil {
+		return false
+	}
+	absent := mpzd.absentForeignKeys()
+	if len(absent) == 0 {
+		return false
+	}
+	others, signer := otherSignerLabels(mpzd, mp)
+	if !signer {
+		return false
+	}
+	kept, dropped := dropWithdrawnForeignRows(kdb, mpzd.ZoneName, absent, others)
+	mpzd.setAbsentForeign(kept)
+	return dropped
+}
+
+// dropWithdrawnForeignRows deletes the foreign rows among absent (key tags an
+// incoming zone lacked) that foreignKeyWithdrawn lets go, by the relayed key
+// states the key lifecycle keeps, and returns the ones it kept. With no
+// other signer (others empty) every row goes. Without the relayed key states
+// (no table yet, a read that fails) every row is kept.
+func dropWithdrawnForeignRows(kdb *tdns.KeyDB, zone string, absent []uint16, others []string) (kept []uint16, dropped bool) {
+	if len(absent) == 0 {
+		return nil, false
+	}
+	word := map[uint16]foreignSaid{}
+	if len(others) > 0 {
+		var err error
+		if word, err = readForeignWord(kdb, zone); err != nil {
+			lgSigner.Warn("the other providers' relayed key states could not be read; the foreign DNSKEYs the incoming zone lacks are kept",
+				"zone", zone, "keytags", absent, "err", err)
+			return absent, false
+		}
+	}
+	for _, kt := range absent {
+		withdrawn, why := foreignKeyWithdrawn(word, kt, others)
+		if !withdrawn {
+			lgSigner.Info("kept another signer's DNSKEY that the incoming zone lacks", "zone", zone, "keytag", kt, "why", why)
+			kept = append(kept, kt)
 			continue
 		}
 		if _, err := kdb.Exec(`DELETE FROM DnssecKeyStore WHERE zonename=? AND keyid=? AND state=?`, zone, kt, DnskeyStateForeign); err != nil {
-			lgSigner.Error("failed to delete stale foreign DNSKEY", "zone", zone, "keytag", kt, "err", err)
+			lgSigner.Error("failed to delete withdrawn foreign DNSKEY", "zone", zone, "keytag", kt, "err", err)
+			kept = append(kept, kt)
 			continue
 		}
-		changed = true
-		lgSigner.Info("removed stale foreign DNSKEY", "zone", zone, "keytag", kt)
+		dropped = true
+		lgSigner.Info("removed withdrawn foreign DNSKEY", "zone", zone, "keytag", kt, "why", why)
 	}
-	mpzd.SetRemoteDNSKEYs(remote)
-	return changed, nil
+	return kept, dropped
 }
 
 // sendResignRequest asks tdns's resigner to bring a zone's signatures and

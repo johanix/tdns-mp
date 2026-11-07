@@ -89,7 +89,7 @@ func (p *Prompter) AskYesNo(label string, defaultYes bool) bool {
 	if err != nil && line == "" {
 		return defaultYes
 	}
-	ans := strings.ToLower(strings.TrimSpace(line))
+	ans := strings.ToLower(strings.TrimSpace(line)) // not-a-name: an operator's answer
 	if ans == "" {
 		return defaultYes
 	}

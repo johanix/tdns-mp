@@ -10,6 +10,102 @@ import (
 	"github.com/miekg/dns"
 )
 
+// tdns-mp #249: the replace-order guard is persisted, so a restart still
+// rejects an older REPLACE of the same (zone, agent, rrtype).
+func TestReplaceOriginPersistsAcrossRestart(t *testing.T) {
+	hdb := NewHsyncDB(newMPTestKeyDB(t))
+	if err := hdb.InitHsyncTables(); err != nil {
+		t.Fatalf("InitHsyncTables: %v", err)
+	}
+
+	zdr, err := NewZoneDataRepo()
+	if err != nil {
+		t.Fatalf("NewZoneDataRepo: %v", err)
+	}
+	zdr.attachHsyncDB(hdb)
+
+	t0 := time.Unix(1_700_000_000, 0)
+	newer := &SynchedDataUpdate{
+		Zone: "cell.example.", AgentId: "agent.peer.example.", UpdateType: "remote",
+		OriginatingTime: t0.Add(time.Second), OriginatingDistID: "6aa51b6c",
+	}
+	if stale, _ := zdr.noteReplaceOrigin(newer, dns.TypeDNSKEY); stale {
+		t.Fatal("first REPLACE marked stale")
+	}
+
+	// Simulated restart: new repo, same HsyncDB.
+	zdr2, err := NewZoneDataRepo()
+	if err != nil {
+		t.Fatalf("NewZoneDataRepo (restart): %v", err)
+	}
+	zdr2.attachHsyncDB(hdb)
+
+	older := &SynchedDataUpdate{
+		Zone: "cell.example.", AgentId: "agent.peer.example.", UpdateType: "remote",
+		OriginatingTime: t0, OriginatingDistID: "6aa51b6a",
+	}
+	stale, applied := zdr2.noteReplaceOrigin(older, dns.TypeDNSKEY)
+	if !stale {
+		t.Fatalf("after restart, older REPLACE was not rejected; applied=%v", applied)
+	}
+	if !applied.Time.Equal(newer.OriginatingTime) || applied.DistID != newer.OriginatingDistID {
+		t.Fatalf("loaded origin mismatch: got time=%v dist=%q want time=%v dist=%q",
+			applied.Time, applied.DistID, newer.OriginatingTime, newer.OriginatingDistID)
+	}
+
+	// Same second as the persisted origin, higher DistID: still applies and
+	// persists again.
+	newest := &SynchedDataUpdate{
+		Zone: "cell.example.", AgentId: "agent.peer.example.", UpdateType: "remote",
+		OriginatingTime: t0.Add(time.Second), OriginatingDistID: "6aa51b6d",
+	}
+	if stale, _ := zdr2.noteReplaceOrigin(newest, dns.TypeDNSKEY); stale {
+		t.Fatal("a newer REPLACE in the same second was rejected after restart")
+	}
+}
+
+// Unix seconds would drop the fraction. After a restart an older origin in
+// the same second as the stored one must still be rejected.
+func TestReplaceOriginKeepsFractionalSecondsAcrossRestart(t *testing.T) {
+	hdb := NewHsyncDB(newMPTestKeyDB(t))
+	if err := hdb.InitHsyncTables(); err != nil {
+		t.Fatalf("InitHsyncTables: %v", err)
+	}
+
+	zdr, err := NewZoneDataRepo()
+	if err != nil {
+		t.Fatalf("NewZoneDataRepo: %v", err)
+	}
+	zdr.attachHsyncDB(hdb)
+
+	base := time.Unix(1_700_000_000, 0)
+	newer := &SynchedDataUpdate{
+		Zone: "cell.example.", AgentId: "agent.peer.example.", UpdateType: "remote",
+		OriginatingTime: base.Add(900 * time.Millisecond), OriginatingDistID: "a",
+	}
+	if stale, _ := zdr.noteReplaceOrigin(newer, dns.TypeDNSKEY); stale {
+		t.Fatal("first REPLACE marked stale")
+	}
+
+	zdr2, err := NewZoneDataRepo()
+	if err != nil {
+		t.Fatalf("NewZoneDataRepo (restart): %v", err)
+	}
+	zdr2.attachHsyncDB(hdb)
+
+	older := &SynchedDataUpdate{
+		Zone: "cell.example.", AgentId: "agent.peer.example.", UpdateType: "remote",
+		OriginatingTime: base.Add(100 * time.Millisecond), OriginatingDistID: "z",
+	}
+	stale, applied := zdr2.noteReplaceOrigin(older, dns.TypeDNSKEY)
+	if !stale {
+		t.Fatal("after restart, an older origin in the same second was accepted")
+	}
+	if !applied.Time.Equal(newer.OriginatingTime) {
+		t.Fatalf("loaded origin lost its fraction: got %v want %v", applied.Time, newer.OriginatingTime)
+	}
+}
+
 // A peer's REPLACE that was sent earlier but arrives later -- the retry of
 // one rejected while this agent did not yet hold the zone -- must not roll
 // the peer's set back; the newest origin wins, a later one applies, and a

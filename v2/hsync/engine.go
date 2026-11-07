@@ -20,7 +20,7 @@ type Engine struct {
 	// kick carries changes seen between beat rounds to Run (KickBeats).
 	kick chan struct{}
 
-	// beatMu guards the four below (beat_retry.go).
+	// beatMu guards the five below (beat_retry.go).
 	beatMu sync.Mutex
 	// runCtx is Run's context, for the beat retriers.
 	runCtx context.Context
@@ -28,8 +28,15 @@ type Engine struct {
 	beatFailing map[PeerID]bool
 	// beatRetrying: the peers a beat retrier is running for.
 	beatRetrying map[PeerID]bool
-	// beatingBack: the peers a BeatPeer beat is on its way to.
+	// beatingBack: the peers a BeatPeer beat is on its way to, or waits to
+	// be sent again for.
 	beatingBack map[PeerID]bool
+	// beatBackAt: when the last beat back to each peer started (BeatPeer).
+	beatBackAt map[PeerID]time.Time
+
+	// beforePruneRemoval, when set (tests), runs between the prune's reading
+	// of a peer and its removal under the shard's lock.
+	beforePruneRemoval func(PeerID)
 }
 
 // NewEngine constructs an Engine. Gossip table may be nil until wired.
@@ -46,6 +53,7 @@ func NewEngine(deps Deps, cfg Config) *Engine {
 		beatFailing:  make(map[PeerID]bool),
 		beatRetrying: make(map[PeerID]bool),
 		beatingBack:  make(map[PeerID]bool),
+		beatBackAt:   make(map[PeerID]time.Time),
 	}
 	if deps.Gossip != nil && deps.Host.OnGroupOperational != nil {
 		deps.Gossip.SetOnGroupOperational(deps.Host.OnGroupOperational)

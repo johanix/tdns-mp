@@ -100,8 +100,10 @@ for the full rationale.
   commands (next section), not `addrr DNSKEY`.
 - **RRSIGs.** The signer produces these from DNSKEYs +
   zone content. They are not editable.
-- **SOA.** The signer manages the serial. Use `bump`
-  (section 4) if you want to force a re-serve.
+- **SOA.** The signer manages the serial of a zone it
+  signs; a zone it only relays keeps the upstream
+  signer's SOA. Use `bump` (section 4) if you want to
+  force a re-serve.
 - **Records in zones you do not have `OptAllowEdits`
   for.** Even per-provider edits require authorization.
 
@@ -538,6 +540,14 @@ after changing HSYNC3 / HSYNCPARAM; it propagates the
 new zone to every combiner. The other two are for
 forcing a refresh of an already-loaded zone within one
 provider, usually for debugging.
+
+`signer zone bump` is for a zone this provider signs.
+For a zone it only serves, signed by another provider,
+the signer refuses the bump ("may not originate
+content"): it relays the upstream signer's SOA, and a
+serial of its own under the upstream's RRSIG does not
+validate. To fetch such a zone again, use
+`tdns-mpcli signer zone reload -z example.com. --force`.
 
 ## 5. Recovery and Re-Sync
 

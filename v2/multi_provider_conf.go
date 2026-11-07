@@ -130,8 +130,29 @@ type MultiProviderConf struct {
 			Reconcile         int `yaml:"reconcile" mapstructure:"reconcile"`
 			HelloFastAttempts int `yaml:"hello_fast_attempts" mapstructure:"hello_fast_attempts"`
 			HelloFastInterval int `yaml:"hello_fast_interval" mapstructure:"hello_fast_interval"`
+			// CatchupOutage: a peer back after a longer gap between two
+			// successful beats is asked for the zones' state (catchup.go).
+			CatchupOutage int `yaml:"catchup_outage" mapstructure:"catchup_outage"`
+			// PeerHold: a peer that no zone names any more is kept this long,
+			// and then removed (the end of comms, design 3.1).
+			PeerHold int `yaml:"peer_hold" mapstructure:"peer_hold"`
 		} `yaml:"intervals" mapstructure:"intervals"`
 	} `yaml:"syncengine" mapstructure:"syncengine"`
+	// Transitions: the times of a change of the owner's instructions, in
+	// seconds (YAML: multi-provider.transitions; plan S7). LeavingTimeout:
+	// a telling heard longer ago does not count for the thaw, and a leaving
+	// voting member whose telling has not met the thaw's conditions for this
+	// long, counted from when this agent first holds the serial agreed on,
+	// is excused; and so is one that has not confirmed a step of the
+	// reconciliation for this long (plan S12). Zero or absent: 3600.
+	// NoRoleTimeout: how long a step, a distribution and the leader's
+	// NOTIFY for its CSYNC wait for a member with no role, on its way in or
+	// out, before they go on without it (design 4, plan S12). Zero or
+	// absent: 900.
+	Transitions struct {
+		LeavingTimeout int `yaml:"leaving-timeout" mapstructure:"leaving-timeout"`
+		NoRoleTimeout  int `yaml:"no-role-timeout" mapstructure:"no-role-timeout"`
+	} `yaml:"transitions" mapstructure:"transitions"`
 	Api LocalAgentApiConf
 	Dns LocalAgentDnsConf
 	// Combiner peer (agent only): address and combiner's JOSE public key path for secure CHUNK
@@ -157,7 +178,7 @@ type MultiProviderConf struct {
 // FindAgent returns the PeerConf for the agent with the given identity, or nil if not found.
 func (c *MultiProviderConf) FindAgent(identity string) *PeerConf {
 	for _, a := range c.Agents {
-		if a.Identity == identity {
+		if sameName(a.Identity, identity) {
 			return a
 		}
 	}
@@ -169,7 +190,7 @@ func (c *MultiProviderConf) FindAgent(identity string) *PeerConf {
 type PeerConf struct {
 	Address            string `yaml:"address"`
 	LongTermJosePubKey string `yaml:"long_term_jose_pub_key"`
-	ApiBaseUrl         string `yaml:"api_base_url,omitempty"` // Optional: for API transport (e.g. https://combiner:8085/api/v1)
+	ApiBaseUrl         string `yaml:"api_base_url,omitempty"` // Optional; a configured peer has no TLSA, so HTTPS to it is refused (a combiner and a signer ignore it, with a Warn)
 	Identity           string `yaml:"identity"`               // Peer identity (FQDN); required for combiner agents, optional for agent combiner
 }
 
@@ -249,9 +270,18 @@ var SignerOptionToString = map[SignerOption]string{}
 var StringToSignerOption = map[string]SignerOption{}
 
 // AgentOption identifies an agent-specific behaviour flag.
-// No options defined yet; the type and maps exist for symmetry and
-// future expansion.
 type AgentOption uint8
 
-var AgentOptionToString = map[AgentOption]string{}
-var StringToAgentOption = map[string]AgentOption{}
+const (
+	// AgentOptAllowInject lets the debug injector send the three messages
+	// no honest daemon sends (tdns-mp #261). Off, those commands are refused.
+	AgentOptAllowInject AgentOption = iota + 1
+)
+
+var AgentOptionToString = map[AgentOption]string{
+	AgentOptAllowInject: "allow-inject",
+}
+
+var StringToAgentOption = map[string]AgentOption{
+	"allow-inject": AgentOptAllowInject,
+}

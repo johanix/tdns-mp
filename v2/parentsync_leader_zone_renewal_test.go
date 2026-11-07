@@ -14,20 +14,28 @@ import (
 // peers the zone has and not who they are.
 func newZoneElectionNet(t *testing.T, ttl time.Duration, members ...string) *electionNet {
 	t.Helper()
+	peers := func(ZoneName) int { return len(members) - 1 }
+	return newZoneElectionNetCounting(t, ttl, func(AgentId) func(ZoneName) int { return peers }, members...)
+}
+
+// newZoneElectionNetCounting is newZoneElectionNet with a count per member:
+// count gives each member its count of the zone's peers, configured and
+// OPERATIONAL alike.
+func newZoneElectionNetCounting(t *testing.T, ttl time.Duration, count func(AgentId) func(ZoneName) int, members ...string) *electionNet {
+	t.Helper()
 	n := &electionNet{
 		zone:    "zone.example.",
 		members: members,
 		mgrs:    map[AgentId]*LeaderElectionManager{},
 		wake:    make(chan struct{}, 1),
 	}
-	peers := func(ZoneName) int { return len(members) - 1 }
 	for _, m := range members {
 		id := AgentId(m)
 		lem := NewLeaderElectionManager(id, ttl, func(_ ZoneName, rfiType string, records map[string][]string) error {
 			return n.broadcast(id, rfiType, records)
 		})
-		lem.SetConfiguredPeersFunc(peers)
-		lem.SetOperationalPeersFunc(peers)
+		lem.SetConfiguredPeersFunc(count(id))
+		lem.SetOperationalPeersFunc(count(id))
 		lem.SetOnLeaderElected(func(ZoneName) error {
 			n.mu.Lock()
 			n.elected = append(n.elected, id)

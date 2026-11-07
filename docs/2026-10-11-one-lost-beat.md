@@ -1,6 +1,6 @@
 # One lost beat must not degrade a group
 
-**Status:** implemented in tdns-mp PR #124 (branch `fix/123-beat-retry`), for issue #123, with Amendment 1 after its review. Run on the testbed 2026-10-11 (Amendment 2). The design text is not rewritten after review (dated amendments at the end).
+**Status:** implemented in tdns-mp PR #124 (branch `fix/123-beat-retry`), for issue #123, with Amendment 1 after its review. Run on the testbed 2026-10-11 (Amendment 2). Amendment 3, for issue #128, is implemented and not yet run on the testbed. The design text is not rewritten after review (dated amendments at the end).
 
 ## 1. What was wrong
 
@@ -77,3 +77,15 @@ Run on a three-agent test rig with a 10 s beat interval, on top of the branch of
 **The beat back can come too early.** In one of those three the peer processed the returning agent's hello a second after its beat had failed, and beat the agent back at once. The agent was not yet taking beats and refused it. The retry of the failed beat, a second later, was acknowledged. §3 says that either change alone covers a restart: here the beat back alone would have left the peer waiting for its next round.
 
 **An agent left down.** One agent was stopped and left down for a minute. Its peers logged "group lost mutual OPERATIONAL" 13 s after the stop, two beat intervals after their last acknowledged beat to it, as before.
+
+### Amendment 3 (2026-10-12): a refused beat back is sent again
+
+Amendment 2 saw a returning agent refuse the beat back, and the retry of the failed beat cover for it. That retry is not always there. A beat's retries come at doubling gaps, so the last stretch before the next round has none: with a 10 s beat interval they come 2 and 6 s after the failure and the round at 10 s; with the default 30 s, at 2, 6 and 14 s. A peer that is back in that stretch is covered by the beat back alone, and when it refuses that beat, the round reads it as DEGRADED (issue #128).
+
+**A beat back that fails is sent again after the fast interval**, twice at most (`beatBackRetries`). The first retry covers the refusal that was seen, which lasted a second. The second is for a peer that needs longer than one fast interval. A peer that refuses three beats in a row is left to the rounds.
+
+- One beat back per peer at a time, as before. While it waits to be sent again, further hellos from the peer start no second one.
+- The beat back does not retry beside the beat retrier. A failed beat back that is the first failure since a success starts the retrier, whose first retry comes after the fast interval, and sends nothing more itself. With an outage already on the books it starts no retrier, and sends its own retries. A beat that succeeds in between, a round's or the retrier's, ends them.
+- With the fixed pace there is no fast interval and no retry, as for a failed beat (§2).
+
+Why a returning agent refuses a beat right after its own hello is not established. Closing that window would make the beat back dependable by itself.

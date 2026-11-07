@@ -34,6 +34,9 @@ func apiGoldenFixtures() map[string]interface{} {
 		"beat-response":   &AgentBeatResponse{Status: "ok", MyIdentity: "b.example.", YourIdentity: "a.example.", Time: at, Msg: "Hi there!"},
 		"ping-response":   &AgentPingResponse{Status: "ok", MyIdentity: "b.example.", YourIdentity: "a.example.", Nonce: "n-1", Time: at},
 		"msg-response":    &AgentMsgResponse{Status: "ok", Time: at, Msg: "Hi there!"},
+		// a beat's answer carries the receiver's gossip (plan decision 26)
+		"beat-response-gossip": &AgentBeatResponse{Status: "ok", MyIdentity: "b.example.", YourIdentity: "a.example.", Time: at, Msg: "beat acknowledged",
+			Gossip: json.RawMessage(`[{"group_hash":"gh1"}]`)},
 	}
 }
 
