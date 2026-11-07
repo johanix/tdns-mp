@@ -446,9 +446,12 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		}
 	}
 
-	if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Operations, req.Records); refusal != nil && !req.Removal {
-		refusal.DistributionID, refusal.Timestamp = resp.DistributionID, resp.Timestamp
-		return refusal
+	// a removal is judged first: originVoteRefusal warns of what it refuses
+	if !req.Removal {
+		if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Operations, req.Records); refusal != nil {
+			refusal.DistributionID, refusal.Timestamp = resp.DistributionID, resp.Timestamp
+			return refusal
+		}
 	}
 
 	policy := mpzd.getEditPolicy()
