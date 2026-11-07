@@ -561,6 +561,27 @@ func TestACopyChangesNothingAtAPeerThatIsNoAuditor(t *testing.T) {
 	}
 }
 
+// A kept distribution's PENDING (plan S8) is no final word: no copy of it
+// goes to the auditor. The member's final word on it is copied.
+func TestAKeptDistributionsPendingIsNotCopied(t *testing.T) {
+	const zone = "kept.audit.example."
+	seedAuditedZone(t, zone, fleetAuditor, fleetP1, fleetP2, fleetP3)
+	f := newAuditFleet(t, fleetP2)
+	aud, p2 := f.peers[fleetAuditor], f.peers[fleetP2]
+
+	kept := &RemoteConfirmationDetail{OriginatingDistID: "k1", OriginatingSender: fleetP1, Zone: ZoneName(zone),
+		Status: "PENDING", Message: "a distribution made under newer instructions is kept"}
+	p2.Bridge.copyConfirmationToAuditors(kept)
+	final := *kept
+	final.Status, final.Message = "SUCCESS", ""
+	p2.Bridge.copyConfirmationToAuditors(&final)
+
+	f.awaitMember(zone, fleetP1, "k1", fleetP2, "confirmed")
+	if n := aud.receivedFrom(fleetP2); n != 1 {
+		t.Errorf("the auditor got %d messages from p2 for k1, want 1: the copy of its final word", n)
+	}
+}
+
 // The copy can reach the auditor before the distribution does. It is kept,
 // and counts when the distribution arrives. A distribution sent before the
 // auditor started is not followed: its confirmations may have gone to a

@@ -1769,15 +1769,25 @@ func remoteConfirmStatus(s string) transport.ConfirmStatus {
 // (DnsConfirmCopyPayload). DNSTransport.Confirm builds its payload from a
 // fixed set of fields, so the copy is built here and travels the same way:
 // one NOTIFY(CHUNK) with the confirm verb, answered by nothing and sent
-// once. A copy that is lost is not sent again.
+// once. A copy that is lost is not sent again. It goes over DNS alone, not
+// by the mechanism the distribution came on (confirmOn): an agent without a
+// DNS transport sends no copy. Nothing waits for a copy, here or at the
+// originator: it is sent after the originator's confirmation, from that
+// goroutine.
 //
 // The immediate PENDING is not copied: it says only that the message
-// arrived. An auditor copies nothing, its own confirmation is no member's
-// answer. A provider that the zone lists as an auditor too gets the
-// distribution in its own right and no copy (AuditorsForZone), and neither
-// do the originator or we ourselves.
+// arrived. Nor is a kept distribution's PENDING (plan S8): the final word
+// follows when the instructions it was made under are active here. An
+// auditor copies nothing, its own confirmation is no member's answer. A
+// provider that the zone lists as an auditor too gets the distribution in
+// its own right and no copy (AuditorsForZone), and neither do the
+// originator or we ourselves.
 func (tm *MPTransportBridge) copyConfirmationToAuditors(detail *RemoteConfirmationDetail) {
 	if tm.DNSTransport == nil || tm.role != roleAgent {
+		return
+	}
+	status := remoteConfirmStatus(detail.Status)
+	if status == transport.ConfirmPending {
 		return
 	}
 	auditors := AuditorsForZone(detail.Zone)
@@ -1795,7 +1805,7 @@ func (tm *MPTransportBridge) copyConfirmationToAuditors(detail *RemoteConfirmati
 			SenderID:       tm.LocalID,
 			Zone:           string(detail.Zone),
 			DistributionID: detail.OriginatingDistID,
-			Status:         remoteConfirmStatus(detail.Status).String(),
+			Status:         status.String(),
 			Message:        detail.Message,
 			AppliedCount:   len(detail.AppliedRecords),
 			RemovedCount:   len(detail.RemovedRecords),
