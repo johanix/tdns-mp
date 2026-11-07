@@ -875,6 +875,46 @@ func TestPubcdsOffWithdrawsIt(t *testing.T) {
 	}
 }
 
+// The end of the zone's multi-provider service: the agent hands no
+// instructions, and the combiner drops what it held. The names went by the
+// hand-over held, and with none the sync left them served. Handed no
+// instructions, it withdraws them, and a later sync publishes nothing.
+func TestAHandoverOfNoInstructionsWithdrawsTheDsbootNames(t *testing.T) {
+	const zone = "pubcds.ended.example."
+	const params = `servers="alpha" signers="alpha" nsmgmt="agent" parentsync="agent" pubcds`
+	d := newDsbootCombiner(t, zone, params, okCDNSKEY)
+	d.hand(params, 0, false, true)
+	d.cds(okCDS)
+	if got := d.served(consentNS1, dns.TypeCDS); len(got) != 1 {
+		t.Fatalf("the CDS before the end: %v", got)
+	}
+	logs := captureLog(t)
+	if resp := handTo(d.conf, &ActingHandover{Zone: zone, Made: time.Now()}, consentAgent); resp.Status != "ok" {
+		t.Fatalf("the hand-over of no instructions: %s: %s", resp.Status, resp.Message)
+	}
+	for _, rrtype := range dsbootTypes {
+		if got := d.served(consentNS1, rrtype); got != nil {
+			t.Errorf("a _dsboot %s after a hand-over of no instructions: %v", dns.TypeToString[rrtype], got)
+		}
+	}
+	if !strings.Contains(logs.String(), `msg="the zone's CDS at the _signal names withdrawn"`) {
+		t.Errorf("no log line for the withdrawal: %s", logs)
+	}
+	all, err := LoadAllContributions(d.hdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for owner := range all[consentProviderZone][consentAgent] {
+		if strings.HasPrefix(owner, "_dsboot.") {
+			t.Errorf("a _dsboot name in the store a restart loads: %s", owner)
+		}
+	}
+	d.cds(okCDSRolled)
+	if got := d.served(consentNS1, dns.TypeCDS); got != nil {
+		t.Errorf("published again after the end: %v", got)
+	}
+}
+
 // The publication follows the step: at the agent the sets at the step, not V
 // and not the copy, say whether the KEY goes at-ns, and what its combiner is
 // handed; at the combiner a copy that says pubcds publishes nothing until the
