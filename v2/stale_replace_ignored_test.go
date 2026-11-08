@@ -291,3 +291,69 @@ func TestAStaleSetTheCombinerFailedIsStillNotNamed(t *testing.T) {
 		t.Errorf("the sender got the final confirmation %+v, want PARTIAL naming no record", *c)
 	}
 }
+
+// The sender deletes its last NS record (distribution D, a replace of its NS
+// set by none) while this agent is away. When the agent is back, the
+// sender's answer to its request for the zone's state arrives first: its NS
+// set empty, and its keys. This agent's combiner, which takes none of the
+// sender's records, answers IGNORED and names the keys only, as an emptied
+// set has no record to name. Then D arrives, stale. The combiner applied
+// none of the answer's sets, so D's confirmation is IGNORED, and the
+// sender's delete settles. Confirmed PARTIAL, as for a set whose hand-over
+// failed, D left the record PENDING_REMOVAL at the sender until this agent
+// lost its vote.
+func TestADeleteOvertakenByASetTheCombinerIgnoresSettles(t *testing.T) {
+	r := receivingRig(t, "ignored.delete.overtaken.example.")
+	z := r.mpzd.ZoneName
+	sender := AgentId(r.peer.Identity)
+	ns := nsRR(t, z, "ns9.provider.example.")
+	key := testDnskey(t, z, 256)
+	had := core.RROperation{Operation: "replace", RRtype: "NS", Records: []string{ns.String()}}
+	none := core.RROperation{Operation: "replace", RRtype: "NS", Records: []string{}}
+	keyOp := core.RROperation{Operation: "replace", RRtype: "DNSKEY", Records: []string{key.String()}}
+
+	sent := time.Now().Add(-time.Minute)
+	before := r.combinerDists()
+	added := nextDistributionID()
+	r.receivesAt(t, string(sender), added, sent.Add(-time.Minute), nil, had)
+	fwd := r.newCombinerDist(before, 10*time.Second)
+	if fwd == "" {
+		t.Fatalf("the NS set did not go to the combiner\n%s", r.log)
+	}
+	r.combinerIgnores(fwd)
+	r.answered(t, added)
+
+	snd := newDelRig(t, z, sender, ns)
+	d := nextDistributionID()
+	snd.send(t, d, []string{r.us.Identity}, []dns.RR{ns})
+
+	yes := true
+	answer := nextDistributionID()
+	before = r.combinerDists()
+	r.receivesAt(t, string(sender), answer, sent.Add(30*time.Second), &CatchUp{Request: "r1", Complete: &yes}, none, keyOp)
+	fwd = r.newCombinerDist(before, 10*time.Second)
+	if fwd == "" {
+		t.Fatalf("the answer did not go to the combiner\n%s", r.log)
+	}
+	r.us.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(fwd, rigCombiner, transport.ConfirmIgnored, z,
+		nil, nil, nil, []string{key.String()}, false, ""))
+	r.answered(t, answer)
+
+	before = r.combinerDists()
+	r.receivesAt(t, string(sender), d, sent, nil, none)
+	c := r.answered(t, d)
+	if c.Status != "IGNORED" || len(c.AppliedRecords) > 0 || len(c.RemovedRecords) > 0 || len(c.IgnoredRecords) > 0 {
+		t.Fatalf("the sender got the final confirmation %+v of its delete, want IGNORED naming no record", *c)
+	}
+	if fwd := r.newCombinerDist(before, 200*time.Millisecond); fwd != "" {
+		t.Errorf("the stale replace went to the combiner (%s)", fwd)
+	}
+	snd.zdr.ProcessConfirmation(c, nil)
+	tr := snd.tracked(t, ns)
+	if tr.State != RRStateRemoved {
+		t.Errorf("the sender's %s is %v after this agent's confirmation, want REMOVED", ns, tr.State)
+	}
+	if s := tr.Confirmations[r.us.Identity].Status; s != "removed" {
+		t.Errorf("the sender's tracking has %q for this agent, want removed", s)
+	}
+}
