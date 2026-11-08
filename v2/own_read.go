@@ -109,12 +109,14 @@ func (zdr *ZoneDataRepo) noteCombinerFailed(zone ZoneName, distID string, all bo
 }
 
 // combinerIgnoredTypes are the sets the combiner's word on a distribution
-// says it ignored: every set, for an IGNORED that names no record (all);
-// else those whose records it names as ignored and none as applied or
-// removed. A word that applies part of a set and ignores the rest leaves
+// says it ignored: every set, for an IGNORED (all); else those whose records
+// it names as ignored and none as applied or removed. A combiner answers
+// IGNORED only when it applied, removed and rejected none, so a set it names
+// no record of is ignored too: one a replace emptied leaves no record to
+// name (#194). A word that applies part of a set and ignores the rest leaves
 // the set failed.
 func combinerIgnoredTypes(detail *ConfirmationDetail) (all bool, ignored map[uint16]bool) {
-	if (detail.Status == "IGNORED" || detail.Status == "ignored") && len(detail.IgnoredRecords) == 0 {
+	if detail.Status == "IGNORED" || detail.Status == "ignored" {
 		return true, nil
 	}
 	typeOf := func(records []string) map[uint16]bool {
