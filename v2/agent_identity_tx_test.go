@@ -282,16 +282,20 @@ func TestEveryRoleThatSetsUpAnIdentityHasAHelloGate(t *testing.T) {
 	}
 }
 
-// The identity zone's parentsync work reads the zone through accessors that
-// need it Ready: the CDS is synthesised from the published apex, and the
-// SIG(0) key preparation reads the apex too. Under the hold there is no
-// snapshot, so both must wait for the commit. Seen on the rig on 2026-09-29:
-// "could not publish CDS ... zone data is not yet ready", the key preparation
-// failing the same way, and the delegation sync setup it had queued ignored.
-func TestTheIdentityZonesParentSyncStartsAfterItsCommit(t *testing.T) {
+// The identity zone has no delegation sync (tdns-mp #391): it is delegated
+// from the provider's own zone, and that delegation, NS and DS, is taken as
+// it stands. With a parentsync: block that names both schemes and a resolver
+// that is ready, the set-up used to make the zone a parentsync child, prepare
+// its SIG(0) key, queue a DELEGATION-SYNC-SETUP and an EXPLICIT-SYNC-DELEGATION
+// at once, and ask again for as long as the agent ran. Now nothing is queued
+// for it, no key is made, and the zone carries no parentsync option; nor does
+// the DS engine ask for a sync once it has published the zone's CDS.
+func TestTheIdentityZoneHasNoDelegationSync(t *testing.T) {
+	asMPAgent(t)
 	kdb := newMPTestKeyDB(t)
 	conf, _ := identityTestConfig(t, kdb)
 	ctx := startIdentityUpdater(t, kdb)
+	startAgentDSEngine(t, ctx, kdb)
 	conf.Config.ParentSync.Schemes = []string{"notify", "update"}
 	conf.Config.Internal.ImrReady = tdns.NewImrReadiness()
 	conf.Config.Internal.ImrReady.Publish()
@@ -306,55 +310,29 @@ func TestTheIdentityZonesParentSyncStartsAfterItsCommit(t *testing.T) {
 	if !ok {
 		t.Fatal("the identity zone is not registered")
 	}
-
-	// The CDS goes out after the commit, through the queue: a serial of its
-	// own, on a zone that is already complete for discovery. The set-up
-	// returns once the zone serves it, and only then starts the delegation
-	// sync: the sync's SIG(0) key preparation and the updater's persisting of
-	// the CDS update each take the key store's one transaction, and whichever
-	// came second was refused.
-	var cds *core.RRset
-	if rrset, err := zd.GetRRset(identityTestZone, dns.TypeCDS); err == nil && rrset != nil && len(rrset.RRs) > 0 {
-		cds = rrset
-	}
-	if cds == nil {
-		t.Error("the identity zone serves no CDS when its set-up returns")
-		// Which of the two silent ways: no SEP key in the published DNSKEY
-		// RRset (nothing to synthesise), or the update's publish refused (a
-		// zone that signs marks itself DnssecError).
-		sep := 0
-		if rrset, err := zd.GetRRset(identityTestZone, dns.TypeDNSKEY); err == nil && rrset != nil {
-			for _, rr := range rrset.RRs {
-				if k, ok := rr.(*dns.DNSKEY); ok && k.Flags&dns.SEP != 0 {
-					sep++
-				}
-			}
-		}
-		t.Logf("  published DNSKEY RRset: %d SEP key(s); zone error=%v type=%v msg=%q", sep, zd.Error, zd.ErrorType, zd.ErrorMsg)
-		for _, line := range strings.Split(logs.String(), "\n") {
-			if strings.Contains(line, "CDS") || strings.Contains(line, "cds") || strings.Contains(line, "refus") {
-				t.Logf("  %s", line)
-			}
-		}
-	}
-	for _, bad := range []string{"could not publish CDS", "could not prepare the SIG(0) key"} {
-		if strings.Contains(logs.String(), bad) {
-			t.Errorf("the set-up logged %q: parentsync work ran on the held zone", bad)
-		}
+	if zd.Options[tdns.OptParentSync] {
+		t.Error("the identity zone was given the parentsync option")
 	}
 
-	// The delegation sync setup is queued once the key exists, as before.
+	// the DS engine's turn, as at the key state worker's next tick: it
+	// publishes the CDS and asks the zone's own syncher, which it has none of
+	kdb.KeysChanged(zd)
+	waitFor(t, "the identity zone's CDS", func() bool { return len(servedCdsTags(t, zd)) > 0 })
+
 	select {
 	case r := <-syncq:
-		if r.Command != "DELEGATION-SYNC-SETUP" {
-			t.Errorf("first delegation sync request = %q, want DELEGATION-SYNC-SETUP", r.Command)
-		}
-		sak, err := kdb.GetSig0Keys(identityTestZone, tdns.Sig0StateActive)
-		if err != nil || len(sak.Keys) != 1 {
-			t.Errorf("active SIG(0) keys when the setup was queued = %d (err %v), want 1", len(sak.Keys), err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Error("no delegation sync request was queued")
+		t.Errorf("a delegation sync request was queued: %q for %q", r.Command, r.ZoneName)
+	case <-time.After(time.Second):
+	}
+	sak, err := kdb.GetSig0Keys(identityTestZone, tdns.Sig0StateActive)
+	if err != nil {
+		t.Fatalf("GetSig0Keys(%s): %v", identityTestZone, err)
+	}
+	if len(sak.Keys) != 0 {
+		t.Errorf("the identity zone holds %d active SIG(0) key(s), want none: it signs nothing for its parent", len(sak.Keys))
+	}
+	if strings.Contains(logs.String(), "delegation") {
+		t.Errorf("the set-up logged about the identity zone's delegation: %s", logs)
 	}
 }
 
