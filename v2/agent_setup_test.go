@@ -4,12 +4,14 @@
 package tdnsmp
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
@@ -32,6 +34,64 @@ func TestHostPrefix(t *testing.T) {
 			t.Errorf("hostPrefix(%q) = %q, want %q", tc.addr, got, tc.want)
 		}
 	}
+}
+
+// An identity zone listed in the config may carry the parentsync option,
+// which the zone the daemon builds never has. It gets no delegation sync all
+// the same (tdns-mp #391): the first load's election passes it by, while a
+// zone with the same option that is not the identity elects; and the syncher
+// answers every request for it without analysing or sending anything.
+func TestAConfigListedIdentityZoneWithParentSyncIsNotSynced(t *testing.T) {
+	const zone = "agent.listed-sync.example."
+	parentsync := func(name string) *tdns.ZoneData {
+		return &tdns.ZoneData{ZoneName: name, Options: map[tdns.ZoneOption]bool{tdns.OptParentSync: true}}
+	}
+
+	t.Run("no election at the first load", func(t *testing.T) {
+		lem, rec := newRoleLEM(t, zone, time.Minute)
+		lem.electAtFirstLoad(parentsync(zone))
+		lem.electAtFirstLoad(parentsync("listed-other.example."))
+		waitFor(t, "the other zone's leader setup", func() bool { return rec.setups() > 0 })
+		if leader, ok := lem.GetLeader(ZoneName(zone)); ok {
+			t.Errorf("an election for the identity zone made %q its leader", leader)
+		}
+		if n := rec.setups(); n != 1 {
+			t.Errorf("the leader's setup ran %d times, want once, for the other zone", n)
+		}
+	})
+
+	t.Run("the syncher sends nothing", func(t *testing.T) {
+		conf := &Config{Config: &tdns.Config{}}
+		conf.SetMpConfig(&MultiProviderConf{Role: "agent", Identity: zone})
+		q := make(chan tdns.DelegationSyncRequest)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			_ = (&HsyncDB{}).DelegationSyncher(ctx, q, nil, conf)
+			close(done)
+		}()
+		t.Cleanup(func() {
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("the delegation syncher did not stop")
+			}
+		})
+		zd := parentsync(zone)
+		for _, cmd := range []string{"DELEGATION-SYNC-SETUP", "SYNC-DELEGATION", "EXPLICIT-SYNC-DELEGATION", "DELEGATION-STATUS"} {
+			resp := make(chan tdns.DelegationSyncStatus, 1)
+			q <- tdns.DelegationSyncRequest{Command: cmd, ZoneName: zone, ZoneData: zd, Response: resp}
+			select {
+			case st := <-resp:
+				if st.Msg != identityZoneNoSync || st.Error || st.InSync {
+					t.Errorf("%s: answered %+v, want %q with no error and not in sync", cmd, st, identityZoneNoSync)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s: no answer", cmd)
+			}
+		}
+	})
 }
 
 const (
