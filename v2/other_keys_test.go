@@ -6,6 +6,7 @@ package tdnsmp
 import (
 	"context"
 	"crypto"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -450,6 +451,55 @@ func TestTheStatusSaysWhatTheOperatorMustPointForAnUpstream(t *testing.T) {
 	}
 	if got := upstreamStatus(r.conf, r.zone, heldStep{InstrStep: step, at: now}, now); got != "" {
 		t.Errorf("the status once held: %q", got)
+	}
+}
+
+// The operator's hint names the XFR addresses the upstream gave when asked
+// (CONFIG upstream), not its identity alone; while it has named none, why,
+// and it is asked again only after upstreamXfrRetry. A record that names no
+// upstream has nobody asked.
+func TestTheOperatorsHintNamesTheUpstreamsXFRAddresses(t *testing.T) {
+	r := newServingRig(t, "hint.upstream.example.", srNewcomer)
+	step := r.holdingUpstreamStep(t)
+	b := &r.conf.InternalMp.upstreamXfrs
+	b.start = func(ask func()) { ask() }
+	var asked []string
+	answer := func(addrs []string, err error) {
+		b.ask = func(_ *Config, _, upstream string) ([]string, error) {
+			asked = append(asked, upstream)
+			return addrs, err
+		}
+	}
+	now := time.Now()
+	status := func() string { return upstreamStatus(r.conf, r.zone, heldStep{InstrStep: step, at: now}, now) }
+	want := "waiting for n.role.example.'s nameservers to serve the zone from its new upstream; its operator must point ns1.n.example., ns2.n.example. at a.role.example. "
+
+	refused := "refused: a.role.example.: CONFIG upstream request, but no outgoing XFR config"
+	answer(nil, errors.New(refused))
+	if got, w := status(), want+"(its XFR addresses not known: "+refused+") for the zone's transfer"; got != w {
+		t.Errorf("an upstream that refused: %q, want %q", got, w)
+	}
+	answer([]string{"192.0.2.1:53", "192.0.2.2:53"}, nil)
+	status()
+	if len(asked) != 1 {
+		t.Errorf("asked again within upstreamXfrRetry: %v", asked)
+	}
+	b.zones[canonicalName(r.zone)].at = time.Now().Add(-upstreamXfrRetry)
+	if got, w := status(), want+"(XFR from 192.0.2.1:53, 192.0.2.2:53) for the zone's transfer"; got != w {
+		t.Errorf("an upstream that named its addresses: %q, want %q", got, w)
+	}
+	status()
+	if !slices.Equal(asked, []string{srUpstream, srUpstream}) {
+		t.Errorf("asked %v, want the upstream twice, and not again once it named its addresses", asked)
+	}
+
+	asked = nil
+	zone := "hint.noupstream.example."
+	instrTestZone(t, zone, `3600 IN HSYNC3 ON a `+srUpstream+` .`, `3600 IN HSYNC3 ON n `+srNewcomer+` .`,
+		`3600 IN HSYNCPARAM `+numberedText(`servers="a,n" signers="a"`))
+	got := serverRoleStatus(r.conf, zone, heldStep{InstrStep: serverRoleStep(srNewcomer), at: now.Add(-transferHelpAfter)}, now)
+	if !strings.HasSuffix(got, "; its operator must point ns1.n.example., ns2.n.example. at a.role.example. for the zone's transfer") || len(asked) != 0 {
+		t.Errorf("no upstream named: %q, asked %v", got, asked)
 	}
 }
 
