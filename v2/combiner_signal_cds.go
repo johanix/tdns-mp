@@ -218,13 +218,15 @@ func (provider *MPZoneData) settleDsboot(zone, prefix, by string, owners []strin
 }
 
 // serveDsbootNamesAtFirstLoad is a provider zone's first load, for the
-// _dsboot names: every customer zone the combiner holds a hand-over for acts,
-// as it could not while this zone had not loaded, and what the zone holds of
-// them goes into the copy it serves. Its file has none of them. A customer
-// zone that has not loaded says nothing either way, and its names are served
-// as they were before the restart until it has.
+// _dsboot names: every customer zone the combiner holds a hand-over for, or
+// whose agent handed no instructions (their names go), acts, as it could not
+// while this zone had not loaded, and what the zone holds of them goes into
+// the copy it serves. Its file has none of them. A customer zone that has
+// not loaded says nothing either way, and its names are served as they were
+// before the restart until it has.
 func (mpzd *MPZoneData) serveDsbootNamesAtFirstLoad() {
-	for _, zone := range actingHeld.Load().zoneNames() {
+	store := actingHeld.Load()
+	for _, zone := range append(store.zoneNames(), store.zonesHandedNone()...) {
 		child, ok := Zones.Get(zone)
 		if !ok {
 			continue

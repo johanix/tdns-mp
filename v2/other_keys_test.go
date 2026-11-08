@@ -915,6 +915,66 @@ func TestAHandoverOfNoInstructionsWithdrawsTheDsbootNames(t *testing.T) {
 	}
 }
 
+// A hand-over of no instructions with nothing held, as after a restart that
+// lost the word of an earlier one: the names a restart restored may still be
+// served, and go. That it was handed none is kept, for the next restart.
+func TestAHandoverOfNoInstructionsWithNothingHeldWithdrawsTheDsbootNames(t *testing.T) {
+	const zone = "pubcds.nothing-held.example."
+	const params = `servers="alpha" signers="alpha" nsmgmt="agent" parentsync="agent" pubcds`
+	d := newDsbootCombiner(t, zone, params, okCDNSKEY)
+	d.hand(params, 0, false, true)
+	d.cds(okCDS)
+	if got := d.served(consentNS1, dns.TypeCDS); len(got) != 1 {
+		t.Fatalf("the CDS before the restart: %v", got)
+	}
+	// a restart with no hand-over held and no word of the end kept
+	if _, err := d.hdb.DB.Exec(`DELETE FROM MPActingSerial WHERE zonename=?`, handoverKey(zone)); err != nil {
+		t.Fatal(err)
+	}
+	withActing(t, d.hdb)
+	if got := d.served(consentNS1, dns.TypeCDS); len(got) != 1 {
+		t.Fatalf("the CDS the restart restored: %v", got)
+	}
+	if resp := handTo(d.conf, &ActingHandover{Zone: zone, Made: time.Now()}, consentAgent); resp.Status != "ok" {
+		t.Fatalf("the hand-over of no instructions: %s: %s", resp.Status, resp.Message)
+	}
+	for _, rrtype := range dsbootTypes {
+		if got := d.served(consentNS1, rrtype); got != nil {
+			t.Errorf("a _dsboot %s after a hand-over of no instructions with nothing held: %v", dns.TypeToString[rrtype], got)
+		}
+	}
+	if s := withActing(t, d.hdb); !s.handedNone(zone) {
+		t.Error("the hand-over of no instructions is not kept across a restart")
+	}
+}
+
+// A provider zone that has not loaded when the agent hands no instructions:
+// its first load, after a restart, withdraws the names it restored rather
+// than serve them.
+func TestAProviderZonesFirstLoadWithdrawsTheNamesOfAZoneHandedNone(t *testing.T) {
+	const zone = "pubcds.unloaded.example."
+	const params = `servers="alpha" signers="alpha" nsmgmt="agent" parentsync="agent" pubcds`
+	d := newDsbootCombiner(t, zone, params, okCDNSKEY)
+	d.hand(params, 0, false, true)
+	d.cds(okCDS)
+	if got := d.served(consentNS1, dns.TypeCDS); len(got) != 1 {
+		t.Fatalf("the CDS before the restart: %v", got)
+	}
+	d.start(consentProviderZone, zone)
+	withActing(t, d.hdb)
+	d.load(zone, d.customerText(params, okCDNSKEY))
+	if resp := handTo(d.conf, &ActingHandover{Zone: zone, Made: time.Now()}, consentAgent); resp.Status != "ok" {
+		t.Fatalf("the hand-over of no instructions: %s: %s", resp.Status, resp.Message)
+	}
+	withActing(t, d.hdb) // and another restart before the provider zone loads
+	d.load(consentProviderZone, consentProviderText())
+	for _, rrtype := range dsbootTypes {
+		if got := d.served(consentNS1, rrtype); got != nil {
+			t.Errorf("a _dsboot %s served at the provider zone's first load, the zone handed none: %v", dns.TypeToString[rrtype], got)
+		}
+	}
+}
+
 // The publication follows the step: at the agent the sets at the step, not V
 // and not the copy, say whether the KEY goes at-ns, and what its combiner is
 // handed; at the combiner a copy that says pubcds publishes nothing until the

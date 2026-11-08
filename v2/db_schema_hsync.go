@@ -218,6 +218,15 @@ var HsyncTables = map[string]string{
 		UNIQUE (zonename)
 	)`,
 
+	// CombinerHandedNone is the zones whose agent handed the combiner no
+	// instructions since its last hand-over of some (combiner_acting.go,
+	// handedNone): their _dsboot names go, also after a restart.
+	"CombinerHandedNone": `CREATE TABLE IF NOT EXISTS 'CombinerHandedNone' (
+		zonename TEXT NOT NULL,
+		since    TEXT DEFAULT '',
+		UNIQUE (zonename)
+	)`,
+
 	// CombinerContributions is a snapshot of the current per-agent contributions.
 	// One row per RR. Used to restore AgentContributions on restart.
 	"CombinerContributions": `CREATE TABLE IF NOT EXISTS 'CombinerContributions' (
@@ -761,6 +770,7 @@ func (hdb *HsyncDB) InitCombinerEditTables() error {
 		"CombinerContributions",
 		"CombinerPublishInstructions",
 		"MPActingSerial",
+		"CombinerHandedNone",
 	}
 
 	for _, name := range combinerTables {
