@@ -5,6 +5,7 @@ package tdnsmp
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"path/filepath"
@@ -377,5 +378,60 @@ func TestAConfigDefinedIdentityZoneOpensTheGateWhenItLoads(t *testing.T) {
 	}
 	if !conf.InternalMp.IdentityReady.Wait(context.Background()) {
 		t.Fatal("the hello gate is still closed after the zone's first-load callbacks")
+	}
+}
+
+// An identity zone listed in the config may be given the parentsync option.
+// The set-up drops it, the auditor's as the agent's, so that no syncher sees
+// it, tdns's own on the auditor included (tdns-mp #391), and says so once.
+// tdns lays the dropped option over the config at a reload. A zone without
+// the option is left as it is, and nothing is said.
+func TestAConfigListedIdentityZoneLosesItsParentSyncOption(t *testing.T) {
+	for _, tc := range []struct {
+		role       string
+		parentsync bool
+	}{
+		{"agent", true},
+		{"auditor", true},
+		{"auditor", false},
+	} {
+		t.Run(fmt.Sprintf("%s, parentsync %v", tc.role, tc.parentsync), func(t *testing.T) {
+			zone := fmt.Sprintf("%s.option-%v.example.", tc.role, tc.parentsync)
+			kdb := newMPTestKeyDB(t)
+			conf := &Config{Config: &tdns.Config{}}
+			conf.Config.Internal.KeyDB = kdb
+			conf.InternalMp.IdentityReady = newIdentityReadiness()
+			mp := &MultiProviderConf{Role: tc.role, Identity: zone, SupportedMechanisms: []string{"dns"}}
+			mp.Dns.Addresses.Listen = []string{"127.0.0.1:5300"}
+			conf.SetMpConfig(mp)
+			zd := &tdns.ZoneData{
+				ZoneName:  zone,
+				ZoneStore: tdns.MapZone,
+				ZoneType:  tdns.Primary,
+				Logger:    log.New(io.Discard, "", 0),
+				Options:   map[tdns.ZoneOption]bool{tdns.OptParentSync: tc.parentsync},
+				KeyDB:     kdb,
+			}
+			tdns.Zones.Set(zone, zd)
+			t.Cleanup(func() {
+				tdns.Zones.Remove(zone)
+				Zones.Invalidate(zone)
+			})
+			logs := captureAgentLog(t)
+
+			if err := conf.SetupAgent(context.Background(), []string{zone}); err != nil {
+				t.Fatalf("SetupAgent: %v", err)
+			}
+			if zd.Options[tdns.OptParentSync] {
+				t.Error("the identity zone keeps the parentsync option")
+			}
+			want := 0
+			if tc.parentsync {
+				want = 1
+			}
+			if n := strings.Count(logs.String(), "the parentsync option is dropped"); n != want {
+				t.Errorf("the warning was logged %d time(s), want %d; log: %s", n, want, logs)
+			}
+		})
 	}
 }
