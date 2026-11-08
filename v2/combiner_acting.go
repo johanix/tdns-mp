@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,13 @@ type actingStore struct {
 	hdb   *HsyncDB // nil: in memory only
 	zones map[string]*heldHandover
 	owed  map[string]bool // zones whose combine by the hand-over held failed
+	// zones whose _dsboot names the last sync left behind, by key: their names
+	dsbootOwed map[string]string
+	// zones whose agent handed no instructions since the last hand-over of
+	// some, by key: their _dsboot names go (handedNone). Kept on hdb too
+	// (CombinerHandedNone), so that after a restart they still go, at the
+	// provider zone's first load and at the agent's repeat.
+	none map[string]bool
 }
 
 type heldHandover struct {
@@ -66,8 +74,29 @@ func loadActingStore(hdb *HsyncDB) (*actingStore, error) {
 	}
 	hdb.Lock()
 	defer hdb.Unlock()
-	if _, err := hdb.DB.Exec(HsyncTables["MPActingSerial"]); err != nil {
-		return nil, fmt.Errorf("the MPActingSerial table: %w", err)
+	for _, table := range []string{"MPActingSerial", "CombinerHandedNone"} {
+		if _, err := hdb.DB.Exec(HsyncTables[table]); err != nil {
+			return nil, fmt.Errorf("the %s table: %w", table, err)
+		}
+	}
+	none, err := hdb.DB.Query(`SELECT zonename FROM CombinerHandedNone`)
+	if err != nil {
+		return nil, fmt.Errorf("reading the zones handed no instructions: %w", err)
+	}
+	for none.Next() {
+		var zone string
+		if err := none.Scan(&zone); err != nil {
+			none.Close()
+			return nil, fmt.Errorf("reading the zones handed no instructions: %w", err)
+		}
+		if s.none == nil {
+			s.none = map[string]bool{}
+		}
+		s.none[handoverKey(zone)] = true
+	}
+	none.Close()
+	if err := none.Err(); err != nil {
+		return nil, fmt.Errorf("reading the zones handed no instructions: %w", err)
 	}
 	rows, err := hdb.DB.Query(`SELECT zonename, handover, handed_by, since FROM MPActingSerial`)
 	if err != nil {
@@ -127,6 +156,16 @@ func (s *actingStore) get(zone string) (heldHandover, bool) {
 	return heldHandover{}, false
 }
 
+// zoneNames are the zones the part holds a hand-over for, by their keys.
+func (s *actingStore) zoneNames() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Sorted(maps.Keys(s.zones))
+}
+
 // reading is the instructions the part was handed for the zone and acts by,
 // whatever its own copy says (from S7); nil when it holds none.
 func (s *actingStore) reading(zone string) *Instructions {
@@ -174,6 +213,33 @@ func (s *actingStore) owe(zone string, owed bool) {
 	}
 }
 
+// oweDsboot notes whether the last sync of the zone's _dsboot names failed.
+func (s *actingStore) oweDsboot(zone string, owed bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !owed {
+		delete(s.dsbootOwed, handoverKey(zone))
+		return
+	}
+	if s.dsbootOwed == nil {
+		s.dsbootOwed = map[string]string{}
+	}
+	s.dsbootOwed[handoverKey(zone)] = zone
+}
+
+// zonesOwingDsboot are the zones whose last sync of the _dsboot names failed.
+func (s *actingStore) zonesOwingDsboot() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Sorted(maps.Values(s.dsbootOwed))
+}
+
 // take stores a hand-over from the agent by: refused when its records do not
 // give the serial and digest it names, or when it is older than the one held
 // (errHandoverOlder, with the one held). A hand-over of no instructions drops
@@ -200,16 +266,23 @@ func (s *actingStore) take(h *ActingHandover, by string) (prev *ActingHandover, 
 		}
 	}
 	if in == nil {
-		if prev == nil {
-			return nil, false, nil
-		}
 		if s.hdb != nil {
 			s.hdb.Lock()
-			_, err := s.hdb.DB.Exec(`DELETE FROM MPActingSerial WHERE zonename=?`, key)
+			_, err := s.hdb.DB.Exec(`INSERT INTO CombinerHandedNone (zonename, since) VALUES (?, ?) ON CONFLICT(zonename) DO NOTHING`, key, time.Now().Format(time.RFC3339))
+			if err == nil && prev != nil {
+				_, err = s.hdb.DB.Exec(`DELETE FROM MPActingSerial WHERE zonename=?`, key)
+			}
 			s.hdb.Unlock()
 			if err != nil {
 				return prev, false, fmt.Errorf("dropping the hand-over held: %w", err)
 			}
+		}
+		if s.none == nil {
+			s.none = map[string]bool{}
+		}
+		s.none[key] = true
+		if prev == nil {
+			return nil, false, nil
 		}
 		delete(s.zones, key)
 		return prev, true, nil
@@ -224,13 +297,39 @@ func (s *actingStore) take(h *ActingHandover, by string) (prev *ActingHandover, 
 		_, err = s.hdb.DB.Exec(`INSERT INTO MPActingSerial (zonename, serial, digest, handover, handed_by, since) VALUES (?, ?, ?, ?, ?, ?)
 			ON CONFLICT(zonename) DO UPDATE SET serial=excluded.serial, digest=excluded.digest, handover=excluded.handover, handed_by=excluded.handed_by, since=excluded.since`,
 			key, h.Serial, h.Digest, string(js), by, now.Format(time.RFC3339))
+		if err == nil {
+			_, err = s.hdb.DB.Exec(`DELETE FROM CombinerHandedNone WHERE zonename=?`, key)
+		}
 		s.hdb.Unlock()
 		if err != nil {
 			return prev, false, fmt.Errorf("keeping the hand-over: %w", err)
 		}
 	}
 	s.zones[key] = &heldHandover{handover: &stored, reading: in, by: by, since: now}
+	delete(s.none, key)
 	return prev, true, nil
+}
+
+// handedNone: the agent's latest hand-over for the zone was of no
+// instructions. The zone's multi-provider service has ended, and its
+// _dsboot names go; a zone never handed anything says nothing (rule 5).
+func (s *actingStore) handedNone(zone string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.none[handoverKey(zone)]
+}
+
+// zonesHandedNone are the zones handedNone says, by their keys.
+func (s *actingStore) zonesHandedNone() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Sorted(maps.Keys(s.none))
 }
 
 // ownAgent: sender is one of the combiner's agents (its agents: list; the
@@ -290,6 +389,13 @@ func (conf *Config) combinerTakeHandover(msg *AgentMsgPostPlus, localAgents map[
 		}
 		actErr = mpzd.actByHandover(conf.MpConfig(), pubkeyBefore)
 		store.owe(zone, actErr != nil)
+	} else if len(h.Records) == 0 {
+		// No instructions, with nothing held to drop: a repeat, or the
+		// first since a restart. The _dsboot names a restart restored may
+		// still be served; a failed sync is tried again every minute.
+		if err := mpzd.syncDsbootNames(); err != nil {
+			lgCombiner.Error("the zone's _dsboot names could not follow a hand-over of no instructions; tried again in a minute", "zone", zone, "err", err)
+		}
 	}
 	if h.Refresh {
 		conf.refreshFromUpstream(mpzd, lgCombiner)
@@ -347,7 +453,14 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 	if mpzd.hasPubkey() != pubkeyBefore {
 		if err := mpzd.withdrawZoneSignalKeysWithoutConsent(NewHsyncDB(mpzd.KeyDB)); err != nil {
 			lgCombiner.Error("failed to load publish instructions; the zone's at-ns publication is not checked against the customer's consent", "zone", mpzd.ZoneName, "err", err)
+		} else if pubkeyBefore {
+			lg.Info("the zone's KEY at the _signal names withdrawn", "zone", mpzd.ZoneName)
 		}
+	}
+	// after the combine: the names carry the apex as it now reads. Failed,
+	// it is said as a failed combine is, and the agent hands it again.
+	if err := mpzd.syncDsbootNames(); err != nil && combineErr == nil {
+		combineErr = err
 	}
 	return combineErr
 }

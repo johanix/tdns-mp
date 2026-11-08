@@ -464,6 +464,9 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 			}
 			mpzd.combinerResyncSignalKeys(req.SenderID, zonename, hdb)
 			if resp.DataChanged {
+				if err := mpzd.syncDsbootNames(); err != nil {
+					lgCombiner.Error("the zone's _dsboot names could not follow the update; tried again every minute", "zone", zonename, "err", err)
+				}
 				nsChanged, kskChanged := detectDelegationChanges(resp)
 				if nsChanged || kskChanged {
 					go mpzd.combinerNotifyDelegationChange(tm, req.DeliveredBy, zonename, nsChanged, kskChanged)
@@ -638,6 +641,9 @@ func (mpzd *MPZoneData) combinerApplyPublishInstruction(req *CombinerSyncRequest
 			}
 		}
 		publishedNS = currentNS
+		if len(currentNS) > 0 && (storedInstr == nil || !containsString(storedInstr.Locations, "at-ns")) {
+			lg.Info("the zone's KEY at the _signal names published", "zone", zone, "ns", currentNS)
+		}
 	} else if storedInstr != nil && containsString(storedInstr.Locations, "at-ns") {
 		for _, ns := range storedInstr.PublishedNS {
 			publishSignalKeyToProvider(zone, ns, senderID, nil)
@@ -1107,6 +1113,8 @@ func (mpzd *MPZoneData) ApplyPendingSignalKeys(hdb *HsyncDB) {
 	myEntries := pendingSignalKeys.entries[mpzd.ZoneName]
 	delete(pendingSignalKeys.entries, mpzd.ZoneName)
 	pendingSignalKeys.mu.Unlock()
+
+	mpzd.serveDsbootNamesAtFirstLoad()
 
 	if len(myEntries) == 0 {
 		return

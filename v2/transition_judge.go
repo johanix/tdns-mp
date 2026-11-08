@@ -71,11 +71,11 @@ const (
 
 // builtKinds are the kinds whose steps are built (decision 29), and
 // carriedKinds the kinds whose step can be carried out at all: a signer role
-// needs P5, an upstream its agent's check of the new transfer (S21). Each
-// step that builds a kind adds it here; the judge reads no config.
+// needs P5. Each step that builds a kind adds it here; the judge reads no
+// config.
 const (
-	builtKinds   changeKind = kindServerRole
-	carriedKinds changeKind = kindRolesTaken | kindServerRole | kindNSmgmt | kindParentSync | kindPubkey
+	builtKinds   changeKind = kindServerRole | kindUpstream | kindPubkey
+	carriedKinds changeKind = kindRolesTaken | kindServerRole | kindNSmgmt | kindParentSync | kindUpstream | kindPubkey
 )
 
 // judgeTransition judges the change from the instructions at one serial to

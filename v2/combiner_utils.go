@@ -6,6 +6,7 @@ package tdnsmp
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -292,6 +293,14 @@ func (mp *MPState) requeueCleanups(cs []ownerRRtype) {
 	for _, c := range cs {
 		mp.noteCleanup(c.owner, c.rrtype)
 	}
+}
+
+// cleanupPendingUnder: a cleanup under the owner prefix still waits for a
+// combine, as after one that failed.
+func (mp *MPState) cleanupPendingUnder(prefix string) bool {
+	mp.cleanupMu.Lock()
+	defer mp.cleanupMu.Unlock()
+	return slices.ContainsFunc(mp.pendingCleanups, func(c ownerRRtype) bool { return strings.HasPrefix(c.owner, prefix) })
 }
 
 // combineInput is what the batch callback works from: a copy of the state,

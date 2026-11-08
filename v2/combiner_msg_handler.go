@@ -52,11 +52,17 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 
 	lgCombiner.Info("message handler starting", "peerRegistry", peerRegistry != nil, "tm", tm != nil, "localAgents", len(localAgents))
 
+	dsbootRetry := time.NewTicker(dsbootRetryInterval)
+	defer dsbootRetry.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			lgCombiner.Info("context cancelled, stopping")
 			return
+
+		case <-dsbootRetry.C:
+			syncOwedDsbootNames()
 
 		case report := <-msgQs.Beat:
 			if report == nil {

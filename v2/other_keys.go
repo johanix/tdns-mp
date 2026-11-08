@@ -1,0 +1,291 @@
+/*
+ * Copyright (c) 2026 Johan Stenstam, johani@johani.org
+ *
+ * The other keys (design 5.6, plan S21). An upstream is one step, a role
+ * change's, that changes no set: held once the downstream provider's own
+ * agent confirms that its nameservers serve the zone from the new upstream
+ * at an SOA serial no lower than the one they served (S18a's check). Its
+ * operator moves the transfer, and its status says what to point where.
+ *
+ * pubkey and pubcds are a step each, which changes the flag in the step's
+ * sets. Every agent hands the sets to its combiner, which acts by them: it
+ * withdraws the KEY from the _signal names at once (combinerTakeHandover),
+ * and publishes and withdraws the CDS and CDNSKEY (combiner_signal_cds.go).
+ * The KEY goes as it does at the leader's set-up: the leader sends it with
+ * its publish instruction, and every agent passes that to its combiner
+ * (#206). The provider's nameservers no longer act on their own copy (P6).
+ */
+package tdnsmp
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"slices"
+	"strings"
+	"time"
+
+	core "github.com/johanix/tdns/v2/core"
+)
+
+const (
+	// upstreamKey prefixes the key of an upstream's step, followed by the
+	// downstream provider's identity.
+	upstreamKey = "upstream "
+	// pubkeyStepKey and pubcdsStepKey are the keys of the flags' steps.
+	pubkeyStepKey = "signal pubkey"
+	pubcdsStepKey = "signal pubcds"
+	// keySendRetry paces the leader's tries of a KEY the queue did not take.
+	keySendRetry = time.Minute
+)
+
+func init() {
+	registerStepRunner(stepRunner{name: "an upstream", kind: stepRoleChange, steps: upstreamSteps, holds: upstreamHolds, status: upstreamStatus})
+	registerStepRunner(stepRunner{name: "pubkey and pubcds", kind: stepRoleChange, steps: signalSteps})
+}
+
+// upstreamSteps is a step for each provider whose record names another
+// upstream under V, and whose servers serve under the sets held and under V.
+// A provider that enters servers= has its server role's step, which checks
+// the upstream V names. A signer's servers serve its own signer's copy, so
+// it has none. With no from, nothing says what moved.
+func upstreamSteps(p planView) []plannedStep {
+	if p.from == nil {
+		return nil
+	}
+	var steps []plannedStep
+	for _, t := range p.to.Records {
+		f, ok := p.from.record(t.Label)
+		if !ok || !core.EqualNames(f.Identity, t.Identity) || f.Upstream == t.Upstream {
+			continue
+		}
+		if !slices.Contains(p.to.Servers, t.Label) || slices.Contains(p.to.Signers, t.Label) {
+			continue
+		}
+		if !slices.ContainsFunc(p.held.Servers, func(h Provider) bool { return core.EqualNames(h.Identity, t.Identity) }) {
+			continue
+		}
+		steps = append(steps, plannedStep{key: upstreamKey + canonicalName(t.Identity), provider: t.Identity,
+			what: fmt.Sprintf("the nameservers of %s serve the zone from its new upstream", t.Identity)})
+	}
+	return steps
+}
+
+// upstreamMoveOf is the provider of an upstream's step, by identity: the
+// step's own key is the last it has taken.
+func upstreamMoveOf(step InstrStep) (string, bool) {
+	if len(step.Taken) == 0 {
+		return "", false
+	}
+	return strings.CutPrefix(step.Taken[len(step.Taken)-1], upstreamKey)
+}
+
+// upstreamHolds: at the provider's own agent an upstream's step is held only
+// once its nameservers serve the zone from the new upstream, at the serial
+// they served or later. Every other agent's part of it is its parts holding
+// the step's sets.
+func upstreamHolds(conf *Config, zone string, step InstrStep) bool {
+	id, ok := upstreamMoveOf(step)
+	mp := conf.MpConfig()
+	if !ok || mp == nil || !core.EqualNames(id, mp.Identity) {
+		return true
+	}
+	name := conf.stepName(zone, step)
+	b := &conf.InternalMp.transfers
+	return b.confirmed(conf, zone, step, func(ctx context.Context) (uint32, error) {
+		return conf.servedAtFirstCheck(ctx, zone, name, mp.Local.Nameservers)
+	})
+}
+
+// servedAtFirstCheck is the serial this agent's nameservers served at the
+// step's first check whose every nameserver answered. It goes on disk before
+// a check passes against it, so a restart keeps it (the project owner,
+// 2026-11-05): asked again after one, a server that has moved meanwhile would
+// set its own floor. One that cannot be kept fails the check, and the next
+// asks again.
+func (conf *Config) servedAtFirstCheck(ctx context.Context, zone, name string, nameservers []string) (uint32, error) {
+	store := conf.InternalMp.Instructions
+	if served, ok := store.floorFor(zone, name); ok {
+		return served, nil
+	}
+	served, err := highestServedSerial(ctx, zone, nameservers)
+	if err != nil {
+		return 0, err
+	}
+	if err := store.keepFloor(zone, name, served); err != nil {
+		return 0, err
+	}
+	return served, nil
+}
+
+// stepFloor is what a step's check goes by, as the store keeps it with the
+// step: the serial, and the step's name (stepName). update drops it when the
+// zone's step is no longer the one named.
+type stepFloor struct {
+	Step   string `json:"step"`
+	Serial uint32 `json:"serial"`
+}
+
+// floorFor is the serial kept for the step named; false with none.
+func (s *InstructionStore) floorFor(zone, name string) (uint32, bool) {
+	if s == nil {
+		return 0, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, z := s.zoneLocked(zone)
+	if z == nil || z.StepFloor == nil || z.StepFloor.Step != name {
+		return 0, false
+	}
+	return z.StepFloor.Serial, true
+}
+
+// keepFloor keeps serial for the step named, refused when the zone's step is
+// another by now.
+func (s *InstructionStore) keepFloor(zone, name string, serial uint32) error {
+	if s == nil {
+		return fmt.Errorf("zone %s: no serials kept", zone)
+	}
+	s.mu.Lock()
+	stored, _ := s.zoneLocked(zone)
+	s.mu.Unlock()
+	if stored == "" {
+		return fmt.Errorf("zone %s: no serials kept", zone)
+	}
+	return s.update(stored, func(z *zoneSerials) error {
+		if z.stepName() != name {
+			return fmt.Errorf("zone %s: the step %q is not the one held", zone, name)
+		}
+		z.StepFloor = &stepFloor{Step: name, Serial: serial}
+		return nil
+	})
+}
+
+// upstreamStatus is what an upstream's step waits for, at every agent while
+// its provider does not hold it; and at the provider's own agent, what its
+// operator must point where.
+func upstreamStatus(conf *Config, zone string, step heldStep, _ time.Time) string {
+	id, ok := upstreamMoveOf(step.InstrStep)
+	mp := conf.MpConfig()
+	if !ok || mp == nil {
+		return ""
+	}
+	self := core.EqualNames(id, mp.Identity)
+	switch {
+	case self && conf.InternalMp.transfers.held(zone, conf.stepName(zone, step.InstrStep)):
+		return ""
+	case !self && conf.toldStepHeld(zone, id, step.InstrStep):
+		return ""
+	}
+	line := fmt.Sprintf("waiting for %s's nameservers to serve the zone from its new upstream", id)
+	if self {
+		line += operatorMustPoint(mp, zone, id)
+	}
+	return line
+}
+
+// signalSteps is a step for each of pubkey and pubcds that V says otherwise
+// than the sets held. Each changes its flag in the sets, and every agent's
+// combiner acts by it. pubkey's stays planned once taken: the step held has
+// its wait.
+func signalSteps(p planView) []plannedStep {
+	to := p.to
+	var steps []plannedStep
+	if p.held.Pubkey != to.Pubkey || slices.Contains(p.taken, pubkeyStepKey) {
+		st := plannedStep{key: pubkeyStepKey, what: "the zone's KEY at the _signal names " + publishedOrWithdrawn(to.Pubkey),
+			sets: func(h Roles) Roles { h.Pubkey = to.Pubkey; return h }}
+		if to.Pubkey {
+			st.start = (*Config).sendKeyForSignalNames
+			st.wait = (*Config).keyNotQueued
+		}
+		steps = append(steps, st)
+	}
+	if p.held.Pubcds != to.Pubcds {
+		steps = append(steps, plannedStep{key: pubcdsStepKey, what: "the zone's CDS at the _signal names " + publishedOrWithdrawn(to.Pubcds),
+			sets: func(h Roles) Roles { h.Pubcds = to.Pubcds; return h }})
+	}
+	return steps
+}
+
+func publishedOrWithdrawn(on bool) string {
+	if on {
+		return "published"
+	}
+	return "withdrawn"
+}
+
+// sendKeyForSignalNames is the leader's own action at the step that gives
+// pubkey: the zone's KEY goes again, now with at-ns, to its combiner and the
+// zone's other agents. During a roll that is the new key from when its KEY
+// was sent, whatever the leader's copy still serves (readZoneKey), and it goes
+// under a distribution of its own: the roll waits for the one it booked. A key
+// not published yet goes with its take-up when the transition is done, or with
+// the roll's own send, by the same sets.
+//
+// A send that fails is kept: the step waits for it (keyNotQueued), and the
+// leader's turn tries again (sendOwedKey). Nothing else would: a lead whose
+// poll of the key has ended publishes nothing at the take-up. In memory: after
+// a restart or under a new lead, the take-up publishes the key by the sets.
+func (conf *Config) sendKeyForSignalNames(zone string) {
+	err := conf.queueKeyForSignalNames(zone)
+	if err != nil {
+		lgAgent.Error("the zone's KEY could not be sent for the _signal names; tried again every minute", "zone", zone, "err", err)
+	}
+	var failed time.Time
+	if err != nil {
+		failed = time.Now()
+	}
+	conf.InternalMp.reconciles.setKeyUnsent(canonicalName(zone), failed)
+}
+
+// queueKeyForSignalNames is the send: an error for one the combiner or any of
+// the agents did not get on the queue.
+func (conf *Config) queueKeyForSignalNames(zone string) error {
+	z := ZoneName(zone)
+	kdb := conf.zoneKeyDB(z)
+	if kdb == nil || conf.InternalMp.MPTransport == nil {
+		return nil
+	}
+	zk, err := readZoneKey(kdb, z)
+	if err != nil {
+		return fmt.Errorf("reading it: %w", err)
+	}
+	if zk.held == nil || zk.held.key == nil || (!zk.rolling && (len(zk.published) != 1 || !sameKey(zk.published[0], zk.held.key))) {
+		lgAgent.Info("the zone's KEY is not published yet: it goes to the _signal names when it is", "zone", zone)
+		return nil
+	}
+	_, _, agentsErr, err := sendZoneKEY(conf.InternalMp.MPTransport, z, zk.held.key, "")
+	return errors.Join(err, agentsErr)
+}
+
+// sendOwedKey is the leader's turn at a KEY whose send failed: it goes again,
+// to all of them, every keySendRetry. One that already has it replaces it with
+// itself.
+func (conf *Config) sendOwedKey(zone string, now time.Time) {
+	if failed := conf.InternalMp.reconciles.keyUnsent(canonicalName(zone)); !failed.IsZero() && now.Sub(failed) >= keySendRetry {
+		conf.sendKeyForSignalNames(zone)
+	}
+}
+
+// keyNotQueued is what the step that gives pubkey waits for at the leader: the
+// send that failed. "" once it has gone, as for a key not published yet.
+func (conf *Config) keyNotQueued(zone string, _ time.Time) string {
+	if conf.InternalMp.reconciles.keyUnsent(canonicalName(zone)).IsZero() {
+		return ""
+	}
+	return "the zone's KEY to go to the _signal names"
+}
+
+// keyUnsent is when the step's send of the zone's KEY last failed; zero with
+// none owed.
+func (b *reconcileBook) keyUnsent(zone string) time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.zone(zone).keyUnsent
+}
+
+func (b *reconcileBook) setKeyUnsent(zone string, failed time.Time) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.zone(zone).keyUnsent = failed
+}

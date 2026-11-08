@@ -369,6 +369,10 @@ func (conf *Config) zoneKeyLine(ctx context.Context, zone ZoneName) string {
 	if kdb == nil {
 		return ""
 	}
+	// a roll under way says how far it has come (plan S17a)
+	if line := conf.rollLine(kdb, zone); line != "" {
+		return line
+	}
 	zk, err := readZoneKey(kdb, zone)
 	if err != nil {
 		return ""
@@ -549,6 +553,9 @@ func (conf *Config) launchKeyPoll(ctx context.Context, tk *keyPollToken, zone Zo
 			}
 			if left := b.pollEnded(zone, keyid, leadStart, finished); left == 0 {
 				conf.releaseKeyHold(ctx, zone)
+				// once the parent trusts the zone's key, the retired keys
+				// it may still trust are deleted there (S17a)
+				conf.sweepRetiredKeys(ctx, zone)
 			}
 		}()
 		held = conf.ParentSyncAfterKeyPublication(ctx, zone, keyName, keyid, algorithm)

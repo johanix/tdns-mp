@@ -202,13 +202,13 @@ func TestRemovingASignerThatIsARemainingServersUpstreamIsRefused(t *testing.T) {
 		Refusal{RefusedUpstreamSignerRemoved, "takes agent.alpha.example. out of signers=, while it is the upstream of the server agent.beta.example. under 41"})
 }
 
-func TestAnUpstreamChangeIsRefusedUntilItsStepExists(t *testing.T) {
+func TestAnUpstreamChangeIsAgreedOnceItsStepExists(t *testing.T) {
 	param := `servers="alpha,beta,charlie" signers="alpha,charlie"`
 	from := jAt(t, 41, param, jAlpha, jBeta, jCharlie)
 	to := jAt(t, 42, param, jAlpha, `3600 IN HSYNC3 ON beta agent.beta.example. charlie`, jCharlie)
-	wantRefusals(t, "now", judgeTransition(from, to), Refusal{RefusedStepMissing, "changes the upstream of agent.beta.example., a step that cannot be carried out yet"})
-	wantRefusals(t, "its check exists", judge(from, to, builtKinds, carriedKinds|kindUpstream), Refusal{RefusedNotBuilt, "changes the upstream of agent.beta.example.: not built yet"})
-	wantRefusals(t, "S21", judge(from, to, builtKinds|kindUpstream, carriedKinds|kindUpstream))
+	wantRefusals(t, "no check of the new transfer", judge(from, to, builtKinds, carriedKinds&^kindUpstream), Refusal{RefusedStepMissing, "changes the upstream of agent.beta.example., a step that cannot be carried out yet"})
+	wantRefusals(t, "no step", judge(from, to, builtKinds&^kindUpstream, carriedKinds), Refusal{RefusedNotBuilt, "changes the upstream of agent.beta.example.: not built yet"})
+	wantRefusals(t, "S21", judgeTransition(from, to))
 }
 
 func TestAMoveIntoSignersIsRefusedUntilItsStepExists(t *testing.T) {
@@ -224,13 +224,20 @@ func TestAKindWithoutItsStepsIsRefused(t *testing.T) {
 	for _, c := range []struct{ param, reason string }{
 		{jServers2 + ` nsmgmt="agent"`, "changes nsmgmt"},
 		{jServers2 + ` parentsync="agent"`, "changes parentsync"},
-		{jServers2 + ` pubkey`, "changes pubkey"},
-		{jServers2 + ` pubcds`, "changes pubcds"},
 		{`servers="alpha" signers="alpha"`, "takes a role from agent.beta.example."},
 	} {
 		to := jAt(t, 42, c.param, jAlpha, jBeta, jCharlie)
 		wantRefusals(t, c.reason, judgeTransition(from, to), Refusal{RefusedNotBuilt, c.reason + ": not built yet"})
 		wantRefusals(t, c.reason+", once built", judge(from, to, allKinds, allKinds))
+	}
+	// pubkey and pubcds: built (S21)
+	for _, c := range []struct{ param, reason string }{
+		{jServers2 + ` pubkey`, "changes pubkey"},
+		{jServers2 + ` pubcds`, "changes pubcds"},
+	} {
+		to := jAt(t, 42, c.param, jAlpha, jBeta, jCharlie)
+		wantRefusals(t, c.reason, judge(from, to, builtKinds&^kindPubkey, carriedKinds), Refusal{RefusedNotBuilt, c.reason + ": not built yet"})
+		wantRefusals(t, c.reason+", once built", judgeTransition(from, to))
 	}
 	// the auditors and the suffix: nothing to carry out (design 5.6)
 	wantRefusals(t, "auditors and suffix", judgeTransition(from, jAt(t, 42, jServers2+` auditors="charlie" suffix="mp"`, jAlpha, jBeta, jCharlie)))
