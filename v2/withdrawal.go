@@ -172,12 +172,19 @@ func combinerRemovesOnly(zone, origin string, ops []core.RROperation) bool {
 			if !ok {
 				return false
 			}
+			// read under the zone's lock, as the chunk handler writes them,
+			// and compared as copies
 			var held []dns.RR
+			mpzd.Lock()
 			for sender, owners := range mpzd.MP.AgentContributions {
 				if sameName(sender, origin) {
-					held = owners[zone][rrtype].RRs
+					held = held[:0]
+					for _, rr := range owners[zone][rrtype].RRs {
+						held = append(held, dns.Copy(rr))
+					}
 				}
 			}
+			mpzd.Unlock()
 			for _, rec := range op.Records {
 				rr, err := dns.NewRR(rec)
 				if err != nil || !slices.ContainsFunc(held, func(h dns.RR) bool { return dns.IsDuplicate(h, rr) }) {

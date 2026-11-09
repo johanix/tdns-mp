@@ -698,9 +698,19 @@ func TestASignerWithNothingHandedAndASerialKeepsItsForeignRows(t *testing.T) {
 // inline-signing off, and the zone not loaded yet.
 func (r *signerRig) restart(t *testing.T) {
 	t.Helper()
-	r.mpzd = signerZoneUnpublished(t, r.mpzd.ZoneName, r.kdb, r.records...)
+	zone := r.mpzd.ZoneName
+	r.owner.mu.RLock()
+	_, taken := r.owner.owned[lifecycleZoneName(zone)]
+	r.owner.mu.RUnlock()
+	r.mpzd = signerZoneUnpublished(t, zone, r.kdb, r.records...)
 	r.mpzd.EnsureMP()
 	r.mpzd.MP.MPdata = &MPdata{Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}}
+	// a take holds for the ZoneData it was made on (#396): the start takes
+	// the zone its key machine ran again, on the new one, as
+	// TakeConfiguredZones does
+	if taken {
+		r.owner.Take(zone)
+	}
 }
 
 // firstLoad is the signer's first load of records: its data the config parse's

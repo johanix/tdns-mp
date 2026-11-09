@@ -118,6 +118,7 @@ var signerStop = func(conf *Config, reason string) { tdns.Shutdowner(conf.Config
 // the config lists them or sets key-lifecycle-zones-incomplete.
 func (conf *Config) signerZonesReloaded() {
 	conf.RegisterMPRefreshCallbacks()
+	conf.InternalMp.signerRoles.prune()
 	if err := conf.keyLifecycleRolloutGate(); err != nil {
 		lgSigner.Error("key lifecycle: the reload brought a multi-provider zone the signer signs that key-lifecycle-zones does not name; the signer stops, as a start would refuse",
 			"err", err)

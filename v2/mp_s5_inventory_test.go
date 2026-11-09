@@ -181,7 +181,7 @@ func TestSyncherGatesForOwnedAndMultiProviderZones(t *testing.T) {
 	if !syncherPublishesDNSKEYCDS(conf, zd) {
 		t.Error("a zone tdns runs, with parentsync: the syncher's CDS should be published")
 	}
-	owner.Take(zd.ZoneName)
+	owner.takeOn(zd.ZoneName, zd) // on this ZoneData, which tdns does not hold
 	if syncherPublishesDNSKEYCDS(conf, zd) {
 		t.Error("an owned zone: the syncher's DNSKEY-derived CDS should not be published")
 	}

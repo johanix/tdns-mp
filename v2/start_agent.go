@@ -288,13 +288,19 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 	// and not heard, as its gate does (design 3.2, plan S7).
 	lem.SetGateExcused(conf.gateExcused)
 
-	// Attach OnFirstLoad callbacks to zone stubs.
+	// Attach OnFirstLoad callbacks to zone stubs, and to every zone whose
+	// ZoneData a reload replaces later, through the zone hooks (#396).
 	delegationSyncQ := conf.Config.Internal.DelegationSyncQ
-	for _, zoneName := range conf.Config.Internal.AllZones {
-		mpzd, exists := Zones.Get(zoneName)
-		if !exists {
-			continue
+	agentFirstLoad := func(mpzd *MPZoneData) {
+		if !mpzd.Options[tdns.OptParentSync] && !mpzd.Options[tdns.OptMultiProvider] {
+			return
 		}
+		if !conf.InternalMp.agentFirstLoad.first(mpzd.ZoneData) {
+			return
+		}
+		// under the zone's lock, as tdns drains OnFirstLoad
+		mpzd.Lock()
+		defer mpzd.Unlock()
 		// Detect parentsync=agent from HSYNCPARAM and enable delegation sync.
 		if mpzd.Options[tdns.OptMultiProvider] {
 			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
@@ -305,7 +311,7 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 				if mp == nil {
 					return
 				}
-				w, ok := Zones.Get(zd.ZoneName)
+				w, ok := Zones.GetFor(zd)
 				if !ok {
 					return
 				}
@@ -332,10 +338,14 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 		// registers the peers and recomputes the groups, before OnFirstLoad
 		// runs. The election callback below therefore finds the zone's group.
 		// Leader election callback (must run after parentsync detection above).
-		if mpzd.Options[tdns.OptParentSync] || mpzd.Options[tdns.OptMultiProvider] {
-			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, lem.electAtFirstLoad)
+		mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, lem.electAtFirstLoad)
+	}
+	for _, zoneName := range conf.Config.Internal.AllZones {
+		if mpzd, exists := Zones.Get(zoneName); exists {
+			agentFirstLoad(mpzd)
 		}
 	}
+	conf.installZoneHooks(conf.registerRefreshCallbacks, conf.firstLoadSetup, agentFirstLoad)
 
 	leaderKeySetup := func(zone ZoneName, elected bool) error {
 		return conf.leaderKeySetup(ctx, zone, elected)
