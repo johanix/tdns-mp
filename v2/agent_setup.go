@@ -756,16 +756,21 @@ func (conf *Config) warnConfigIdentityZoneNotSynced(zd *tdns.ZoneData) {
 // at the end of the fast attempts, and then once per remind of waiting. The
 // attempts between are logged at debug level: a parent that is away for a
 // day leaves a handful of lines in the log, not one per attempt.
+//
+// A parent that offers no scheme this zone can use is not asked at all: it
+// is looked at again once per recheck, at debug level, after one warning
+// (parent_offer.go).
 type identitySyncPace struct {
 	fast     int           // attempts at the first interval
 	interval time.Duration // between the fast attempts; doubled per attempt after them
 	max      time.Duration // where the doubling stops
 	remind   time.Duration // the waiting between two reminders in the log
+	recheck  time.Duration // between two looks at a parent that offers no usable scheme; max when unset
 }
 
 // identitySync is the pace in use. A variable so a test need not wait out
 // the real schedule; syncIdentityDelegation reads it once, when it starts.
-var identitySync = identitySyncPace{fast: 12, interval: 15 * time.Second, max: time.Hour, remind: 6 * time.Hour}
+var identitySync = identitySyncPace{fast: 12, interval: 15 * time.Second, max: time.Hour, remind: 6 * time.Hour, recheck: time.Hour}
 
 // syncIdentityDelegation brings the parent's DS for the identity zone in
 // line with the zone's keys through the schemes the parent advertises. It
@@ -778,6 +783,17 @@ var identitySync = identitySyncPace{fast: 12, interval: 15 * time.Second, max: t
 // longer than the fast attempts used to leave the zone without a DS until
 // the next start (tdns-mp #74).
 //
+// Before each ask it looks at what the parent offers (parentOfferOf). A
+// parent that publishes no DSYNC, or none with a scheme this zone can use,
+// is the common case (Johan, 2026-11-09): it is warned about once, nothing
+// is asked of the syncher, and the parent is looked at again once per
+// pace.recheck, at debug level, until a usable scheme appears (logged at
+// info level). The SIG(0) setup is queued only when the parent advertises
+// the UPDATE scheme's target; a parent that offers other schemes but not
+// that one is warned about once, and the sync goes on through them. When
+// nothing can be known of the parent (no resolver, a failed lookup), the
+// sync asks as it did before the look, and the syncher meets the failure.
+//
 // It ends once the parent is in sync: a change of the zone's keys after
 // that is not followed up from here.
 //
@@ -787,6 +803,9 @@ var identitySync = identitySyncPace{fast: 12, interval: 15 * time.Second, max: t
 // used as the UPDATE zone as it stands.
 func (conf *Config) syncIdentityDelegation(ctx context.Context, zd *tdns.ZoneData) {
 	pace := identitySync
+	if pace.recheck <= 0 {
+		pace.recheck = pace.max
+	}
 	if !conf.Config.Internal.ImrReady.Wait(ctx) {
 		return
 	}
@@ -801,20 +820,34 @@ func (conf *Config) syncIdentityDelegation(ctx context.Context, zd *tdns.ZoneDat
 	// accepts that key only after the bootstrap in DelegationSyncSetup. tdns
 	// queues that setup for the zones it loads (SetupZoneSync), but not for an
 	// identity zone: it is not multi-provider, and this daemon builds it
-	// itself. So it is queued here, ahead of the first sync; the syncher
-	// handles requests in order.
-	if identityZoneUsesUpdate(zd, conf.Config.ParentSync.Schemes) {
-		select {
-		case conf.Config.Internal.DelegationSyncQ <- tdns.DelegationSyncRequest{
-			Command: "DELEGATION-SYNC-SETUP", ZoneName: zd.ZoneName, ZoneData: zd}:
-		case <-ctx.Done():
-			return
-		}
-	}
+	// itself. So it is queued here, ahead of the first sync that may use it;
+	// the syncher handles requests in order.
+	wantSetup := identityZoneUsesUpdate(zd, conf.Config.ParentSync.Schemes)
 	wait := pace.interval
 	var quiet time.Duration // waited since the last warning
 	var toldSent, toldRefused bool
 	for attempt := 1; ; attempt++ {
+		// Nothing is asked of a parent that offers no scheme this zone can
+		// use: it is looked at again later, quietly.
+		off, oerr := conf.parentOfferOf(ctx, zd, zd.KeyDB)
+		if oerr == nil && !conf.noteParentOffer(zd.ZoneName, off, false) {
+			attempt-- // no ask was made
+			select {
+			case <-time.After(pace.recheck):
+				continue
+			case <-ctx.Done():
+				return
+			}
+		}
+		if wantSetup && (oerr != nil || conf.noteUpdateOffer(zd.ZoneName, off, false)) {
+			wantSetup = false
+			select {
+			case conf.Config.Internal.DelegationSyncQ <- tdns.DelegationSyncRequest{
+				Command: "DELEGATION-SYNC-SETUP", ZoneName: zd.ZoneName, ZoneData: zd}:
+			case <-ctx.Done():
+				return
+			}
+		}
 		resp := make(chan tdns.DelegationSyncStatus, 1)
 		select {
 		case conf.Config.Internal.DelegationSyncQ <- tdns.DelegationSyncRequest{
@@ -841,10 +874,12 @@ func (conf *Config) syncIdentityDelegation(ctx context.Context, zd *tdns.ZoneDat
 			}
 		}
 		// Sent and accepted: the next round's analysis confirms it. The
-		// synchers answer a refusal, a parent without a usable scheme and a
-		// failure on the way as an error, and no answer is one too (above):
-		// an answer without an error is a sync that was accepted, whether
-		// or not it carries the scheme's message.
+		// synchers answer a refusal and a failure on the way as an error,
+		// and no answer is one too (above): an answer without an error is a
+		// sync that was accepted, whether or not it carries the scheme's
+		// message. A parent without a usable scheme is not asked (above);
+		// should it drop its last scheme between that look and the
+		// syncher's, the next round's look finds it.
 		sent := !st.Error && st.Rcode == dns.RcodeSuccess
 		kv := []any{"zone", zd.ZoneName, "parent", zd.GetParent(), "attempt", attempt, "next", wait,
 			"rcode", dns.RcodeToString[int(st.Rcode)], "err", st.ErrorMsg, "answer", st.Msg}

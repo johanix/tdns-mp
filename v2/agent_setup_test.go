@@ -257,6 +257,15 @@ type identitySyncRig struct {
 
 func newIdentitySyncRig(t *testing.T, zone string, pace identitySyncPace) *identitySyncRig {
 	t.Helper()
+	return newIdentitySyncRigWith(t, zone, pace, []string{"notify"}, nil)
+}
+
+// newIdentitySyncRigWith is newIdentitySyncRig with the configured schemes,
+// and offer in place of the look at the parent's DSYNC records (nil: none,
+// so nothing is known of the parent, as without a resolver).
+func newIdentitySyncRigWith(t *testing.T, zone string, pace identitySyncPace, schemes []string,
+	offer func(ctx context.Context, zd *tdns.ZoneData) (parentOffer, error)) *identitySyncRig {
+	t.Helper()
 	r := &identitySyncRig{q: make(chan tdns.DelegationSyncRequest), done: make(chan struct{})}
 	savedPace := identitySync
 	logTo(t, lgAgent, slog.NewJSONHandler(&r.log, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -265,7 +274,8 @@ func newIdentitySyncRig(t *testing.T, zone string, pace identitySyncPace) *ident
 	conf.Config.Internal.DelegationSyncQ = r.q
 	conf.Config.Internal.ImrReady = tdns.NewImrReadiness()
 	conf.Config.Internal.ImrReady.Publish()
-	conf.Config.ParentSync.Schemes = []string{"notify"}
+	conf.Config.ParentSync.Schemes = schemes
+	conf.InternalMp.parentOffer = offer
 	zd, _, _ := newIdentityTestZone(t, zone)
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
