@@ -418,8 +418,8 @@ func (c *refreshCombiner) restart(zones ...string) {
 	pendingSignalKeys.entries = nil
 	pendingSignalKeys.mu.Unlock()
 	c.conf.InternalMp.MPZoneNames = nil
-	c.conf.InternalMp.onFirstLoadRegistered = nil
-	c.conf.InternalMp.refreshRegistered = nil
+	c.conf.InternalMp.onFirstLoadRegistered = zoneOnce{}
+	c.conf.InternalMp.refreshRegistered = zoneOnce{}
 	for _, name := range zones {
 		c.drop(name)
 		tdns.Zones.Set(name, &tdns.ZoneData{

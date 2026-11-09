@@ -62,6 +62,8 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	// Register tdns-mp PreRefresh/PostRefresh closures on MP zones.
 	conf.RegisterMPRefreshCallbacks()
 	conf.Config.Internal.PostParseZonesHook = conf.RegisterMPRefreshCallbacks
+	// and a zone whose ZoneData tdns replaces gets them again (#396)
+	conf.installZoneHooks(conf.registerRefreshCallbacks, conf.firstLoadSetup)
 
 	// Wire the receive path (CHUNK NOTIFY handler + router dispatch); must
 	// precede NotifyHandler (D3: one entry point per role).
