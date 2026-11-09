@@ -86,7 +86,8 @@ func serverRoleHolds(conf *Config, zone string, step InstrStep) bool {
 
 // serverRoleStatus is what a server role's step waits for, at every agent
 // while its provider does not hold it: the provider's nameservers, at the
-// zone's serial as this agent holds it; and at the provider's own agent,
+// serial this agent's copy came in at (copySerial), the floor the check
+// wants; and at the provider's own agent,
 // once the step has waited transferHelpAfter, what its operator must point
 // where.
 func serverRoleStatus(conf *Config, zone string, step heldStep, now time.Time) string {
@@ -246,11 +247,15 @@ func (conf *Config) toldStepHeld(zone, id string, step InstrStep) bool {
 	return ok && st.StepHeld && st.Step != nil && st.Step.Number == step.Number && st.Step.Digest == step.Digest
 }
 
-// copySerial is the SOA serial of the zone as this agent holds it: the
-// serial a newcomer's nameservers serve at the least.
+// copySerial is the SOA serial this agent's copy of the zone came in at from
+// its upstream: the serial a newcomer's nameservers, which serve the
+// upstream's copy too, serve at the least. Not the agent's own serial: a
+// first load lifts that past the highest the agent published before (a zone
+// added back, a restart), and from there it runs a numbering of its own that
+// the upstream's copy need never reach.
 func copySerial(zone string) uint32 {
 	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil && mpzd.ZoneData != nil {
-		return mpzd.CurrentSerial
+		return mpzd.IncomingSerial
 	}
 	return 0
 }

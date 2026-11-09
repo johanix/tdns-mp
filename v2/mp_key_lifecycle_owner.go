@@ -149,8 +149,11 @@ func (o *MPKeyLifecycleOwner) Name() string { return "tdns-mp" }
 // ZoneData tdns holds for it now. This is the per-zone rollout of S3. A zone
 // taken stays owned: one this provider does not sign is owned and idle (plan
 // S11), not given back to tdns's machine. A zone whose ZoneData tdns
-// replaces is not that zone any more, and is taken again. A zone not loaded
-// is not taken: there is nothing to take it on.
+// replaces is not that zone any more: ReleaseReplaced lets it go, and
+// TakeConfiguredZones takes it again on the new one when key-lifecycle-zones
+// names it. A take made here of a zone outside that list, which only tests
+// make, is not made again. A zone not loaded is not taken: there is nothing
+// to take it on.
 func (o *MPKeyLifecycleOwner) Take(zone string) {
 	zd, _ := tdns.Zones.Get(lifecycleZoneName(zone))
 	o.takeOn(zone, zd)
