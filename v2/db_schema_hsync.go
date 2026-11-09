@@ -247,6 +247,23 @@ var HsyncTables = map[string]string{
 		UNIQUE(zone, agent_id, rrtype)
 	)`,
 
+	// CombinerReplaceOrigin is the combiner's side of the same guard
+	// (combinerReplaceOrigins): per (zone, sender, rrtype) the origin of the
+	// last REPLACE the combiner applied, so a queued older one stays refused
+	// after a restart. A table of its own, so an agent and a combiner that
+	// share a KeyDB keep their guards apart.
+	"CombinerReplaceOrigin": `CREATE TABLE IF NOT EXISTS 'CombinerReplaceOrigin' (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		zone        TEXT NOT NULL,
+		agent_id    TEXT NOT NULL,
+		rrtype      INTEGER NOT NULL,
+		origin_time INTEGER NOT NULL, -- unix nanoseconds
+		dist_id     TEXT NOT NULL,
+		under       INTEGER NOT NULL DEFAULT 0,
+		has_under   INTEGER NOT NULL DEFAULT 0,
+		UNIQUE(zone, agent_id, rrtype)
+	)`,
+
 	// MPKeyDistribution is a key's distribution in flight, kept by the key
 	// lifecycle driver (mp_key_lifecycle_driver.go): who must confirm, who
 	// has, and whether anyone rejected. A restart resumes from it: what is
@@ -744,6 +761,7 @@ func (hdb *HsyncDB) InitCombinerEditTables() error {
 		"CombinerRejectedEdits",
 		"CombinerContributions",
 		"CombinerPublishInstructions",
+		"CombinerReplaceOrigin",
 		"MPActingSerial",
 	}
 

@@ -449,9 +449,12 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		}
 	}
 
-	if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Operations, req.Records); refusal != nil && !req.Removal {
-		refusal.DistributionID, refusal.Timestamp = resp.DistributionID, resp.Timestamp
-		return refusal
+	// a removal is judged first: originVoteRefusal warns of what it refuses
+	if !req.Removal {
+		if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Operations, req.Records); refusal != nil {
+			refusal.DistributionID, refusal.Timestamp = resp.DistributionID, resp.Timestamp
+			return refusal
+		}
 	}
 
 	policy := mpzd.getEditPolicy()
@@ -1814,17 +1817,21 @@ func (mpzd *MPZoneData) checkDNSKEYPolicy(senderID string) (bool, string) {
 
 // combinerReplaceOrigins records, per (zone, sender, rrtype), where the
 // REPLACE last applied came from: the delivering agent's enqueue time and
-// distribution id. In memory only; a restart re-hydrates contributions and
-// the peers re-announce.
+// distribution id. Each is kept in CombinerReplaceOrigin too (hdb), and
+// loaded before the router starts, so that after a restart a queued older
+// REPLACE stays refused: else it would put back a contribution the
+// leader's withdrawal took away, from a provider that is still a signer.
 var combinerReplaceOrigins = struct {
-	mu sync.Mutex
-	m  map[string]replaceOrigin
+	mu  sync.Mutex
+	m   map[string]replaceOrigin
+	hdb *HsyncDB
 }{m: map[string]replaceOrigin{}}
 
 // staleCombinerReplace answers whether a REPLACE is older than the one last
 // applied for the same (zone, sender, rrtype), by the active serial its
 // agent stamped at the send, then by the time (olderThan), and records it
-// as the newest when it is not. A request without a time is never stale.
+// as the newest when it is not, on disk too (best-effort, as the agent's
+// guard). A request without a time is never stale.
 func staleCombinerReplace(req *CombinerSyncRequest, zonename string, rrtype uint16) (bool, replaceOrigin) {
 	if req.Timestamp.IsZero() {
 		return false, replaceOrigin{}
@@ -1837,7 +1844,36 @@ func staleCombinerReplace(req *CombinerSyncRequest, zonename string, rrtype uint
 		return true, cur
 	}
 	combinerReplaceOrigins.m[key] = origin
+	// under the lock, so that the rows are written in the order the map is
+	if hdb := combinerReplaceOrigins.hdb; hdb != nil {
+		if err := SaveCombinerReplaceOrigin(hdb, zonename, req.SenderID, rrtype, origin); err != nil {
+			lgCombiner.Error("failed to persist replace origin", "zone", zonename, "sender", req.SenderID, "rrtype", dns.TypeToString[rrtype], "err", err)
+		}
+	}
 	return false, replaceOrigin{}
+}
+
+// loadCombinerReplaceOrigins attaches hdb to combinerReplaceOrigins and
+// loads its rows, keeping an origin already held when it is the newer (a
+// reload). Called at startup before the message router starts, and on
+// reload (RegisterCombinerOnFirstLoad).
+func loadCombinerReplaceOrigins(hdb *HsyncDB) {
+	origins, err := LoadCombinerReplaceOrigins(hdb)
+	combinerReplaceOrigins.mu.Lock()
+	defer combinerReplaceOrigins.mu.Unlock()
+	combinerReplaceOrigins.hdb = hdb
+	if err != nil {
+		lgCombiner.Error("failed to load replace origins: an older REPLACE queued across the restart is not refused", "err", err)
+		return
+	}
+	for k, o := range origins {
+		if cur, ok := combinerReplaceOrigins.m[k]; !ok || cur.olderThan(o) {
+			combinerReplaceOrigins.m[k] = o
+		}
+	}
+	if len(origins) > 0 {
+		lgCombiner.Info("loaded replace origins", "count", len(origins))
+	}
 }
 
 // checkContentPolicy applies content-based policy checks to a parsed RR.
