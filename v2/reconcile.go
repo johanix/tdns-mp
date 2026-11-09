@@ -470,14 +470,26 @@ func (b *reconcileBook) forget(zone string) {
 	delete(b.zones, zone)
 }
 
+// noVotingMember: no ON record's label is in servers= or signers= under in,
+// as participantsOf counts the voting members; true for no instructions.
+func noVotingMember(in *Instructions) bool {
+	return in == nil || len(identities(in.providers(slices.Concat(in.Servers, in.Signers)))) == 0
+}
+
 // reconcileTurn is the zone's reconciliation, at its turn (thawTurn): the
 // leader under the active serial takes the next step, or says "done", once
 // the step it holds is held; every other agent takes the leader's step and
-// its "done" from the leader's stamp.
+// its "done" from the leader's stamp. With no voting member under the active
+// serial nobody carries a step or confirms one: every agent ends the
+// transition as it takes effect (the project owner, 2026-11-06).
 func (conf *Config) reconcileTurn(zone string, now time.Time) {
 	s := conf.InternalMp.Instructions
 	in, ok := s.reconcileInputs(zone)
 	if !ok || !in.enforced || !in.reconciling || conf.MpConfig() == nil {
+		return
+	}
+	if noVotingMember(in.active.Reading) {
+		conf.transitionDone(in.name, in.active.Serial)
 		return
 	}
 	key := canonicalName(in.name)
