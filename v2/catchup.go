@@ -185,6 +185,9 @@ type owedSync struct {
 	// askOwed leaves it until the release when the transition is done
 	// (instrDone).
 	frozen bool
+	// noted: when the sync was last owed (markLocked). An explicit sync
+	// whose analysis began after it answers it (syncedSince).
+	noted time.Time
 }
 
 // owedResult is what one ask for an owed sync did.
@@ -1006,9 +1009,7 @@ func (t *catchUpTracker) holdUnlessCaughtUp(zone ZoneName) (held bool, w catchUp
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if ok, w := t.caughtUpLocked(zone); !ok {
-		if t.owed[zone] == nil {
-			t.owed[zone] = &owedSync{}
-		}
+		t.markLocked(zone)
 		return true, w
 	}
 	return false, w
@@ -1023,9 +1024,42 @@ func (t *catchUpTracker) owe(zone ZoneName) {
 	zone = ZoneName(dns.Fqdn(string(zone)))
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.owed[zone] == nil {
-		t.owed[zone] = &owedSync{}
+	t.markLocked(zone)
+}
+
+// markLocked is the zone's owed mark, made if there is none, and noted now:
+// a sync whose analysis began before now does not answer it (syncedSince).
+// Under the tracker's lock.
+func (t *catchUpTracker) markLocked(zone ZoneName) *owedSync {
+	o := t.owed[zone]
+	if o == nil {
+		o = &owedSync{}
+		t.owed[zone] = o
 	}
+	o.noted = time.Now()
+	return o
+}
+
+// syncedSince drops the zone's owed mark when an explicit sync has answered
+// it: the sync's analysis began at analysed, after the mark was last noted,
+// and the sync sent the difference to the parent or found none. A mark noted
+// since stays, as the sync may not carry what it was owed for, and so does
+// one the freeze holds: a sync during a transition carries the delegation by
+// the sets the parts hold, and the rest goes when it is done (plan S6). It
+// says whether the mark went.
+func (t *catchUpTracker) syncedSince(zone ZoneName, analysed time.Time) bool {
+	if t == nil {
+		return false
+	}
+	zone = ZoneName(dns.Fqdn(string(zone)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	o := t.owed[zone]
+	if o == nil || o.frozen || !o.noted.Before(analysed) {
+		return false
+	}
+	delete(t.owed, zone)
+	return true
 }
 
 // oweForRoom notes that the zone's sync was asked for and found the
@@ -1038,10 +1072,7 @@ func (t *catchUpTracker) oweForRoom(zone ZoneName) {
 	zone = ZoneName(dns.Fqdn(string(zone)))
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.owed[zone] == nil {
-		t.owed[zone] = &owedSync{}
-	}
-	t.owed[zone].room = true
+	t.markLocked(zone).room = true
 }
 
 // clearOwed drops the zone's owed sync: the zone's chain has ended, and
@@ -1054,10 +1085,7 @@ func (t *catchUpTracker) oweForKey(zone ZoneName) {
 	zone = ZoneName(dns.Fqdn(string(zone)))
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.owed[zone] == nil {
-		t.owed[zone] = &owedSync{}
-	}
-	t.owed[zone].key = true
+	t.markLocked(zone).key = true
 }
 
 // releaseKeyOwed takes the key off the zone's owed mark, and reports whether
@@ -1085,10 +1113,7 @@ func (t *catchUpTracker) oweForFreeze(zone ZoneName) {
 	zone = ZoneName(dns.Fqdn(string(zone)))
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.owed[zone] == nil {
-		t.owed[zone] = &owedSync{}
-	}
-	t.owed[zone].frozen = true
+	t.markLocked(zone).frozen = true
 }
 
 // releaseFreezeOwed takes the freeze off the zone's owed mark, and reports
@@ -1185,9 +1210,7 @@ func (t *catchUpTracker) oweAfterFailedAnalysis(zone ZoneName, err error) (logIt
 	zone = ZoneName(dns.Fqdn(string(zone)))
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.owed[zone] == nil {
-		t.owed[zone] = &owedSync{}
-	}
+	t.markLocked(zone)
 	now := time.Now()
 	pd := t.parentDown[zone]
 	if pd == nil {

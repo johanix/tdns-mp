@@ -126,3 +126,95 @@ func withdrawDSYNC(t *testing.T, h *holdRig) {
 	imr.Cache.Set(name, core.TypeDSYNC, &cache.CachedRRset{Name: name, RRtype: core.TypeDSYNC, Context: cache.ContextNoErrNoAns,
 		State: cache.ValidationStateSecure, Ttl: 3600, Expiration: time.Now().Add(time.Hour)})
 }
+
+// An analysis that could not read all it asked the parent (here its server
+// fails the questions about the glue, or about the DS, while the delegation
+// is in step) is a failed one, though it says in sync (#267, the review of
+// #378): it does not end the NOTIFY's chain, tell the peers the sync is
+// done, or clear the owed mark; it is owed, and the parent noted as down.
+// Once the parent answers in full, the owed sync's ask does all three.
+func TestAnIncompleteAnalysisIsAFailedOne(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		rrtype uint16
+		unread func(zone string) string
+	}{
+		{"glue", dns.TypeA, func(zone string) string { return "ns1." + zone + " A" }},
+		{"ds", dns.TypeDS, func(string) string { return "DS" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHoldRig(t, "unread-"+tc.name+".parent.example.", "NOTIFY", false, repeat(time.Hour, 4)...)
+			z := h.mpzd.ZoneName
+			h.caughtUp()
+			h.parent.holdsDS() // the parent has no DS
+			h.inventory(h.ksk) // the DS set changes: the sync goes as a NOTIFY(CDS)
+			h.notified(t, "the sync", dns.TypeCDS)
+			if sent, _ := h.chainNotified(z); sent == "" {
+				t.Fatal("the chain has no NOTIFY out after the sync")
+			}
+
+			// the parent installs the DS, and its server fails some questions
+			h.parent.holdsDS(h.ds)
+			h.parent.failsQuestions(tc.rrtype)
+			got := h.explicit(t)
+			if want := "no answer for " + tc.unread(z); !got.Error || !strings.Contains(got.ErrorMsg, want) {
+				t.Errorf("the answer: error %v %q, want one naming %q", got.Error, got.ErrorMsg, want)
+			}
+			if !h.owed() {
+				t.Error("an incomplete analysis left the sync not owed")
+			}
+			if sent, _ := h.chainNotified(z); sent == "" {
+				t.Error("an incomplete analysis ended the chain's NOTIFY")
+			}
+			if down, _, _ := h.tr.parentDownState(ZoneName(z)); !down {
+				t.Error("an incomplete analysis did not note the parent as down")
+			}
+			h.untold(t, 200*time.Millisecond, "after an incomplete analysis")
+
+			// the parent answers in full again
+			h.parent.failsQuestions()
+			h.askOwed()
+			h.told(t, "the parent read in full")
+			waitUntil(t, "the owed sync was not cleared\n"+h.log.String(), func() bool { return !h.owed() })
+			if sent, _ := h.chainNotified(z); sent != "" {
+				t.Errorf("the chain still has NOTIFY(%s) out after the parent was read in full and found in step", sent)
+			}
+		})
+	}
+}
+
+// By the UPDATE scheme an incomplete analysis sends nothing, though it found
+// a difference: the UPDATE would be built from part of the parent's data.
+// Once the parent answers in full, the owed sync's ask sends it.
+func TestAnIncompleteAnalysisSendsNoUpdate(t *testing.T) {
+	h := newHoldRig(t, "unread.update.example.", "UPDATE", false, repeat(time.Hour, 4)...)
+	z := h.mpzd.ZoneName
+	if _, err := h.mpzd.KeyDB.Sig0KeyMgmt(nil, tdns.KeystorePost{Command: "sig0-mgmt", SubCommand: "generate", Zone: z,
+		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
+		t.Fatalf("the zone's SIG(0) key: %v", err)
+	}
+	trustActiveKeys(t, h.mpzd.KeyDB, z)
+	h.parent.holdsNS("ns1."+z, h.oldNS) // a difference for the sync to send
+	h.caughtUp()
+	h.parent.failsQuestions(dns.TypeA)
+
+	got := h.explicit(t)
+	if !got.Error || !strings.Contains(got.ErrorMsg, "no answer for ns1."+z+" A") {
+		t.Errorf("the answer: error %v %q, want one naming the unread glue", got.Error, got.ErrorMsg)
+	}
+	if n := h.parent.updatesSeen(); n != 0 {
+		t.Errorf("an incomplete analysis sent %d UPDATEs, want none", n)
+	}
+	if !h.owed() {
+		t.Error("an incomplete analysis left the sync not owed")
+	}
+	h.untold(t, 200*time.Millisecond, "after an incomplete analysis")
+
+	h.parent.failsQuestions()
+	h.askOwed()
+	h.told(t, "the UPDATE answered")
+	if n := h.parent.updatesSeen(); n != 1 {
+		t.Errorf("the parent got %d UPDATEs, want the one", n)
+	}
+	waitUntil(t, "the owed sync was not cleared\n"+h.log.String(), func() bool { return !h.owed() })
+}
