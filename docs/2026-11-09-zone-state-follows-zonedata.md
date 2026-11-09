@@ -58,7 +58,10 @@ the zone starts over as it does at a start.
 ### The per-zone hooks (`zone_hooks.go`)
 
 `zoneOnce` records one ZoneData per zone name. A hook does its work when
-the ZoneData is not yet the one recorded, then records it. So each hook
+the ZoneData is not yet the one recorded, then records it. A ZoneData that
+tdns no longer holds is refused, under the same lock: a lookup that built a
+wrapper and runs its hooks late, after a reload replaced the zone, neither
+takes the live ZoneData's mark nor registers anything. So each hook
 runs exactly once per ZoneData, whichever caller gets there first. After
 every reload, `prune` forgets the ZoneData tdns no longer holds. The hooks
 are:
@@ -150,6 +153,9 @@ rebuilds it from the store in the same way, so a replacement keeps it too:
 - `TestZoneHooksRunOnceOnARecreatedZone`: the refresh hooks run exactly once
   on the re-created zone, also with 32 concurrent lookups and the reload
   hook after them. The removed zone's callback leaves the new wrapper alone.
+- `TestALateHookOfAReplacedZoneDataTakesNoMark`: a late hook of the
+  replaced ZoneData is refused, and the next reload adds no second set of
+  refresh callbacks to the live zone.
 - `TestFirstLoadSetupOncePerZoneData`: the signer's resigner registration
   runs once per ZoneData.
 - `TestNothingKeepsTheRemovedZoneData`: after the removing reload, none of
