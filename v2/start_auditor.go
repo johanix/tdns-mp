@@ -204,11 +204,9 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		})
 	}
 
-	// The reader of the delegation sync queue: tdns's own syncher, since
-	// the auditor has no cells to elect a leader for. It was started for
-	// the auditor's identity zone, which no longer asks for a sync (tdns-mp
-	// #391); it stays so that a request queued for any other zone is read
-	// and not left to block its sender.
+	// Delegation sync for the auditor's identity zone (its DS at its
+	// parent): tdns's own syncher, since the auditor has no cells to elect
+	// a leader for.
 	if kdb != nil && conf.Config.Internal.DelegationSyncQ != nil {
 		tdns.StartEngine(&tdns.Globals.App, "DelegationSyncher", func() error {
 			return kdb.DelegationSyncher(ctx, conf.Config.Internal.DelegationSyncQ, conf.Config.Internal.NotifyQ, conf.Config)
