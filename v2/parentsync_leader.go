@@ -1199,6 +1199,11 @@ func (lem *LeaderElectionManager) electAtFirstLoad(zd *tdns.ZoneData) {
 	if !zd.Options[tdns.OptParentSync] && !zd.Options[tdns.OptMultiProvider] {
 		return
 	}
+	// The agent's own identity zone holds no election, whatever its
+	// options: it has no delegation sync (tdns-mp #391).
+	if sameName(zd.ZoneName, string(lem.localID)) {
+		return
+	}
 	zone := ZoneName(zd.ZoneName)
 	// A zone with an HSYNC3 RRset is checked by zoneChanged, from its first
 	// load's post-refresh, after the groups are recomputed (step 8), and

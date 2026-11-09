@@ -216,7 +216,8 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// sign, the engine publishes nothing: its answer is the CDS that the
 	// agent's copy of the zone carries, the one the signers serve (key
 	// lifecycle ownership design §4.1, Amendment 3). The zone it does write
-	// a CDS for is the agent's own identity zone (startIdentityParentSync).
+	// a CDS for is the agent's own identity zone, whose delegation the agent
+	// does not sync (tdns-mp #391).
 	tdns.StartEngine(&tdns.Globals.App, "DSEngine", func() error {
 		return hdb.DSEngine(ctx)
 	})
