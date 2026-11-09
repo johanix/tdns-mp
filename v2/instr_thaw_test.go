@@ -1037,7 +1037,7 @@ func TestCombinerWaitsIsAskedForEveryZoneWithoutAHandOver(t *testing.T) {
 	_, none := actingCombiner(t, "none.waits.example.")
 	none.Ready = true
 	none.Options[tdns.OptMultiProvider] = true
-	conf.InternalMp.MPZoneNames = []string{zero.ZoneName, serial.ZoneName, none.ZoneName}
+	conf.InternalMp.mpZones.setForTest(zero.ZoneName, serial.ZoneName, none.ZoneName)
 	withActing(t, nil)
 	if got := conf.zonesWaitingForHandover(); len(got) != 2 || slices.Contains(got, none.ZoneName) {
 		t.Errorf("waiting: %q, want the two zones with instructions", got)
