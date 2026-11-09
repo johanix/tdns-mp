@@ -185,6 +185,7 @@ func TestTheInventoryReadsTheKeysByTheHoldItConfirms(t *testing.T) {
 	clock, wire := &fakeClock{t: time.Now()}, newFakeWire("p2")
 	r := &driverRig{t: t, kdb: s.kdb, zd: s.mpzd, clock: clock, wire: wire, l: NewZoneKeyLifecycle(zone, s.kdb, clock, pol, wire)}
 	s.e.zones[zone] = r.l
+	s.e.madeOn[zone] = s.mpzd.ZoneData // filed under the ZoneData it runs (#396)
 	bootstrapKSK(t, r)
 	r.tick("the standby minted")
 	r.confirmAll("applied", r.onlyKey(KeyStateMpdist, "ZSK"))
@@ -225,6 +226,7 @@ func TestAnInventoryLeavesTheMachinesHoldAlone(t *testing.T) {
 	clock, wire := &fakeClock{t: time.Now()}, newFakeWire("p2")
 	r := &driverRig{t: t, kdb: s.kdb, zd: s.mpzd, clock: clock, wire: wire, l: NewZoneKeyLifecycle(zone, s.kdb, clock, pol, wire)}
 	s.e.zones[zone] = r.l
+	s.e.madeOn[zone] = s.mpzd.ZoneData // filed under the ZoneData it runs (#396)
 	bootstrapKSK(t, r)
 	clock.Advance(lifetime + time.Hour)
 	r.l.SetHold(true)
