@@ -259,7 +259,7 @@ func signerActingLine(zone string) string {
 func (conf *Config) reportSignerStart(ctx context.Context) {
 	reported := map[string]bool{}
 	report := func() {
-		for _, zone := range conf.InternalMp.MPZoneNames {
+		for _, zone := range conf.mpZoneNames() {
 			mpzd, ok := Zones.Get(zone)
 			if !ok || mpzd == nil || !mpzd.Ready {
 				continue

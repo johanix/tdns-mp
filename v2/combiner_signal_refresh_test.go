@@ -176,7 +176,7 @@ func newRefreshCombiner(t *testing.T, zones ...string) *refreshCombiner {
 			FirstZoneLoad: true,
 			Options:       map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true},
 		})
-		conf.InternalMp.MPZoneNames = append(conf.InternalMp.MPZoneNames, name)
+		conf.InternalMp.mpZones.includeForTest(name)
 	}
 	// What StartMPCombiner registers, and the engine it starts.
 	conf.RegisterCombinerOnFirstLoad()
@@ -417,7 +417,7 @@ func (c *refreshCombiner) restart(zones ...string) {
 	pendingSignalKeys.built = false
 	pendingSignalKeys.entries = nil
 	pendingSignalKeys.mu.Unlock()
-	c.conf.InternalMp.MPZoneNames = nil
+	c.conf.InternalMp.mpZones.setForTest()
 	c.conf.InternalMp.onFirstLoadRegistered = zoneOnce{}
 	c.conf.InternalMp.refreshRegistered = zoneOnce{}
 	for _, name := range zones {
@@ -428,7 +428,7 @@ func (c *refreshCombiner) restart(zones ...string) {
 			FirstZoneLoad: true,
 			Options:       map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true},
 		})
-		c.conf.InternalMp.MPZoneNames = append(c.conf.InternalMp.MPZoneNames, name)
+		c.conf.InternalMp.mpZones.includeForTest(name)
 	}
 	c.conf.RegisterCombinerOnFirstLoad()
 	c.conf.RegisterMPRefreshCallbacks()

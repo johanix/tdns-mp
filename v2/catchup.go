@@ -200,7 +200,7 @@ const (
 var catchUpRoomRetry = 5 * time.Second
 
 // newCatchUpTracker is the agent's tracker. startZones are the
-// multi-provider zones the agent starts with (MPZoneNames as initMPAgent
+// multi-provider zones the agent starts with (mpZoneNames as initMPAgent
 // finds it): the first load of any other zone asks with join.
 func newCatchUpTracker(self AgentId, startZones []string, outage time.Duration) *catchUpTracker {
 	t := &catchUpTracker{

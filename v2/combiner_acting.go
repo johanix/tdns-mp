@@ -460,7 +460,7 @@ func (conf *Config) reportCombinerStart(ctx context.Context, tm *MPTransportBrid
 // agent's hand-over (waitsForHandover).
 func (conf *Config) zonesWaitingForHandover() []string {
 	var out []string
-	for _, zone := range conf.InternalMp.MPZoneNames {
+	for _, zone := range conf.mpZoneNames() {
 		if mpzd, ok := Zones.Get(zone); ok && mpzd.Ready && mpzd.waitsForHandover() {
 			out = append(out, zone)
 		}

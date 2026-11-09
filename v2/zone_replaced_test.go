@@ -138,7 +138,7 @@ func TestZoneHooksRunOnceOnARecreatedZone(t *testing.T) {
 	old := signerTestZone(t, "readded.hooks.example.", kdb)
 	old.FirstZoneLoad = true
 	conf := &Config{Config: &tdns.Config{}}
-	conf.InternalMp.MPZoneNames = []string{old.ZoneName}
+	conf.InternalMp.mpZones.setForTest(old.ZoneName)
 	conf.ForEachMPZone(conf.firstLoadSetup) // MainInit
 	conf.RegisterMPRefreshCallbacks()       // the role's start
 	conf.installZoneHooks(conf.registerRefreshCallbacks, conf.firstLoadSetup)
@@ -206,7 +206,7 @@ func TestALateHookOfAReplacedZoneDataTakesNoMark(t *testing.T) {
 	kdb := newMPTestKeyDB(t)
 	old := signerTestZone(t, "late.hooks.example.", kdb)
 	conf := &Config{Config: &tdns.Config{}}
-	conf.InternalMp.MPZoneNames = []string{old.ZoneName}
+	conf.InternalMp.mpZones.setForTest(old.ZoneName)
 	stale := newMPZoneData(old.ZoneData) // the late lookup's wrapper
 	tdns.Zones.Remove(old.ZoneName)
 	live := signerTestZone(t, old.ZoneName, kdb)
@@ -263,7 +263,7 @@ func TestNothingKeepsTheRemovedZoneData(t *testing.T) {
 	conf := &Config{Config: &tdns.Config{}}
 	conf.SetMpConfig(&MultiProviderConf{Role: "signer", Agents: []*PeerConf{{Identity: "agent.us.example."}}, KeyLifecycleZones: []string{old.ZoneName}})
 	conf.Config.Internal.KeyDB = kdb
-	conf.InternalMp.MPZoneNames = []string{old.ZoneName}
+	conf.InternalMp.mpZones.setForTest(old.ZoneName)
 	conf.firstLoadSetup(old)
 	conf.RegisterMPRefreshCallbacks()
 	owner := NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })

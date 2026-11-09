@@ -90,7 +90,7 @@ func (c *consentCombiner) start(zones ...string) {
 			Options:   map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true},
 			KeyDB:     c.kdb,
 		})
-		conf.InternalMp.MPZoneNames = append(conf.InternalMp.MPZoneNames, name)
+		conf.InternalMp.mpZones.includeForTest(name)
 	}
 	conf.RegisterCombinerOnFirstLoad()
 }

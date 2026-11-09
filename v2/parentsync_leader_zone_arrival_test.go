@@ -450,7 +450,7 @@ func roleConf(t *testing.T, app tdns.AppType, role, identity string, zones ...*t
 	conf.InternalMp.MPTransport = &MPTransportBridge{agentRegistry: conf.InternalMp.AgentRegistry}
 	for _, zd := range zones {
 		zd.Options[tdns.OptMultiProvider] = true
-		conf.InternalMp.MPZoneNames = append(conf.InternalMp.MPZoneNames, zd.ZoneName)
+		conf.InternalMp.mpZones.includeForTest(zd.ZoneName)
 	}
 	conf.RegisterMPRefreshCallbacks()
 	return conf
