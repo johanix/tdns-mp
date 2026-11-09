@@ -178,9 +178,14 @@ func (mz *MPZones) Prune() {
 
 // getOrCreate returns the cached *MPZoneData of zd, or creates one
 // when nothing is cached under name or what is wraps another
-// ZoneData. zd is what tdns.Zones held a moment ago: a replacement
-// in between is seen by the next lookup. The hook runs outside the
-// lock, since it reads the zone and registers callbacks on it.
+// ZoneData. zd is what tdns.Zones held a moment ago, or what a
+// snapshot of it held (Items, IterBuffered): before anything is
+// cached, what tdns holds now is looked at again under the lock, so
+// that a ZoneData a reload has replaced since never displaces the
+// live zone's wrapper and the MP state it has gathered. A zone tdns
+// no longer holds gets a wrapper of zd that is not cached and runs no
+// hooks. The hook runs outside the lock, since it reads the zone and
+// registers callbacks on it.
 func (mz *MPZones) getOrCreate(name string, zd *tdns.ZoneData) *MPZoneData {
 	name = core.CanonicalizeName(name)
 	mz.mu.RLock()
@@ -191,15 +196,16 @@ func (mz *MPZones) getOrCreate(name string, zd *tdns.ZoneData) *MPZoneData {
 	mz.mu.RUnlock()
 
 	mz.mu.Lock()
-	if mpzd, ok := mz.cache[name]; ok && mpzd.ZoneData == zd {
+	live, ok := tdns.Zones.Get(name)
+	if !ok {
+		mz.mu.Unlock()
+		return newMPZoneData(zd)
+	}
+	if mpzd, ok := mz.cache[name]; ok && mpzd.ZoneData == live {
 		mz.mu.Unlock()
 		return mpzd
 	}
-	mpzd := &MPZoneData{
-		ZoneData:  zd,
-		MP:        &MPState{},
-		MPOptions: make(map[tdns.ZoneOption]bool),
-	}
+	mpzd := newMPZoneData(live)
 	mz.cache[name] = mpzd
 	onNew := mz.onNew
 	mz.mu.Unlock()
@@ -207,4 +213,13 @@ func (mz *MPZones) getOrCreate(name string, zd *tdns.ZoneData) *MPZoneData {
 		onNew(mpzd)
 	}
 	return mpzd
+}
+
+// newMPZoneData is a wrapper of zd with fresh MP state.
+func newMPZoneData(zd *tdns.ZoneData) *MPZoneData {
+	return &MPZoneData{
+		ZoneData:  zd,
+		MP:        &MPState{},
+		MPOptions: make(map[tdns.ZoneOption]bool),
+	}
 }

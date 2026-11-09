@@ -43,6 +43,11 @@ the zone starts over as it does at a start.
   callback that runs on a removed zone, from a refresh still in flight, is
   handed the old ZoneData, finds no wrapper, and does nothing. Before, it
   reached the wrapper of the zone added back.
+- Before caching a wrapper, `getOrCreate` checks under its lock which
+  ZoneData tdns holds now. `Items` and `IterBuffered` work from a snapshot
+  that can still hold a replaced ZoneData; wrapping that never displaces the
+  live zone's wrapper or the MP state on it. A zone tdns no longer holds gets
+  a wrapper that is not cached and runs no hooks.
 - `Prune` drops wrappers of zones tdns no longer holds. It runs after
   every reload.
 - The cache files a wrapper under the lowercased name, as tdns files its
@@ -155,6 +160,9 @@ rebuilds it from the store in the same way, so a replacement keeps it too:
   - the engine's driver.
 - `TestMPZonesOneWrapperPerZoneData`: names spelled in different cases
   share one wrapper.
+- `TestAStaleZoneDataDoesNotDisplaceTheLiveWrapper`: a lookup with the
+  replaced ZoneData returns the live wrapper and keeps its state. A zone tdns
+  no longer holds gets an uncached wrapper and runs no hooks.
 - `TestKeyLifecycleTakeAndDriverFollowTheZoneData`:
   - the take is released and made again on the new ZoneData;
   - a cached driver is made again;
