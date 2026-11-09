@@ -81,3 +81,6 @@ ZoneData. A restart keeps or rebuilds each of them the same way:
     on the word given about the removed ZoneData;
   - the next word reaches the live wrapper, and the zone starts on the live
     ZoneData.
+- `TestTheRoleBookPruneKeepsOnlyLiveZoneData`: the reload's prune drops the
+  entries of a removed zone and of a replaced ZoneData, and keeps the live
+  zone's entries.

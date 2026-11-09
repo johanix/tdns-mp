@@ -2,6 +2,7 @@ package tdnsmp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -156,5 +157,40 @@ func TestTheAgentsNoCopyWordIsAskedAgainForAZoneAddedBack(t *testing.T) {
 	r.roleTurn()
 	if len(on) != 2 || on[1] != live || r.mpzd.Withheld() {
 		t.Errorf("after the agent's word: %d starts, the last on the live ZoneData %v, withheld %v", len(on), len(on) == 2 && on[1] == live, r.mpzd.Withheld())
+	}
+}
+
+// The reload's prune lets go of what the role book says of a ZoneData tdns no
+// longer holds, and keeps what it says of the live one.
+func TestTheRoleBookPruneKeepsOnlyLiveZoneData(t *testing.T) {
+	kdb := newMPTestKeyDB(t)
+	gone := signerZoneWith(t, "gone.rolebook.signer.example.", kdb)
+	kept := signerZoneWith(t, "kept.rolebook.signer.example.", kdb)
+	replaced := signerZoneWith(t, "replaced.rolebook.signer.example.", kdb)
+	conf := &Config{Config: &tdns.Config{}}
+	b := &conf.InternalMp.signerRoles
+	b.provisional = map[string]*tdns.ZoneData{}
+	for _, mpzd := range []*MPZoneData{gone, kept, replaced} {
+		b.provisional[canonicalName(mpzd.ZoneName)] = mpzd.ZoneData
+		conf.roleFailure(mpzd, "a failure", errors.New("refused"))
+	}
+	tdns.Zones.Remove(gone.ZoneName)
+	addedBack(t, replaced.ZoneName, kdb)
+
+	b.prune()
+	if !conf.agentHasNoCopy(kept) {
+		t.Error("the live zone's no-copy word was dropped")
+	}
+	if _, ok := b.said[canonicalName(kept.ZoneName)]; !ok {
+		t.Error("the live zone's failure was dropped")
+	}
+	for _, mpzd := range []*MPZoneData{gone, replaced} {
+		key := canonicalName(mpzd.ZoneName)
+		if _, ok := b.provisional[key]; ok {
+			t.Errorf("%s: the no-copy word of a ZoneData tdns no longer holds is kept", mpzd.ZoneName)
+		}
+		if _, ok := b.said[key]; ok {
+			t.Errorf("%s: the failure of a ZoneData tdns no longer holds is kept", mpzd.ZoneName)
+		}
 	}
 }
