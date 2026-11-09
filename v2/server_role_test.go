@@ -178,6 +178,35 @@ func TestAServerRoleStepWaitsUntilTheProvidersServersServeTheUpstreamsCopy(t *te
 	}
 }
 
+// The floor is the serial the agent's copy came in at from its upstream, not
+// the agent's own: a first load that lifted the agent's serial past the
+// highest it published before (a zone added back, a restart) leaves the
+// upstream's copy, which the provider's nameservers serve, below it for good.
+// The status says the same floor; a nameserver that lags it still holds the
+// step.
+func TestALiftedCopyDoesNotStallTheServerRoleStep(t *testing.T) {
+	r := newServingRig(t, "lifted.serving.example.", srNewcomer)
+	mpzd, _ := Zones.Get(r.zone)
+	mpzd.Lock()
+	mpzd.IncomingSerial, mpzd.CurrentSerial = 40, 48
+	mpzd.Unlock()
+	step := serverRoleStep(srNewcomer)
+	want := "waiting for n.role.example.'s nameservers to serve the zone from its upstream at serial 40 or later"
+	now := time.Now()
+	if got := serverRoleStatus(r.conf, r.zone, heldStep{InstrStep: step, at: now}, now); got != want {
+		t.Errorf("the status: %q, want %q", got, want)
+	}
+	serving(t, soa(t, r.zone, 39, r.key, r.priv), nil)
+	if serverRoleHolds(r.conf, r.zone, step) {
+		t.Error("held while the nameservers serve 39, below the copy's 40")
+	}
+	r.conf.InternalMp.transfers.zones[canonicalName(r.zone)].at = time.Now().Add(-transferRecheck)
+	serving(t, soa(t, r.zone, 40, r.key, r.priv), nil)
+	if !serverRoleHolds(r.conf, r.zone, step) {
+		t.Error("not held at the upstream's serial, with the agent's own lifted to 48")
+	}
+}
+
 // The serving check reads the SOA of each nameserver: its serial at least
 // the zone's by RFC 1982, and each RRSIG over it by a key of the expected
 // signers, valid, verifying.
