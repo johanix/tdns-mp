@@ -26,11 +26,18 @@ type zoneOnce struct {
 	done map[string]*tdns.ZoneData
 }
 
-// first marks zd and reports whether it was not marked before.
+// first marks zd and reports whether it was not marked before. A ZoneData
+// that tdns no longer holds is refused: a lookup that built a wrapper and
+// runs its hooks late, after a reload replaced the zone, must not take the
+// mark from the live ZoneData, or the next reload registers the live one's
+// hooks a second time.
 func (o *zoneOnce) first(zd *tdns.ZoneData) bool {
 	key := canonicalName(zd.ZoneName)
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if live, ok := tdns.Zones.Get(key); !ok || live != zd {
+		return false
+	}
 	if o.done[key] == zd {
 		return false
 	}
