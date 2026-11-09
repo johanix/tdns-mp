@@ -196,6 +196,36 @@ func TestZoneHooksRunOnceOnARecreatedZone(t *testing.T) {
 	}
 }
 
+// A lookup builds a wrapper and runs its hooks late, after a reload has
+// replaced the zone and the new ZoneData has had its hooks. The late hook is
+// refused: it neither takes the live ZoneData's mark nor registers on the
+// removed one, and the next reload adds no second set of callbacks to the
+// live zone.
+func TestALateHookOfAReplacedZoneDataTakesNoMark(t *testing.T) {
+	noZoneHooks(t)
+	kdb := newMPTestKeyDB(t)
+	old := signerTestZone(t, "late.hooks.example.", kdb)
+	conf := &Config{Config: &tdns.Config{}}
+	conf.InternalMp.MPZoneNames = []string{old.ZoneName}
+	stale := newMPZoneData(old.ZoneData) // the late lookup's wrapper
+	tdns.Zones.Remove(old.ZoneName)
+	live := signerTestZone(t, old.ZoneName, kdb)
+	conf.RegisterMPRefreshCallbacks() // the reload that added it back
+	if n := len(live.OnZonePreRefresh); n != 1 {
+		t.Fatalf("refresh callbacks on the live zone after its reload: %d, want 1", n)
+	}
+
+	conf.registerRefreshCallbacks(stale) // the late hook
+	conf.firstLoadSetup(stale)
+	if n := len(old.OnZonePreRefresh); n != 0 {
+		t.Errorf("the late hook registered %d callbacks on the removed ZoneData", n)
+	}
+	conf.RegisterMPRefreshCallbacks() // the next reload
+	if n, m := len(live.OnZonePreRefresh), len(live.OnZonePostRefresh); n != 1 || m != 1 {
+		t.Errorf("refresh callbacks on the live zone after the next reload: %d pre, %d post; want one each", n, m)
+	}
+}
+
 // The first-load set-up runs once per ZoneData: the re-created zone gets its
 // resigner registration, as the zone did at the start, and only one.
 func TestFirstLoadSetupOncePerZoneData(t *testing.T) {
