@@ -64,7 +64,7 @@ func (tm *MPTransportBridge) IsPeerAuthorized(senderID string, zone string) (boo
 		}
 		lgAgent.Debug("sender not in HSYNC3", "sender", senderID, "zone", zone, "reason", reason)
 		if tm.keyHandOverAdmits(senderID, zone) {
-			return true, fmt.Sprintf("authorized for the hand-over of zone %s's SIG(0) key only", zone)
+			return true, fmt.Sprintf("authorized for zone %s's SIG(0) key, or a serial asked for, only", zone)
 		}
 	} else {
 		// No specific zone - check if sender is in HSYNC3 for ANY zone we share
@@ -178,12 +178,21 @@ func (tm *MPTransportBridge) isInHSYNCAnyZone(senderID string) (bool, string) {
 // nothing else through that came in that way. Membership for a provider
 // without a role, in general, is the owner-instruction transitions design's
 // (its switch); this is the key's hand-over alone.
+//
+// The fetch of a serial of the zone's instructions goes the same way. An agent
+// that lost its record, and whose copy gives it no role, asks a member for the
+// serial the members tell active (design 3.4). The answer was refused at the
+// asker, by that copy, so it never held the serial or knew the active one, and
+// the members waited for it. The answer to its own request is let in too, and
+// is checked against the digest asked for. With the active serial known,
+// admission reads that.
 
 // keyHandOverAdmits: a message about zone from senderID that isInHSYNC
 // refuses is let in for the zone's SIG(0) key alone. Either this agent is
 // still listed in the zone's HSYNC3 without a role, and the sender is a
 // voting member, who may ask for the key (mayHoldZoneSig0Key). Or this agent
-// has asked the sender for the zone's key, and the answer is due (keyAsks).
+// has asked the sender for the zone's key, or for a serial of its
+// instructions, and the answer is due (keyAsks).
 func (tm *MPTransportBridge) keyHandOverAdmits(senderID, zone string) bool {
 	z := ZoneName(dns.Fqdn(zone))
 	if tm.keyAsks.open(senderID, string(z)) {
@@ -226,9 +235,10 @@ func (tm *MPTransportBridge) keyHandOverGate(ctx *transport.MessageContext, next
 }
 
 // keyHandOverOnly: a message that came in for the zone's SIG(0) key alone
-// (admittedForKeyOnly) is the request for the key, its answer, or the
-// delivery confirmation of either. Anything else that came in that way is
-// not acted on.
+// (admittedForKeyOnly) is the request for the key, its answer, the answer to
+// a request for a serial of the zone's instructions, or the delivery
+// confirmation of a request or an answer. Anything else that came in that way
+// is not acted on.
 func (tm *MPTransportBridge) keyHandOverOnly(msg *transport.IncomingMessage) bool {
 	// The sender is the one admission judged: the transport's, never the
 	// author the payload names.
@@ -255,17 +265,18 @@ func (tm *MPTransportBridge) keyHandOverOnly(msg *transport.IncomingMessage) boo
 		}
 	case "config":
 		var p DnsConfigPayload
-		if err := json.Unmarshal(msg.Payload, &p); err == nil && p.Subtype == "sig0key" {
+		if err := json.Unmarshal(msg.Payload, &p); err == nil && (p.Subtype == "sig0key" || p.Subtype == "instructions") {
 			return true
 		}
 	}
-	lgAgent.Warn("a message let in for the zone's SIG(0) key alone is not about the key, refusing",
+	lgAgent.Warn("a message let in for the zone's SIG(0) key, or a serial asked for, is about neither, refusing",
 		"sender", sender, "zone", msg.Zone, "type", msg.Token())
 	return false
 }
 
-// keyAskTable is the requests for a zone's SIG(0) key this agent has out,
-// by peer and zone: an answer from that peer about that zone is due. And the
+// keyAskTable is the requests for a zone's SIG(0) key, or a serial of its
+// instructions, this agent has out, by peer and zone: an answer from that
+// peer about that zone is due. And the
 // distribution ids of the key exchange's own messages, by the peer they went
 // to, whose delivery confirmations are due (expectConfirm).
 type keyAskTable struct {

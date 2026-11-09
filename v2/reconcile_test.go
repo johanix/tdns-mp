@@ -1139,6 +1139,33 @@ func TestAMemberWithNoRecordFollowsTheLeadersReconciliation(t *testing.T) {
 	}
 }
 
+// A voting member with no record whose newest serial has another make-up
+// holds no group of the serial the leader reconciles to, so the leader's word
+// cannot be checked, and the leader has no time-out for it (tdns-mp #353).
+// It takes the serial from the voting members under it, reconciling, and
+// once placed by it hears the election and takes the step.
+func TestAVoterInAnotherGroupFollowsTheLeadersReconciliation(t *testing.T) {
+	r := newReconcileRig(t, "othergroup.reconcile.example.", roleB)
+	newest := voters3(t, 43, "y")
+	r.noRecord(r.n, newest)
+	st := r.leaderStep(1, rolesFor(r.n, r.n, 0), []string{lastStepKey})
+	st.Active, st.ActiveDigest, st.Newest, st.NewestDigest = r.n.Serial, r.n.Digest(), newest.Serial, newest.Digest()
+	st.Thaw = &Thaw{From: SerialDigest{Serial: 40, Digest: "x"}, To: sd(r.n)}
+	r.hear(roleB, st, true)
+	r.conf.thawTurn(r.zone)
+	if r.known() != 41 {
+		t.Fatalf("not known from the voting members: %s", r.conf.thawLine(r.zone))
+	}
+	if s := status(t, r.store, r.zone); s.Phase != PhaseReconciling {
+		t.Fatalf("known from one that reconciles, and at rest: %+v", s)
+	}
+	r.leadGroup(r.n, roleB)
+	r.conf.thawTurn(r.zone)
+	if got, ok := r.step(); !ok || got.Number != 1 {
+		t.Fatalf("the leader's step was not taken: %+v", got)
+	}
+}
+
 // A runner's own part of a step (S18a's serving check at the newcomer)
 // holds the step at this agent: its stamp tells the step held only once
 // that part is done too, and as the leader it waits for it.

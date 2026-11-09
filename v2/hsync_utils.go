@@ -569,6 +569,9 @@ func requestConfig(ar *AgentRegistry, agent *Agent, zone string, subtype string,
 	return requestConfigWith(ar, agent, zone, subtype, nil, msgQs)
 }
 
+// sendConfigRfi sends an RFI CONFIG to a peer agent; a seam for the tests.
+var sendConfigRfi = (*AgentRegistry).sendRfiToAgent
+
 // requestConfigWith is requestConfig with records that say what is asked
 // for (the instructions RFI's serial and digest, plan S7).
 func requestConfigWith(ar *AgentRegistry, agent *Agent, zone string, subtype string, records map[string][]string, msgQs *MsgQs) (*ConfigResponseMsg, error) {
@@ -585,17 +588,19 @@ func requestConfigWith(ar *AgentRegistry, agent *Agent, zone string, subtype str
 	defer cancel()
 	// The answer to a request for the zone's SIG(0) key is let in from a
 	// peer that has no role in the zone (keyHandOverAdmits): the leader of
-	// the group the zone left, whose role the owner may have taken.
+	// the group the zone left, whose role the owner may have taken. So is
+	// the answer to a request for a serial of its instructions: until this
+	// agent knows the active serial, its copy may give it no role itself.
 	// Its delivery confirmation is let in by its distribution id alone.
 	var distributionID string
-	if subtype == "sig0key" && ar.MPTransport != nil {
+	if (subtype == "sig0key" || subtype == "instructions") && ar.MPTransport != nil {
 		defer ar.MPTransport.keyAsks.start(string(agent.ID), zone)()
 		distributionID = transport.GenerateDistributionID()
 		ar.MPTransport.keyAsks.expectConfirm(string(agent.ID), distributionID)
 	}
 
 	// Send RFI CONFIG to the peer agent
-	_, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
+	_, err := sendConfigRfi(ar, agent, &AgentMsgPost{
 		MessageType:    AgentMsgRfi,
 		OriginatorID:   AgentId(ar.LocalAgent.Identity),
 		YourIdentity:   agent.ID,
