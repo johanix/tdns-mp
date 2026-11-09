@@ -206,7 +206,7 @@ func TestALateHookOfAReplacedZoneDataTakesNoMark(t *testing.T) {
 	kdb := newMPTestKeyDB(t)
 	old := signerTestZone(t, "late.hooks.example.", kdb)
 	conf := &Config{Config: &tdns.Config{}}
-	conf.InternalMp.MPZoneNames = []string{old.ZoneName}
+	conf.InternalMp.mpZones.setForTest(old.ZoneName)
 	stale := newMPZoneData(old.ZoneData) // the late lookup's wrapper
 	tdns.Zones.Remove(old.ZoneName)
 	live := signerTestZone(t, old.ZoneName, kdb)
