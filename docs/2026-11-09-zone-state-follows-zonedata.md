@@ -101,8 +101,10 @@ already be loading.
 - **Driver.** The engine records the ZoneData each cached driver was made
   on (`madeOn`). When the ZoneData no longer matches, it makes the driver
   again, restoring it from the keystore as at a start.
-- A take made before the zone was loaded holds for any ZoneData. Only
-  tests make such a take.
+- A take needs a loaded ZoneData: a zone that is not loaded is not taken.
+  The engine takes the zone on the ZoneData it found ready (`takeOn`), so a
+  zone replaced between its look and the take is not taken on the new one by
+  mistake. It is taken at the next call, after `ReleaseReplaced`.
 
 ## What tdns-mp keeps by name on purpose
 
@@ -156,4 +158,6 @@ rebuilds it from the store in the same way, so a replacement keeps it too:
 - `TestKeyLifecycleTakeAndDriverFollowTheZoneData`:
   - the take is released and made again on the new ZoneData;
   - a cached driver is made again;
+  - a take of a zone not loaded takes nothing, and does not hold for the
+    zone loaded later;
   - a zone removed and not added back is released and waits for its load.

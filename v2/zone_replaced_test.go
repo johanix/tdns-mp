@@ -313,6 +313,27 @@ func TestKeyLifecycleTakeAndDriverFollowTheZoneData(t *testing.T) {
 		}
 	})
 
+	// a take finds the zone gone (removed between the engine's look and the
+	// take): it takes nothing, and the zone added back later is not taken
+	// by it, but by the next take on its own ZoneData
+	t.Run("a take of a zone not loaded takes nothing", func(t *testing.T) {
+		const name = "unloaded.take.example."
+		kdb := newMPTestKeyDB(t)
+		owner := NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })
+		owner.Take(name)
+		owner.takeOn(name, nil)
+		owner.mu.RLock()
+		_, recorded := owner.owned[name]
+		owner.mu.RUnlock()
+		if recorded {
+			t.Fatal("a take of a zone not loaded was recorded")
+		}
+		later := signerTestZone(t, name, kdb)
+		if owner.taken(name) || owner.Owns(later.ZoneData) {
+			t.Error("the zone loaded later counts as taken by the take made before")
+		}
+	})
+
 	t.Run("a zone removed and not added back is released", func(t *testing.T) {
 		e, owner, old, _ := setup(t, "removed.take.example.")
 		tdns.Zones.Remove(old.ZoneName)

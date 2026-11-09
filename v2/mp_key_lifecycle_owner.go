@@ -24,8 +24,7 @@ type MPKeyLifecycleOwner struct {
 	// owned: the zones taken, each with the ZoneData it was taken on. A take
 	// holds for that ZoneData only: when tdns replaces it (a zone a reload
 	// removed and a later one added back), the zone is released and taken
-	// again on the new one, as at a start (tdns-mp #396). nil for a zone
-	// taken before it was loaded, which only a test does.
+	// again on the new one, as at a start (tdns-mp #396).
 	owned map[string]*tdns.ZoneData
 	keyDB func() *tdns.KeyDB
 	// inv is the agent's side: the signer's latest inventory per zone. A
@@ -115,18 +114,23 @@ func (o *MPKeyLifecycleOwner) Name() string { return "tdns-mp" }
 // ZoneData tdns holds for it now. This is the per-zone rollout of S3. A zone
 // taken stays owned: one this provider does not sign is owned and idle (plan
 // S11), not given back to tdns's machine. A zone whose ZoneData tdns
-// replaces is not that zone any more (heldOn), and is taken again.
+// replaces is not that zone any more, and is taken again. A zone not loaded
+// is not taken: there is nothing to take it on.
 func (o *MPKeyLifecycleOwner) Take(zone string) {
-	zone = lifecycleZoneName(zone)
-	zd, _ := tdns.Zones.Get(zone)
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	o.owned[zone] = zd
+	zd, _ := tdns.Zones.Get(lifecycleZoneName(zone))
+	o.takeOn(zone, zd)
 }
 
-// heldOn: a take made on rec still holds for zd. One made before the zone
-// was loaded holds for any.
-func heldOn(rec, zd *tdns.ZoneData) bool { return rec == nil || rec == zd }
+// takeOn takes zone on zd, the ZoneData its caller found ready; nothing for
+// a nil one.
+func (o *MPKeyLifecycleOwner) takeOn(zone string, zd *tdns.ZoneData) {
+	if zd == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.owned[lifecycleZoneName(zone)] = zd
+}
 
 // ReleaseReplaced lets go of the zones taken on a ZoneData that tdns no
 // longer holds: removed, or replaced under the same name. The engine runs
@@ -138,9 +142,6 @@ func (o *MPKeyLifecycleOwner) ReleaseReplaced() []string {
 	defer o.mu.Unlock()
 	var out []string
 	for zone, rec := range o.owned {
-		if rec == nil {
-			continue
-		}
 		if zd, ok := tdns.Zones.Get(zone); !ok || zd != rec {
 			delete(o.owned, zone)
 			out = append(out, zone)
@@ -156,7 +157,7 @@ func (o *MPKeyLifecycleOwner) Zones() []string {
 	defer o.mu.RUnlock()
 	var out []string
 	for z, rec := range o.owned {
-		if zd, ok := tdns.Zones.Get(z); ok && heldOn(rec, zd) {
+		if zd, ok := tdns.Zones.Get(z); ok && zd == rec {
 			out = append(out, z)
 		}
 	}
@@ -176,7 +177,7 @@ func (o *MPKeyLifecycleOwner) taken(zone string) bool {
 		return false
 	}
 	zd, loaded := tdns.Zones.Get(zone)
-	return loaded && heldOn(rec, zd)
+	return loaded && zd == rec
 }
 
 func (o *MPKeyLifecycleOwner) Owns(zd *tdns.ZoneData) bool {
@@ -222,7 +223,7 @@ func (o *MPKeyLifecycleOwner) runsKeys(zd *tdns.ZoneData) bool {
 	o.mu.RUnlock()
 	// taken on this ZoneData: tdns asks about the one it holds, or about a
 	// removed one a refresh still runs on, which keeps its answer
-	if (taken && heldOn(rec, zd)) || (snap != nil && snap.Owned) {
+	if (taken && rec == zd) || (snap != nil && snap.Owned) {
 		return true
 	}
 	if configured == nil || !namedZone(zone, configured()) {

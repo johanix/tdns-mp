@@ -650,7 +650,9 @@ func (e *KeyLifecycleEngine) TakeConfiguredZones() {
 		}
 		delete(e.waiting, zone)
 		delete(e.refused, zone)
-		e.owner.Take(zone)
+		// on the ZoneData found ready: one tdns replaced since is taken
+		// again at the next call, after ReleaseReplaced
+		e.owner.takeOn(zone, zd)
 		lgSigner.Info("key lifecycle: zone taken by tdns-mp's state machine", "zone", zone)
 	}
 }
