@@ -575,12 +575,14 @@ func notSyncedWarnings(t *testing.T, logs fmt.Stringer, zone string) int {
 	return n
 }
 
-// tdns-mp #73: only the identity zone the daemon builds becomes a parentsync
-// child. One listed in the config does not, and with a parentsync: block
-// configured that used to pass in silence: no CDS, no DS at the parent, and a
-// TLSA no validating peer trusts. Now the set-up says so, once, in the log
-// only, under the condition that makes a daemon-built zone a parentsync
-// child, and under no other. The daemon starts all the same.
+// tdns-mp #73: the identity zone the daemon builds becomes a parentsync
+// child. One listed in the config without the parentsync option does not,
+// and with a parentsync: block configured that used to pass in silence: no
+// CDS, no DS at the parent, and a TLSA no validating peer trusts. Now the
+// set-up says so, once, in the log only, under the condition that makes a
+// daemon-built zone a parentsync child, and under no other. The daemon
+// starts all the same. One listed with the option keeps it and is synced as
+// any other zone with it (Johan, 2026-11-09): no warning, no drop.
 func TestAConfigListedIdentityZoneIsWarnedAbout(t *testing.T) {
 	off := false
 	for _, tc := range []struct {
@@ -588,17 +590,20 @@ func TestAConfigListedIdentityZoneIsWarnedAbout(t *testing.T) {
 		zone    string
 		schemes []string
 		imr     *bool
+		option  bool // the config gives the zone the parentsync option
 		want    bool
 	}{
-		{"parentsync configured", "agent.listed-sync.example.", []string{"notify", "update"}, nil, true},
-		{"no parentsync", "agent.listed-plain.example.", nil, nil, false},
+		{"parentsync configured", "agent.listed-sync.example.", []string{"notify", "update"}, nil, false, true},
+		{"no parentsync", "agent.listed-plain.example.", nil, nil, false, false},
 		// A daemon-built zone would not be synced here either.
-		{"parentsync without the resolver", "agent.listed-noimr.example.", []string{"notify", "update"}, &off, false},
+		{"parentsync without the resolver", "agent.listed-noimr.example.", []string{"notify", "update"}, &off, false, false},
+		{"parentsync configured, the zone has the option", "agent.listed-option.example.", []string{"notify", "update"}, nil, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			conf, zd := configListedIdentityZone(t, tc.zone)
 			conf.Config.ParentSync.Schemes = tc.schemes
 			conf.Config.Imr.Active = tc.imr
+			zd.Options[tdns.OptParentSync] = tc.option
 			logs := captureAgentLog(t)
 
 			if err := conf.SetupAgent(context.Background(), []string{tc.zone}); err != nil {
@@ -635,13 +640,14 @@ func TestAConfigListedIdentityZoneIsWarnedAbout(t *testing.T) {
 			}
 
 			// A warning and nothing else: the zone is still served, it has not
-			// been made a parentsync child behind the operator's back, and its
-			// first-load callbacks are in place as before.
+			// been made a parentsync child behind the operator's back, nor
+			// lost the option its config gave it, and its first-load
+			// callbacks are in place as before.
 			if zd.HasServiceImpactingError() {
 				t.Errorf("the zone is taken out of service: %v", zd.ErrorList())
 			}
-			if zd.Options[tdns.OptParentSync] {
-				t.Error("the config-listed zone was given the parentsync option")
+			if got := zd.Options[tdns.OptParentSync]; got != tc.option {
+				t.Errorf("the config-listed zone's parentsync option is %v after the set-up, want %v as its config gave it", got, tc.option)
 			}
 			if zdp, ok := Zones.Get(tc.zone); !ok || len(zdp.OnFirstLoad) == 0 {
 				t.Error("no first-load callback registered on the config-listed identity zone")

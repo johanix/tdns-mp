@@ -496,9 +496,10 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 		if !ok {
 			return fmt.Errorf("SetupAgent: config zone %q not found in Zones", identityZone)
 		}
-		// Only the zone this daemon builds becomes a parentsync child
-		// (SetupAgentAutoZone). One from the config does not, and an operator
-		// who configured parentsync: is told so here, once, at the start.
+		// The zone this daemon builds becomes a parentsync child
+		// (SetupAgentAutoZone). One from the config is one only if its config
+		// gives it the option, which it keeps; without it, an operator who
+		// configured parentsync: is told so here, once, at the start.
 		conf.warnConfigIdentityZoneNotSynced(zdp.ZoneData)
 		if wantApi {
 			zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *tdns.ZoneData) {
@@ -720,10 +721,12 @@ const configIdentityZoneNotSynced = "identity zone is listed in the config, so p
 
 // warnConfigIdentityZoneNotSynced warns that a config-listed identity zone is
 // not a parentsync child, when one the daemon builds would have been
-// (identityZoneParentSync). The daemon-built zone is the only supported path
-// for the identity zone's parent sync (tdns-mp #73): the config-listed zone
-// gets none of it, and until now nothing said so. The daemon keeps running;
-// the zone still serves its transport records.
+// (identityZoneParentSync). The daemon builds its zone a parentsync child
+// (tdns-mp #73); a config-listed zone is one only if its config gives it the
+// parentsync option, and then it is synced as any other zone with the option
+// and keeps it (Johan, 2026-11-09): there is nothing to warn about. Without
+// the option it gets none of it, and until #73 nothing said so. The daemon
+// keeps running; the zone still serves its transport records.
 //
 // The warning goes to the log only, once, at the start. It is not put on the
 // zone as a ConfigWarning: tdns refuses a manual serial bump for a zone with
@@ -731,7 +734,7 @@ const configIdentityZoneNotSynced = "identity zone is listed in the config, so p
 // next parse of the configuration, so the entry would change what the
 // operator can do with the zone and then vanish at a reload.
 func (conf *Config) warnConfigIdentityZoneNotSynced(zd *tdns.ZoneData) {
-	if !conf.identityZoneParentSync() {
+	if !conf.identityZoneParentSync() || zd.Options[tdns.OptParentSync] {
 		return
 	}
 	lgAgent.Warn(configIdentityZoneNotSynced, "zone", zd.ZoneName)
