@@ -46,13 +46,44 @@ var (
 )
 
 // signerRoleBook is the signer's turns of its zones' roles: the zones asked, the
-// failures logged, and the zones whose agent has no copy.
+// failures logged, and the zones whose agent has no copy. What it says of a zone
+// it says of the ZoneData it was said on: a zone a reload removed and a later one
+// added back is a new ZoneData, which starts as at a start (tdns-mp #396). Its
+// agent's word that it has no copy comes again with the next inventory that says
+// the new one withheld, and acts on it.
 type signerRoleBook struct {
 	mu          sync.Mutex
 	pending     map[string]bool
 	wake        chan struct{}
-	said        map[string]string // by zone, folded: the failure last logged
-	provisional map[string]bool   // by zone, folded: its agent has no copy
+	said        map[string]roleSaid       // by zone, folded: the failure last logged
+	provisional map[string]*tdns.ZoneData // by zone, folded: its agent has no copy
+}
+
+// roleSaid is a failure logged, and the ZoneData it was logged for.
+type roleSaid struct {
+	zd  *tdns.ZoneData
+	err string
+}
+
+// prune forgets what the book says of ZoneData that tdns no longer holds, so
+// that it keeps no removed zone alive. Run after every zone reload.
+func (b *signerRoleBook) prune() {
+	live := func(key string, zd *tdns.ZoneData) bool {
+		cur, ok := tdns.Zones.Get(key)
+		return ok && cur == zd
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for key, zd := range b.provisional {
+		if !live(key, zd) {
+			delete(b.provisional, key)
+		}
+	}
+	for key, said := range b.said {
+		if !live(key, said.zd) {
+			delete(b.said, key)
+		}
+	}
 }
 
 // wakeLocked is the book's wake channel, made on first use.
@@ -121,7 +152,7 @@ func (conf *Config) signerRoleTurn(ctx context.Context, zone string) {
 	var r Roles
 	if handed, ok := actingHeld.Load().roles(zone); ok {
 		r = handed
-	} else if conf.agentHasNoCopy(zone) {
+	} else if conf.agentHasNoCopy(mpzd) {
 		_, r = signerSets(mpzd, mp)
 	} else {
 		return
@@ -150,7 +181,7 @@ func (conf *Config) signerRoleTurn(ctx context.Context, zone string) {
 		}
 		switch err := startSigning(ctx, mpzd.ZoneData); {
 		case err == nil:
-			conf.noRoleFailure(zone)
+			conf.noRoleFailure(mpzd)
 			lgSigner.Info("the zone serves its own signatures now", "zone", zone)
 			conf.handedOtherwiseMeanwhile(mpzd, mp)
 			conf.tookRole(zone)
@@ -158,7 +189,7 @@ func (conf *Config) signerRoleTurn(ctx context.Context, zone string) {
 		case errors.Is(err, tdns.ErrKeyGenerationDeferred), errors.Is(err, tdns.ErrSigningHeld):
 			lgSigner.Debug("the zone does not start signing yet; tried again", "zone", zone, "why", err)
 		default:
-			conf.roleFailure(zone, "the zone could not start signing; tried again", err)
+			conf.roleFailure(mpzd, "the zone could not start signing; tried again", err)
 		}
 		return
 	}
@@ -201,10 +232,10 @@ func firstKeysThere(mpzd *MPZoneData) bool {
 func (conf *Config) bindForKeys(mpzd *MPZoneData) {
 	zone := mpzd.ZoneName
 	if err := bindWithoutSigning(mpzd.ZoneData); err != nil {
-		conf.roleFailure(zone, "the zone's DNSSEC policy could not be bound, so its key machine does not run; tried again", err)
+		conf.roleFailure(mpzd, "the zone's DNSSEC policy could not be bound, so its key machine does not run; tried again", err)
 		return
 	}
-	conf.noRoleFailure(zone)
+	conf.noRoleFailure(mpzd)
 	conf.tookRole(zone)
 }
 
@@ -217,34 +248,36 @@ func (conf *Config) tookRole(zone string) {
 }
 
 // roleFailure logs a failure of the zone's role once, until another comes or it
-// goes: the turn tries again on every tick.
-func (conf *Config) roleFailure(zone, what string, err error) {
+// goes: the turn tries again on every tick. A zone added back logs its first.
+func (conf *Config) roleFailure(mpzd *MPZoneData, what string, err error) {
 	b := &conf.InternalMp.signerRoles
-	key := canonicalName(zone)
+	key := canonicalName(mpzd.ZoneName)
+	said := roleSaid{zd: mpzd.ZoneData, err: err.Error()}
 	b.mu.Lock()
 	if b.said == nil {
-		b.said = map[string]string{}
+		b.said = map[string]roleSaid{}
 	}
-	repeat := b.said[key] == err.Error()
-	b.said[key] = err.Error()
+	repeat := b.said[key] == said
+	b.said[key] = said
 	b.mu.Unlock()
 	if !repeat {
-		lgSigner.Error(what, "zone", zone, "err", err)
+		lgSigner.Error(what, "zone", mpzd.ZoneName, "err", err)
 	}
 }
 
-func (conf *Config) noRoleFailure(zone string) {
+func (conf *Config) noRoleFailure(mpzd *MPZoneData) {
 	b := &conf.InternalMp.signerRoles
 	b.mu.Lock()
-	delete(b.said, canonicalName(zone))
+	delete(b.said, canonicalName(mpzd.ZoneName))
 	b.mu.Unlock()
 }
 
-func (conf *Config) agentHasNoCopy(zone string) bool {
+// agentHasNoCopy: the agent has said it has no copy of this ZoneData.
+func (conf *Config) agentHasNoCopy(mpzd *MPZoneData) bool {
 	b := &conf.InternalMp.signerRoles
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.provisional[canonicalName(zone)]
+	return b.provisional[canonicalName(mpzd.ZoneName)] == mpzd.ZoneData
 }
 
 // signerAgentHasNoCopy is the agent's word that it has no copy of the zone this
@@ -258,16 +291,16 @@ func (conf *Config) signerAgentHasNoCopy(mpzd *MPZoneData) {
 	zone := mpzd.ZoneName
 	// before its first publish there is no copy to act by yet: its next report
 	// brings the word again
-	if _, handed := actingHeld.Load().get(zone); handed || !mpzd.Withheld() || !mpzd.HasPublishedData() || conf.agentHasNoCopy(zone) {
+	if _, handed := actingHeld.Load().get(zone); handed || !mpzd.Withheld() || !mpzd.HasPublishedData() || conf.agentHasNoCopy(mpzd) {
 		return
 	}
 	lgSigner.Info("its agent has no copy of the zone, which it takes from this signer: acting by this signer's own copy until it hands something", "zone", zone)
 	b := &conf.InternalMp.signerRoles
 	b.mu.Lock()
 	if b.provisional == nil {
-		b.provisional = map[string]bool{}
+		b.provisional = map[string]*tdns.ZoneData{}
 	}
-	b.provisional[canonicalName(zone)] = true
+	b.provisional[canonicalName(zone)] = mpzd.ZoneData
 	b.mu.Unlock()
 	mpzd.actBySets(conf, mpzd.roles(), conf.signerConfirmers(zone))
 	conf.askSignerRole(zone)
