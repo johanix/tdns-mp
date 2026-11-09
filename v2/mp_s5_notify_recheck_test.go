@@ -577,6 +577,7 @@ func TestAnUpdateIsDoneWhenTheParentHasAnswered(t *testing.T) {
 		Keyname: z, Algorithm: dns.ED25519, State: tdns.Sig0StateActive, Creator: "test"}); err != nil {
 		t.Fatalf("the zone's SIG(0) key: %v", err)
 	}
+	trustActiveKeys(t, r.mpzd.KeyDB, z)
 	// the parent takes the UPDATE and goes on listing the old nameserver:
 	// if anything looked again, it would send again
 	r.parent.holdsNS("ns1."+z, r.oldNS)
@@ -1119,7 +1120,7 @@ func TestTheAgentAnnouncesItsConfiguredPropagationDelay(t *testing.T) {
 			t.Errorf("%s with propagation-delay %q: its own value is %s, want %s", c.role, c.setting, got, c.want)
 		}
 		// and it is in the agent's own row of a group, in whole seconds
-		gst.UpdateLocalState("0123456789abcdef", nil, nil, 30)
+		gst.UpdateLocalState("0123456789abcdef", nil, 30)
 		gst.mu.RLock()
 		got := gst.States["0123456789abcdef"][gst.LocalID].PropagationDelay
 		gst.mu.RUnlock()

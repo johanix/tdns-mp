@@ -121,42 +121,23 @@ func (h *ActingHandover) olderThan(held *ActingHandover) bool {
 	return h.Made.Before(held.Made)
 }
 
-// signingProviders are the zone's signing set as a set of providers: those
-// signers= names, then those leaving it (#275), each with the identity of
-// its ON record ("" for none).
-func (mpzd *MPZoneData) signingProviders() []Provider {
-	set := mpzd.signingSet()
-	out := []Provider{}
-	for _, label := range mpzd.signingLabels() {
-		out = append(out, Provider{Label: label, Identity: set[label]})
-	}
-	return out
-}
-
-// actingSets are the sets a hand-over carries for the zone as mpzd reads
-// it: its roles, with the key, DS and signing sets its signing set (#275).
-func (mpzd *MPZoneData) actingSets() Roles {
-	r := mpzd.roles()
-	signing := mpzd.signingProviders()
-	r.KeySigners, r.DSSigners, r.Signing = signing, slices.Clone(signing), slices.Clone(signing)
-	return r
-}
-
 // wantedHandover is what this agent wants its combiner to act by for the
 // zone: the instructions it acts by (its active ones, S3's rule), the
-// store's newest serial, phase and step, and the step's sets, with the hold
-// while the zone is frozen (S6, folded in by S11). Until S13 the
-// sets of whose DNSKEYs and DS are published, and of who signs, are the
-// zone's signing set, signers= with the providers leaving it (#275): so the
-// other providers' combiners keep a leaving signer's DNSKEYs and CDS while
-// it signs on, until the owner removes its HSYNC3 record. Nil for a zone
+// store's newest serial, phase and step, and the step's sets per purpose
+// (plan S13), with the hold while the zone is frozen (S6, folded in by S11):
+// a leaving provider stays in each set until its step for that set, so the
+// other providers' combiners keep its DNSKEYs and CDS, and its own signer
+// signs on, until then (design 5.2). Nil for a zone
 // that is not loaded here or not multi-provider, and for one whose active
 // serial this agent does not know (S9); one with no records for a zone
-// whose instructions are gone (the end of multi-provider service).
+// whose instructions are gone (the end of multi-provider service). Nil too
+// while a transition may be under way and this agent holds no step's sets:
+// its parts get nothing new until the leader's stamp gives it the step
+// (design 3.3, plan S12).
 func (conf *Config) wantedHandover(zone string) *ActingHandover {
 	zone = dns.Fqdn(zone)
 	mpzd, ok := Zones.Get(zone)
-	if !ok || mpzd == nil || !mpzd.Options[tdns.OptMultiProvider] || !mpzd.Ready {
+	if !ok || mpzd == nil || !mpzd.Options[tdns.OptMultiProvider] || !mpzd.Ready || conf.InternalMp.Instructions.pending(zone) {
 		return nil
 	}
 	if conf.InternalMp.Instructions.activeUnknown(zone) {
@@ -168,7 +149,7 @@ func (conf *Config) wantedHandover(zone string) *ActingHandover {
 		return h
 	}
 	h.Serial, h.Digest, h.Records, h.Newest = in.Serial, in.Digest(), in.instructionRecords(zone), in.Serial
-	h.Sets = mpzd.actingSets()
+	h.Sets = mpzd.roles()
 	h.Sets.Hold = len(conf.zoneFrozen(zone)) > 0
 	if st := conf.InternalMp.Instructions.Status(zone); st != nil {
 		h.Phase = st.Phase
@@ -202,6 +183,9 @@ type handoverTracker struct {
 	enqueue  func(zone ZoneName, update *ZoneUpdate, distID string) (string, error)
 	self     AgentId
 	toSigner bool
+	// onHeld is told a zone whose part has come to hold what this agent
+	// wants it to act by: its step may be held now (plan S12). Nil: none.
+	onHeld func(zone string)
 }
 
 // resendAfter is how long a hand-over may be in flight before the ticker
@@ -429,6 +413,7 @@ func (t *handoverTracker) confirmation(distID string, status transport.ConfirmSt
 		lgEngine.Info("the combiner acts by the serial handed", "zone", zone, "handover", h.String(), "waiting", waiting)
 		t.drain(zone)
 		t.send(send)
+		t.told(zone)
 		return true, nil
 	}
 	s := t.sent[distID]
@@ -541,7 +526,8 @@ func (t *handoverTracker) learned(zone string, held *ActingHandover) {
 		held = z.want
 	}
 	z.held = held
-	if z.want != nil && z.want.sameAs(held) {
+	holds := z.want != nil && z.want.sameAs(held)
+	if holds {
 		z.heldAt = time.Now()
 	}
 	// the signer confirms nothing: a forget is told until an inventory
@@ -553,6 +539,16 @@ func (t *handoverTracker) learned(zone string, held *ActingHandover) {
 	t.mu.Unlock()
 	t.drain(zone)
 	t.send(send)
+	if holds {
+		t.told(zone)
+	}
+}
+
+// told tells onHeld that the part holds what is wanted for the zone.
+func (t *handoverTracker) told(zone string) {
+	if t.onHeld != nil {
+		t.onHeld(zone)
+	}
 }
 
 // combinerStarted: the combiner reports a start. What it held before is
@@ -749,7 +745,9 @@ func (conf *Config) handOverToParts(zone string) {
 	}
 	h := conf.wantedHandover(zone)
 	t.handOver(h)
-	if h == nil && conf.InternalMp.Instructions.activeUnknown(zone) {
+	// frozen and handed nothing new: the active serial is not known (S9),
+	// or no step's sets are held yet (S12)
+	if s := conf.InternalMp.Instructions; h == nil && (s.activeUnknown(zone) || s.pending(zone)) {
 		ts.holdLast(zone)
 		return
 	}
@@ -768,12 +766,13 @@ func (conf *Config) startHandovers(ctx context.Context, tm *MPTransportBridge) {
 	var trackers []*handoverTracker
 	if conf.namesCombiner() {
 		t := newHandoverTracker(AgentId(mp.Identity), tm.enqueueToCombiner)
+		t.onHeld = conf.askThaw
 		conf.InternalMp.Handover, tm.handover = t, t
 		trackers = append(trackers, t)
 	}
 	if tm.signerID != "" {
 		t := newHandoverTracker(AgentId(mp.Identity), tm.sendActingToSigner)
-		t.toSigner = true
+		t.toSigner, t.onHeld = true, conf.askThaw
 		conf.InternalMp.SignerHandover = t
 		trackers = append(trackers, t)
 	}

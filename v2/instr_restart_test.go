@@ -157,6 +157,11 @@ func TestALeaderWithNoRecordTakesWhatEveryVotingMemberWithARecordTells(t *testin
 	if line := r.conf.thawLine(r.zone); !strings.Contains(line, roleN+" (not heard)") {
 		t.Errorf("the status does not name the member not heard: %q", line)
 	}
+	// heard, but telling nothing of the zone (plan S22)
+	r.operational(roleN)
+	if line := r.conf.thawLine(r.zone); !strings.Contains(line, roleN+" (tells nothing of the zone)") {
+		t.Errorf("the status of a member heard that tells nothing of the zone: %q", line)
+	}
 	r.hear(roleN, tells(n, n), true)
 	r.conf.thawTurn(r.zone)
 	if r.known() != 41 {
@@ -636,7 +641,7 @@ func TestACatchUpAnswerIsKeptWhileTheActiveSerialIsUnknown(t *testing.T) {
 		t.Fatalf("the request: %+v, want its answer arrived and not handled", e)
 	}
 	r.cmds()
-	r.conf.know(r.zone, sd(r.n), nil, roleB, knownFromLeader)
+	r.conf.know(r.zone, sd(r.n), nil, false, roleB, knownFromLeader)
 	if got := r.cmds(); !slices.Contains(got, "instr-activated") {
 		t.Fatalf("knowing the serial asked the data engine for %v, want instr-activated", got)
 	}

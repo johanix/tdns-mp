@@ -56,6 +56,9 @@ type SynchedDataUpdate struct {
 	// It passes a freeze (plan S6): a rollover under way, or an emergency
 	// one, as the signer starts no other.
 	Inventory bool
+	// Step: a step of the reconciliation sends this update, as its own
+	// distribution (plan S12). It passes a freeze.
+	Step bool
 	// replay: an owed change the release hands the engine again (plan S6);
 	// owed: this agent's owed changes, which a delete is checked against
 	// with the data (EvaluateUpdate).
@@ -74,10 +77,15 @@ type SynchedDataUpdate struct {
 
 // dropStaleOperations takes the operations the repo found stale out of the
 // update, so that they go no further: not to the key states, and not to the
-// combiner, which would put an older set back in the zone it publishes.
+// combiner, which would put an older set back in the zone it publishes. A
+// KEY's publish instruction goes with its KEY (#206, S14): it names the
+// same older KEY.
 func (u *SynchedDataUpdate) dropStaleOperations() {
 	if u.Update != nil && len(u.staleTypes) > 0 {
 		u.Update.Operations = u.freshOperations()
+		if u.staleTypes[dns.TypeKEY] {
+			u.Update.Publish = nil
+		}
 	}
 }
 

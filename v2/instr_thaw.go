@@ -10,8 +10,8 @@
  * parent. Its stamp then tells the thaw, and every other member makes V
  * active on the first first-hand telling of it from the leader or from a
  * voting member under V. A leaving voting member whose telling has not
- * counted for multi-provider.transitions.leaving-timeout is excused. Until
- * S12 a transition is done at the thaw.
+ * counted for multi-provider.transitions.leaving-timeout is excused. The
+ * reconciliation that follows, until "done", is reconcile.go's (S12).
  */
 package tdnsmp
 
@@ -114,7 +114,7 @@ func (s *InstructionStore) thawInputs(zone string) (thawInputs, bool) {
 		return thawInputs{}, false
 	}
 	in := thawInputs{name: name, active: *z.Active, ownerError: z.OwnerError,
-		reconciling: z.From != nil || len(z.Removals) > 0, enforced: z.Enforced}
+		reconciling: z.reconciling(), enforced: z.Enforced}
 	if a := z.agreeing(); a != nil {
 		c := *a
 		in.agreed = &c
@@ -201,8 +201,14 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 	}
 
 	// No voting member under N: each voting member under V makes V active
-	// when every voting member under V tells V (design 3.2).
+	// when every voting member under V tells V (design 3.2). With none under
+	// V either, nobody is there to tell V or to wait for: every agent makes V
+	// active at once (the project owner, 2026-11-06).
 	if len(votersN) == 0 {
+		if len(votersV) == 0 {
+			v.leads = true
+			return v, true
+		}
 		v.leads = isAmong(votersV, AgentId(local))
 		if !v.leads {
 			return v, true
@@ -216,6 +222,8 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 			}
 			st, ok := told[canonicalName(id)]
 			switch {
+			case !ok && heard[canonicalName(id)]:
+				v.waits = append(v.waits, id+" (tells nothing of the zone)")
 			case !ok || now.Sub(st.heard) > timeout:
 				v.waits = append(v.waits, id+" (not heard)")
 			case st.Error != "":
@@ -262,7 +270,7 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 		}
 		m := member{id: id}
 		m.st, m.heard = told[canonicalName(id)]
-		m.tells = tellsAgreement(m.st, m.heard, now, timeout, v.from, v.to)
+		m.tells = tellsAgreement(m.st, m.heard, heard[canonicalName(id)], now, timeout, v.from, v.to)
 		m.rolling = m.tells == "" && m.st.Rollover
 		key := canonicalName(id)
 		if m.tells == "" && !m.rolling {
@@ -334,12 +342,16 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 		}
 	}
 	// A voting member under V that does not vote under N tells nothing the
-	// thaw waits for but its payload encryption (rule 4).
+	// thaw waits for but its payload encryption (rule 4), which its stamp
+	// row tells whether it tells the zone or not (plan S22).
 	for _, id := range votersV {
 		if core.EqualNames(id, local) || isAmong(votersN, AgentId(id)) {
 			continue
 		}
-		if st, ok := told[canonicalName(id)]; !ok || !st.encrypted {
+		switch m := t.heard(id); {
+		case m == nil:
+			v.waits = append(v.waits, id+" (not heard)")
+		case !m.encrypted():
 			v.waits = append(v.waits, id+" (payload encryption off)")
 		}
 	}
@@ -347,19 +359,34 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 		v.parent = conf.parentWorkUnderWay(in.name)
 	} else if lem != nil {
 		if _, ok := lem.ZoneLeader(ZoneName(in.name)); !ok {
-			v.noLeader = lostLeader(leases, votersV, heard, told)
+			v.noLeader = lostLeader(leases, votersV, heard, t)
 		}
 	}
 	return v, true
+}
+
+// unheard is why a member with no stamp of a zone tells nothing of it: one
+// that is heard, OPERATIONAL, tells nothing of the zone, as at rest it lists
+// none (plan S22); one that is not is not heard.
+func (conf *Config) unheard(id string) string {
+	if ar := conf.InternalMp.AgentRegistry; ar != nil && ar.isAgentOperational(AgentId(id)) {
+		return "tells nothing of the zone"
+	}
+	return "not heard"
 }
 
 // tellsAgreement is why a member's latest first-hand stamp st does not
 // tell what the thaw needs: active from and agreeing on to, by serial and
 // digest, its active serial known, no owner error, its signer's hold, heard
 // within timeout (rule 4). "" when it does. Its rollover is read apart.
-func tellsAgreement(st toldStamp, heard bool, now time.Time, timeout time.Duration, from, to SerialDigest) string {
+// told: a stamp of the zone has been heard from it; operational: it is
+// heard at all. A member that is, but tells nothing of the zone, has
+// nothing going on in it (plan S22) until it hears the others' stamps.
+func tellsAgreement(st toldStamp, told, operational bool, now time.Time, timeout time.Duration, from, to SerialDigest) string {
 	switch {
-	case !heard:
+	case !told && operational:
+		return "tells nothing of the zone"
+	case !told:
 		return "not heard"
 	case now.Sub(st.heard) > timeout:
 		return "not heard since " + st.heard.Format(time.TimeOnly)
@@ -420,7 +447,7 @@ func (t *stampTable) waitsOnOf(zone string) []string {
 // and not leaving, with when it was last heard: the group stays without a
 // leader until it is heard again or the owner removes it (design 3.2,
 // membership 4.3). "" otherwise.
-func lostLeader(leases map[string]time.Time, votersV []string, heard map[string]bool, told map[string]toldStamp) string {
+func lostLeader(leases map[string]time.Time, votersV []string, heard map[string]bool, t *stampTable) string {
 	var last string
 	var at time.Time
 	for id, expiry := range leases {
@@ -431,9 +458,10 @@ func lostLeader(leases map[string]time.Time, votersV []string, heard map[string]
 	if last == "" || heard[last] || !isAmong(votersV, AgentId(last)) {
 		return ""
 	}
+	// its last beat, whether it told the zone or not (plan S22)
 	since := "never"
-	if st, ok := told[last]; ok {
-		since = st.heard.Format(time.TimeOnly)
+	if m := t.heard(last); m != nil {
+		since = m.Heard.Format(time.TimeOnly)
 	}
 	return dns.Fqdn(last) + " not heard since " + since
 }
@@ -533,7 +561,8 @@ func (conf *Config) runThaws(ctx context.Context) {
 }
 
 // thawTurn is the zone's turn: with no active serial known here, the
-// restart rule's (knowActive, S9); otherwise the leader thaws it when it is
+// restart rule's (knowActive, S9); otherwise a transition under way goes on
+// (the reconciliation's turn, plan S12), the leader thaws it when it is
 // ready, and cancels its parent work when that is all the thaw waits for
 // (design 3.2: at the thaw's turn); every agent makes active a serial a
 // member tells first hand (activateOnTellings), and fetches a serial agreed
@@ -542,19 +571,11 @@ func (conf *Config) thawTurn(zone string) {
 	b := &conf.InternalMp.thaws
 	b.turn.Lock()
 	defer b.turn.Unlock()
-	s := conf.InternalMp.Instructions
-	if s.activeUnknown(zone) {
+	if conf.InternalMp.Instructions.activeUnknown(zone) {
 		conf.knowActive(zone)
 		return
 	}
-	// Until S12 a transition is done at the thaw: one whose "done" could
-	// not be written is done at the next turn, or it would hold the zone
-	if in, ok := s.thawInputs(zone); ok && in.enforced && in.reconciling {
-		if err := s.Done(in.name); err != nil {
-			lg.Error("the transition could not be marked done", "zone", in.name, "serial", in.active.Serial, "err", err)
-			return
-		}
-	}
+	conf.reconcileTurn(zone, time.Now())
 	if v, ok := conf.thawView(zone, time.Now()); ok && v.leads {
 		switch {
 		case v.ready():
@@ -580,10 +601,9 @@ func (conf *Config) thaw(v thawView) {
 
 // activate makes the thaw's target the zone's active serial, written before
 // it is told (Activate), and runs what follows from it: the zone moves to
-// its group under the new serial (onActiveChanged), and its sets are handed
-// on (onSetsChanged; until S12 V's, which are the sets the parts hold:
-// every transition the judge lets through changes none of them). Until S12
-// the transition is done at once.
+// its group under the new serial (onActiveChanged), and the parts are
+// handed V with the sets they hold, step 0 (onSetsChanged). The
+// reconciliation follows (reconcileTurn).
 func (conf *Config) activate(zone string, th Thaw, by string) error {
 	s := conf.InternalMp.Instructions
 	before := s.activeReading(zone)
@@ -600,9 +620,7 @@ func (conf *Config) activate(zone string, th Thaw, by string) error {
 		mpzd.onActiveChanged(conf.InternalMp.MPTransport, before, s.activeReading(zone))
 		conf.onSetsChanged(mpzd, true)
 	}
-	if err := s.Done(zone); err != nil {
-		lg.Error("the transition could not be marked done", "zone", zone, "serial", th.To.Serial, "err", err)
-	}
+	conf.askThaw(zone)
 	return nil
 }
 
@@ -809,15 +827,34 @@ func instructionsAnswered(zone string, sd SerialDigest, data map[string]string) 
 	return in, nil
 }
 
-// thawLine is the zone's thaw as the status shows it: what the restart
-// rule waits for while the active serial is not known (S9), what the
-// agreement waits for, or the last thaw made active here; "" with none.
+// instructionsLine is the zone's instructions in one line, with its
+// transition (thawLine), as the auditor's zone page shows them.
+func (conf *Config) instructionsLine(zone string) string {
+	st := conf.InternalMp.Instructions.Status(zone)
+	if st != nil {
+		st.Thaw = conf.thawLine(zone)
+	}
+	return st.Line()
+}
+
+// thawLine is the zone's transition as the status shows it: what the
+// restart rule waits for while the active serial is not known (S9), its
+// reconciliation's step and what it waits for (plan S12), what the
+// agreement waits for, when the last transition was done here, or the
+// last thaw made active here; "" with none.
 func (conf *Config) thawLine(zone string) string {
-	if v, ok := conf.restartView(zone, time.Now()); ok {
+	now := time.Now()
+	if v, ok := conf.restartView(zone, now); ok {
 		return v.line()
 	}
-	if v, ok := conf.thawView(zone, time.Now()); ok {
+	if line := conf.reconcileLine(zone, now); line != "" {
+		return line
+	}
+	if v, ok := conf.thawView(zone, now); ok {
 		return v.line()
+	}
+	if st := conf.InternalMp.Instructions.Status(zone); st != nil && st.Active != nil && !st.DoneAt.IsZero() {
+		return fmt.Sprintf("at %d, done since %s", st.Active.Serial, st.DoneAt.Format(time.TimeOnly))
 	}
 	b := &conf.InternalMp.thaws
 	b.mu.Lock()

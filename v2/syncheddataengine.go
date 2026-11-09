@@ -94,7 +94,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 	// 1. RFI EDITS -> combiner: all agents' contributions (baseline)
 	// 2. RFI KEYSTATE -> signer: DNSKEY inventory (local vs foreign keys)
 	//
-	// Uses conf.InternalMp.MPZoneNames (collected at parse time) instead of
+	// Uses conf.mpZoneNames() (collected at parse time) instead of
 	// scanning Zones.IterBuffered() -- avoids race with RefreshEngine.
 	tm := conf.InternalMp.MPTransport
 	hasCombiner := tm != nil && conf.namesCombiner()
@@ -103,8 +103,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 	lgEngine.Info("SynchedDataEngine started")
 
 	if hasCombiner || hasSigner {
-		lgEngine.Info("startup hydration: MP zones to hydrate", "count", len(conf.InternalMp.MPZoneNames), "zones", conf.InternalMp.MPZoneNames)
-		for _, zname := range conf.InternalMp.MPZoneNames {
+		zones := conf.mpZoneNames()
+		lgEngine.Info("startup hydration: MP zones to hydrate", "count", len(zones), "zones", zones)
+		for _, zname := range zones {
 			zd, ok := Zones.Get(zname)
 			if !ok || zd == nil {
 				lgEngine.Warn("startup hydration: zone not in Zones map, skipping", "zone", zname)
@@ -169,6 +170,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 		case <-trackingEvictTicker.C:
 			zdr.evictStaleTracking(1 * time.Hour)
+			conf.csyncsLookAgain(ctx, zdr)
 
 		case <-ownReadTicker.C:
 			owner.tick(ctx)
@@ -582,6 +584,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				// zone this agent leads is taken up (plan S6)
 				conf.instrDone(ctx, zdr, sdcmd.Zone)
 				go conf.takeUp(ctx, sdcmd.Zone)
+
+			case "csync-progress":
+				// the time-out for the members with no role that the zone's
+				// CSYNC waits for has passed (plan S12)
+				conf.delegationCsyncProgress(ctx, zdr, sdcmd.Zone, nil)
 
 			case "own-read":
 				// A re-read's answer (ownReader), applied here because the
@@ -1573,9 +1580,9 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 		return
 	}
 
-	// A CSYNC is taken from the zone's delegation sync leader
-	// only; the sender of any other has been told. What else
-	// the update carries goes on.
+	// A CSYNC or a KEY is taken from the zone's delegation sync
+	// leader only (plan S14 for the KEY); the sender of any
+	// other has been told. What else the update carries goes on.
 	if reason := conf.refuseCsyncNotFromLeader(synchedDataUpdate, msgQs); reason != "" && len(synchedDataUpdate.Update.Operations) == 0 {
 		if synchedDataUpdate.Response != nil {
 			select {
@@ -1701,6 +1708,13 @@ func (conf *Config) applyRemoteUpdate(ctx context.Context, zdr *ZoneDataRepo, sy
 					break
 				}
 			}
+		}
+		// The leader's publish instruction goes to the combiner
+		// whether or not its KEY changed the repo: a member may
+		// hold the KEY from before the instruction came with it
+		// (#206)
+		if err == nil && !change && synchedDataUpdate.Update != nil && synchedDataUpdate.Update.Publish != nil {
+			change = true
 		}
 		if err != nil {
 			lgEngine.Error("failed to add remote update to agent data repo", "err", err)
@@ -2062,7 +2076,7 @@ func (conf *Config) applyLocalUpdate(ctx context.Context, zdr *ZoneDataRepo, syn
 					if err != nil {
 						lgEngine.Error("cannot get agents for DNSKEY propagation tracking", "zone", synchedDataUpdate.Zone, "err", err)
 					} else if len(agents) > 0 {
-						tm.TrackDnskeyPropagation(synchedDataUpdate.Zone, distID, synchedDataUpdate.DnskeyKeyTags, synchedDataUpdate.DnskeyRemovedKeyTags, agents)
+						tm.TrackDnskeyPropagation(ctx, synchedDataUpdate.Zone, distID, synchedDataUpdate.DnskeyKeyTags, synchedDataUpdate.DnskeyRemovedKeyTags, agents)
 						if synchedDataUpdate.Resend {
 							tm.foldIntoResend(synchedDataUpdate.Zone, distID)
 						}

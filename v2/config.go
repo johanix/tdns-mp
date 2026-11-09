@@ -50,13 +50,10 @@ func (conf *Config) SetMpConfig(mp *MultiProviderConf) {
 // RegisterMPRefreshCallbacks appends tdns-mp PreRefresh/PostRefresh
 // closures to all MP zones that don't already have them. Called at
 // startup and after every zone reload (SIGHUP / "config reload-zones")
-// via the PostParseZonesHook.
+// via the PostParseZonesHook. A zone has them once per ZoneData: one a
+// reload removed and a later one added back is a new ZoneData, and gets
+// them again (tdns-mp #396).
 func (conf *Config) RegisterMPRefreshCallbacks() {
-	tm := conf.InternalMp.MPTransport
-	msgQs := conf.InternalMp.MsgQs
-	if conf.InternalMp.refreshRegistered == nil {
-		conf.InternalMp.refreshRegistered = make(map[string]bool)
-	}
 	// A zone that leaves the configuration takes its serials with it
 	// (design rule 3): at the start, and after every zone reload, which
 	// has removed it from tdns's zones by now.
@@ -64,49 +61,64 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 		zd, ok := tdns.Zones.Get(zone)
 		return ok && zd.Options[tdns.OptMultiProvider]
 	})
-	for _, zoneName := range conf.InternalMp.MPZoneNames {
-		if conf.InternalMp.refreshRegistered[zoneName] {
-			continue
+	// the zones this parse found (#401), and nothing of tdns-mp's keeps a
+	// removed or replaced ZoneData alive
+	conf.InternalMp.mpZones.refresh()
+	Zones.Prune()
+	conf.InternalMp.refreshRegistered.prune()
+	conf.InternalMp.onFirstLoadRegistered.prune()
+	conf.InternalMp.firstLoadSetUp.prune()
+	conf.InternalMp.agentFirstLoad.prune()
+	for _, zoneName := range conf.mpZoneNames() {
+		if zd, ok := Zones.Get(zoneName); ok {
+			conf.registerRefreshCallbacks(zd)
 		}
-		zd, ok := Zones.Get(zoneName)
-		if !ok || !zd.Options[tdns.OptMultiProvider] {
-			continue
-		}
-		// Wire SyncQ on every MP zone so PostRefresh can send without blocking
-		if zd.SyncQ == nil {
-			zd.SyncQ = conf.InternalMp.SyncQ
-		}
-		conf.InternalMp.refreshRegistered[zoneName] = true
-		// The closure looks up conf.MpConfig() at invocation rather than
-		// capturing the current pointer, so PostParseConfigHook can
-		// replace the parsed MultiProviderConf on reload (SIGHUP) without
-		// leaving these callbacks pointing at a stale copy.
-		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh,
-			func(zd, new_zd *tdns.ZoneData) {
-				if mpzd, ok := Zones.Get(zd.ZoneName); ok {
-					mpzd.MPPreRefresh(new_zd, tm, msgQs, conf.MpConfig())
-				}
-			})
-		zd.OnZonePostRefresh = append(zd.OnZonePostRefresh,
-			func(zd *tdns.ZoneData) {
-				if mpzd, ok := Zones.Get(zd.ZoneName); ok {
-					// The copy is noted first: every reader after it acts
-					// by the active instructions (plan S3).
-					conf.noteInstructions(mpzd)
-					givenBack := conf.onSetsChanged(mpzd, false)
-					mpzd.PostRefresh(tm, msgQs)
-					conf.afterSigningSetChange(mpzd)
-					if givenBack {
-						// after PostRefresh, which applies this refresh's
-						// HSYNC3 change and recomputes the groups: who leads
-						// is judged on the groups that change gives. (An
-						// edit that also removes this agent's own HSYNC3
-						// recomputes nothing, and is judged on the old ones.)
-						conf.delegationSyncGivenBack(mpzd.ZoneName)
-					}
-				}
-			})
 	}
+}
+
+// registerRefreshCallbacks appends tdns-mp's PreRefresh/PostRefresh closures
+// to an MP zone, once per ZoneData.
+func (conf *Config) registerRefreshCallbacks(zd *MPZoneData) {
+	if !zd.Options[tdns.OptMultiProvider] || !conf.InternalMp.refreshRegistered.first(zd.ZoneData) {
+		return
+	}
+	tm := conf.InternalMp.MPTransport
+	msgQs := conf.InternalMp.MsgQs
+	// Wire SyncQ on every MP zone so PostRefresh can send without blocking
+	if zd.SyncQ == nil {
+		zd.SyncQ = conf.InternalMp.SyncQ
+	}
+	// The closure looks up conf.MpConfig() at invocation rather than
+	// capturing the current pointer, so PostParseConfigHook can
+	// replace the parsed MultiProviderConf on reload (SIGHUP) without
+	// leaving these callbacks pointing at a stale copy. It acts only
+	// while its zone is the one tdns holds: a refresh still running on a
+	// zone a reload removed must not reach the wrapper of the zone added
+	// back under the same name.
+	zd.OnZonePreRefresh = append(zd.OnZonePreRefresh,
+		func(zd, new_zd *tdns.ZoneData) {
+			if mpzd, ok := Zones.GetFor(zd); ok {
+				mpzd.MPPreRefresh(new_zd, tm, msgQs, conf.MpConfig())
+			}
+		})
+	zd.OnZonePostRefresh = append(zd.OnZonePostRefresh,
+		func(zd *tdns.ZoneData) {
+			if mpzd, ok := Zones.GetFor(zd); ok {
+				// The copy is noted first: every reader after it acts
+				// by the active instructions (plan S3).
+				conf.noteInstructions(mpzd)
+				givenBack := conf.onSetsChanged(mpzd, false)
+				mpzd.PostRefresh(tm, msgQs)
+				if givenBack {
+					// after PostRefresh, which applies this refresh's
+					// HSYNC3 change and recomputes the groups: who leads
+					// is judged on the groups that change gives. (An
+					// edit that also removes this agent's own HSYNC3
+					// recomputes nothing, and is judged on the old ones.)
+					conf.delegationSyncGivenBack(mpzd.ZoneName)
+				}
+			}
+		})
 }
 
 // ForEachMPZone iterates all zones with OptMultiProvider and calls
@@ -118,7 +130,7 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 // conf.Config.MainInit returns). OnFirstLoad callbacks attached
 // here will fire later when RefreshEngine processes initial loads.
 func (conf *Config) ForEachMPZone(fn func(zd *MPZoneData)) {
-	for _, zoneName := range conf.InternalMp.MPZoneNames {
+	for _, zoneName := range conf.mpZoneNames() {
 		zd, exists := Zones.Get(zoneName)
 		if !exists {
 			continue
@@ -147,10 +159,10 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 	if hdb == nil {
 		return
 	}
-	if conf.InternalMp.onFirstLoadRegistered == nil {
-		conf.InternalMp.onFirstLoadRegistered = make(map[string]bool)
-	}
-	for _, zone := range providerZonesWithoutOption(conf.InternalMp.MPZoneNames) {
+	// the zones this parse found (#401): the combiner's reload hook runs
+	// this before RegisterMPRefreshCallbacks
+	conf.InternalMp.mpZones.refresh()
+	for _, zone := range providerZonesWithoutOption(conf.mpZoneNames()) {
 		lgCombiner.Warn("a provider zone lacks the multi-provider option: its _signal KEYs are not put back at a restart or a refresh, and a withdrawal from it waits for good",
 			"zone", zone)
 	}
@@ -172,17 +184,16 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 		allInstr = nil
 	}
 
-	for _, zoneName := range conf.InternalMp.MPZoneNames {
-		if conf.InternalMp.onFirstLoadRegistered[zoneName] {
-			continue
-		}
+	for _, zoneName := range conf.mpZoneNames() {
 		mpzd, exists := Zones.Get(zoneName)
-		if !exists {
+		if !exists || !conf.InternalMp.onFirstLoadRegistered.first(mpzd.ZoneData) {
 			continue
 		}
-		conf.InternalMp.onFirstLoadRegistered[zoneName] = true
 		mpzd.restoreContributions(hdb, allContribs[zoneName], err == nil)
 
+		// under the zone's lock, as tdns drains OnFirstLoad: a zone a reload
+		// added may be loading already
+		mpzd.Lock()
 		mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
 			if !zd.Options[tdns.OptMultiProvider] {
 				return
@@ -209,7 +220,7 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 
 		if GetProviderZoneRRtypes(zoneName) != nil {
 			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
-				if w, ok := Zones.Get(zd.ZoneName); ok {
+				if w, ok := Zones.GetFor(zd); ok {
 					w.ApplyPendingSignalKeys(hdb)
 				}
 			})
@@ -222,7 +233,7 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 		atNSSenders := atNSSendersOf(allInstr[zoneName])
 		if len(atNSSenders) > 0 || instrErr != nil {
 			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
-				w, ok := Zones.Get(zd.ZoneName)
+				w, ok := Zones.GetFor(zd)
 				if !ok {
 					return
 				}
@@ -241,6 +252,7 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 				}
 			})
 		}
+		mpzd.Unlock()
 	}
 }
 
@@ -330,12 +342,19 @@ type InternalMpConf struct {
 	TransportManager      *transport.TransportManager
 	MPTransport           *MPTransportBridge
 	LeaderElectionManager *LeaderElectionManager
-	MPZoneNames           []string
 	DistributionCache     *DistributionCache
 	AuditStateManager     *AuditStateManager
 	AuditWebAuth          *AuditWebAuth
-	refreshRegistered     map[string]bool // tracks which zones have tdns-mp refresh callbacks
-	onFirstLoadRegistered map[string]bool // tracks which zones have combiner OnFirstLoad callbacks
+	// The per-zone hooks done, once per ZoneData (zone_hooks.go, #396):
+	// the refresh callbacks, the combiner's OnFirstLoad callbacks, the
+	// set-up before the first load, and the agent's first-load callbacks.
+	refreshRegistered     zoneOnce
+	onFirstLoadRegistered zoneOnce
+	firstLoadSetUp        zoneOnce
+	agentFirstLoad        zoneOnce
+	// mpZones: the multi-provider zones of the last parse (mp_zone_names.go,
+	// #401); read through conf.mpZoneNames().
+	mpZones mpZoneNameSet
 
 	// mpConfig is the tdns-mp-side parse of the multi-provider: config
 	// block, installed by SetMpConfig from the config parser hook
@@ -380,4 +399,7 @@ type InternalMpConf struct {
 	// thaws: what the agent and the auditor keep of their zones' thaws
 	// (instr_thaw.go).
 	thaws thawBook
+	// reconciles: what the agent and the auditor keep of their zones'
+	// reconciliations in memory (reconcile.go).
+	reconciles reconcileBook
 }

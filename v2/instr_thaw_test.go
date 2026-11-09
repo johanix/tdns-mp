@@ -103,8 +103,8 @@ func (r *thawRig) holdUnjudged(in *Instructions, since time.Time) {
 
 // The leader thaws once every other voting member tells, first hand and
 // fresh, active N and agreeing V with its signer's hold, and its own signer
-// has confirmed the hold. Until S12 the transition is done at the thaw, and
-// the status tells the thaw.
+// has confirmed the hold. The reconciliation follows (S12): the zone stays
+// frozen, at step 0, until it is done.
 func TestTheLeaderThawsWhenEveryVotingMemberTellsActiveNAndAgreeingV(t *testing.T) {
 	r := newThawRig(t, "leader.thaw.example.", roleA)
 	r.agree()
@@ -116,13 +116,13 @@ func TestTheLeaderThawsWhenEveryVotingMemberTellsActiveNAndAgreeingV(t *testing.
 	r.hear(roleB, r.agreeing(), true)
 	r.conf.thawTurn(r.zone)
 	st := status(t, r.store, r.zone)
-	if st.Active.Serial != 42 || st.From != nil || st.LastThaw == nil || st.LastThaw.From != sd(r.n) || st.LastThaw.To != sd(r.v) {
+	if st.Active.Serial != 42 || st.From == nil || st.From.Serial != 41 || st.Phase != PhaseReconciling || st.LastThaw == nil || st.LastThaw.From != sd(r.n) || st.LastThaw.To != sd(r.v) {
 		t.Fatalf("after the thaw: %+v", st)
 	}
-	if len(r.conf.zoneFrozen(r.zone)) > 0 {
-		t.Errorf("still frozen after the thaw: %v", r.conf.zoneFrozen(r.zone))
+	if why := r.conf.zoneFrozen(r.zone); !slices.Equal(why, []string{"reconciling from 41 to 42"}) {
+		t.Errorf("frozen after the thaw: %v", why)
 	}
-	if line := r.conf.thawLine(r.zone); !strings.HasPrefix(line, "thawed to 42 at ") || !strings.HasSuffix(line, " by "+roleA) {
+	if line := r.conf.thawLine(r.zone); !strings.HasPrefix(line, "reconciling 41->42: step 0 (the sets held)") {
 		t.Errorf("the status: %q", line)
 	}
 }
@@ -455,6 +455,11 @@ func TestAZoneWithNoVotingMemberUnderNThawsWhenTheNewVotersAgree(t *testing.T) {
 	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleB+" (not heard)" {
 		t.Fatalf("before b tells: %q", vw.waits)
 	}
+	// heard, but telling nothing of the zone (plan S22): not "not heard"
+	r.operational(roleB)
+	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleB+" (tells nothing of the zone)" {
+		t.Fatalf("b heard, telling nothing of the zone: %q", vw.waits)
+	}
 	st := tells(n, v)
 	st.Agreeing, st.AgreeingDigest = 62, v.Digest()
 	// a telling with an owner error does not count, as under N (cubic on
@@ -626,6 +631,46 @@ func TestALostLeaderThatIsNotLeavingStallsItsGroup(t *testing.T) {
 	if line := vw.line(); !strings.Contains(line, "no leader ("+roleB+" not heard since never); waiting for it or for the owner to remove it") {
 		t.Errorf("the status: %q", line)
 	}
+	// its last beat told nothing of the zone (plan S22): heard then all the
+	// same (N3 of the external review)
+	r.seq++
+	r.stamps.note(&GossipMessage{GroupHash: stampGroupHash, Members: map[string]*MemberState{
+		roleB: {Identity: roleB, Timestamp: time.Now(), Epoch: 1, Seq: r.seq, Crypto: true}}}, roleB, transport.MechanismDNS)
+	if vw := r.view(); vw.noLeader != roleB+" not heard since "+r.stamps.heard(roleB).Heard.Format(time.TimeOnly) {
+		t.Errorf("no leader, after its beat with no zone: %q", vw.noLeader)
+	}
+}
+
+// A voting member new under V tells nothing the thaw waits for but its
+// payload encryption, which its stamp row tells while it tells nothing of
+// the zone, at rest; one not heard is not heard (S1 of the external review).
+func TestANewVoterAtRestHoldsTheThawOnlyForItsPayloadEncryption(t *testing.T) {
+	r := newThawRig(t, "newvoter.thaw.example.", roleA)
+	n, v := freezeAt(t, 41, "n", "a,b", ""), freezeAt(t, 42, "v", "a,b,n", "")
+	if err := r.store.Forget(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	knownAs(t, r.store, r.zone, n)
+	r.n, r.v = n, v
+	r.holdUnjudged(v, time.Now())
+	r.hold()
+	r.hear(roleB, r.agreeing(), true)
+	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleN+" (not heard)" {
+		t.Fatalf("n not heard: %q", vw.waits)
+	}
+	row := func(crypto bool) {
+		r.seq++
+		r.stamps.note(&GossipMessage{GroupHash: stampGroupHash, Members: map[string]*MemberState{
+			roleN: {Identity: roleN, Timestamp: time.Now(), Epoch: 1, Seq: r.seq, Crypto: crypto}}}, roleN, transport.MechanismDNS)
+	}
+	row(true)
+	if vw := r.view(); !vw.ready() {
+		t.Errorf("n at rest, payload encryption on: %q", vw.waits)
+	}
+	row(false)
+	if vw := r.view(); vw.ready() || len(vw.waits) != 1 || vw.waits[0] != roleN+" (payload encryption off)" {
+		t.Errorf("n at rest, payload encryption off: %q", vw.waits)
+	}
 }
 
 // A member makes V active on the first first-hand stamp that tells it
@@ -639,13 +684,13 @@ func TestAMemberActivatesOnTheLeadersActiveStamp(t *testing.T) {
 	if r.active() != 41 {
 		t.Fatal("activated on a telling without the thaw")
 	}
-	st.Thaw = &Thaw{From: sd(r.n), To: sd(r.v)}
+	st.Thaw, st.Reconciling = &Thaw{From: sd(r.n), To: sd(r.v)}, true
 	r.hear(roleB, st, true)
 	r.conf.thawTurn(r.zone)
 	if r.active() != 42 {
 		t.Fatal("not activated on the leader's thaw")
 	}
-	if line := r.conf.thawLine(r.zone); !strings.HasSuffix(line, " by "+roleB) {
+	if line := r.conf.thawLine(r.zone); line != "reconciling 41->42: step 0 (the sets held), waiting for the leader's first step" {
 		t.Errorf("the status: %q", line)
 	}
 }
@@ -992,7 +1037,7 @@ func TestCombinerWaitsIsAskedForEveryZoneWithoutAHandOver(t *testing.T) {
 	_, none := actingCombiner(t, "none.waits.example.")
 	none.Ready = true
 	none.Options[tdns.OptMultiProvider] = true
-	conf.InternalMp.MPZoneNames = []string{zero.ZoneName, serial.ZoneName, none.ZoneName}
+	conf.InternalMp.mpZones.setForTest(zero.ZoneName, serial.ZoneName, none.ZoneName)
 	withActing(t, nil)
 	if got := conf.zonesWaitingForHandover(); len(got) != 2 || slices.Contains(got, none.ZoneName) {
 		t.Errorf("waiting: %q, want the two zones with instructions", got)
@@ -1056,23 +1101,6 @@ func TestASerialToldActiveIsAskedOnlyOfAVotingMember(t *testing.T) {
 	}
 }
 
-// Until S12 a transition is done at the thaw; one whose "done" was not
-// written is done at the zone's next turn, so it does not hold the zone.
-func TestATransitionLeftUndoneIsDoneAtTheNextTurn(t *testing.T) {
-	r := newThawRig(t, "undone.thaw.example.", roleA)
-	r.agree()
-	if err := r.store.Activate(r.zone, Thaw{From: sd(r.n), To: sd(r.v)}); err != nil {
-		t.Fatal(err)
-	}
-	if !r.conf.thawWanted(r.zone) {
-		t.Fatal("the zone's turn is not asked")
-	}
-	r.conf.thawTurn(r.zone)
-	if st := status(t, r.store, r.zone); st.From != nil || len(r.conf.zoneFrozen(r.zone)) > 0 {
-		t.Errorf("after the turn: from %s, frozen %v", serialOf(st.From), r.conf.zoneFrozen(r.zone))
-	}
-}
-
 // An excusal never leaves a gate with no voter: one that would have
 // nobody to wait for opens by itself, and stays open when a voter comes
 // back.
@@ -1087,5 +1115,25 @@ func TestAnExcusalNeverEmptiesTheGate(t *testing.T) {
 	gst.CheckGroupState("g", []string{roleA, roleB})
 	if ops != 0 {
 		t.Error("a gate whose voters are all excused opened by itself")
+	}
+}
+
+// A member heard that tells nothing of the zone is told apart from one not
+// heard (plan S22): at rest a member lists none of its zones, until it
+// hears the others' stamps of it.
+func TestAHeardMemberThatTellsNothingOfTheZoneIsNotNotHeard(t *testing.T) {
+	r := newThawRig(t, "nothing.thaw.example.", roleA)
+	r.agree()
+	r.hold()
+	if v := r.view(); v.ready() || len(v.waits) != 1 || v.waits[0] != roleB+" (not heard)" {
+		t.Errorf("b not heard at all: %q", v.waits)
+	}
+	r.operational(roleB)
+	if v := r.view(); v.ready() || len(v.waits) != 1 || v.waits[0] != roleB+" (tells nothing of the zone)" {
+		t.Errorf("b heard, with no stamp of the zone: %q", v.waits)
+	}
+	r.hear(roleB, r.agreeing(), true)
+	if v := r.view(); !v.ready() {
+		t.Errorf("b telling agreement: %q", v.waits)
 	}
 }

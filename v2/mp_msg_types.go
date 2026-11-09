@@ -109,6 +109,7 @@ type ConfigResponseMsg struct {
 	Zone       string
 	Subtype    string
 	ConfigData map[string]string
+	Instr      *MsgStamp // the answerer's stamp: a key answer counts only at the asker's active serial (S14)
 }
 
 // configRefusedKey is the ConfigData key of the answer to a CONFIG request

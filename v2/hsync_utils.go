@@ -998,15 +998,19 @@ func (mpzd *MPZoneData) instructions() *Instructions {
 	return activeOr(mpzd.ZoneName, apex)
 }
 
-// roles are the sets mpzd's decisions read: the zone's current step's, for
-// the zone as served here and for a copy wrapped for analysis alike; where
-// the store keeps no enforced record, the copy's.
+// roles are the sets mpzd's decisions read: the zone's current step's, as
+// the store keeps them (plan S12), for the zone as served here and for a
+// copy wrapped for analysis alike; with no step's sets kept, rolesFor of
+// the store's serials; where the store keeps no enforced record, the
+// copy's.
 func (mpzd *MPZoneData) roles() Roles {
 	if handed, ok := actingHeld.Load().roles(mpzd.ZoneName); ok {
 		return handed // a combiner's or a signer's, as instructions
 	}
 	var r Roles
-	if from, to, step := instrStore.Load().transition(mpzd.ZoneName); to != nil {
+	if sets, ok := instrStore.Load().stepSets(mpzd.ZoneName); ok {
+		r = sets
+	} else if from, to, step := instrStore.Load().transition(mpzd.ZoneName); to != nil {
 		r = rolesFor(from, to, step)
 	} else {
 		in := mpzd.instructions()
@@ -1074,6 +1078,15 @@ func (mpzd *MPZoneData) hasPubkey() bool {
 	return mpzd.roles().Pubkey
 }
 
+// pubkeyHere: the zone says pubkey and its instructions carry HSYNC3, so
+// its providers' agents publish its key in zones of their own. A zone with
+// no HSYNC3 is not a multi-provider zone: tdns's use-hsyncparam publishes
+// for it, each provider on its own, and stands aside only for a copy with
+// HSYNC3 (the project owner, 2026-11-06).
+func (mpzd *MPZoneData) pubkeyHere() bool {
+	return mpzd.hasPubkey() && hasHSYNC3(mpzd.instructions())
+}
+
 // mpDataLocks is a lock per zone (canonicalName), held while the zone's
 // multi-provider data is computed and set and acted on: by a refresh
 // (MPPreRefresh) and by a hand-over (actBySignerHandover, actByHandover),
@@ -1086,6 +1099,11 @@ func mpDataLock(zone string) *sync.Mutex {
 	m, _ := mpDataLocks.LoadOrStore(canonicalName(zone), &sync.Mutex{})
 	return m.(*sync.Mutex)
 }
+
+// computed: d is data a load or a hand-over computed (populateMPdata),
+// which names this provider's label; not what the config parse leaves, the
+// zone's options alone (main_init.go).
+func (d *MPdata) computed() bool { return d != nil && d.OurLabel != "" }
 
 // populateMPdata evaluates the multi-provider guards for a zone and
 // populates zd.MP.MPdata accordingly. Called after every zone refresh/transfer.
@@ -1100,10 +1118,10 @@ func mpDataLock(zone string) *sync.Mutex {
 //
 // If guard 1-3 fails, zd.MP.MPdata is set to nil.
 //
-// signing is the zone's signing set by this copy (advanceSigningSet): for a
-// zone with HSYNC3 and HSYNCPARAM, a provider signs when it is in it, in
-// signers= or leaving it (#147).
-func (mpzd *MPZoneData) populateMPdata(mp *MultiProviderConf, signing signingSet) {
+// r is the sets the zone's data is computed from: the step's (plan S13),
+// as mpzd.roles() gives them, or for a signer that waits for its agent's
+// hand-over, the ones it last acted by (rule 5).
+func (mpzd *MPZoneData) populateMPdata(mp *MultiProviderConf, r Roles) {
 	mpzd.EnsureMP()
 	// Guard 1: static config must declare this as an MP zone
 	if !mpzd.Options[tdns.OptMultiProvider] {
@@ -1136,17 +1154,15 @@ func (mpzd *MPZoneData) populateMPdata(mp *MultiProviderConf, signing signingSet
 	}
 	mpzd.MPOptions[OptMPNotListedErr] = false
 
-	// Guard 4: our role, from the sets (mpdataFrom(roles), plan S3). A
-	// provider out of signers= that the zone's HSYNC3 RRset still lists
-	// signs on, as before (#147): the signing set says who signs.
-	roles := mpzd.roles()
-	weAreServer := has(roles.Servers, ourLabel)
+	// Guard 4: our role, from the sets (plan S3). A provider out of
+	// signers= signs on while the step's sets keep it in Signing, until its
+	// DNSKEY step (plan S13).
+	weAreServer := has(r.Servers, ourLabel)
 	weAreAuditor := slices.Contains(in.Auditors, ourLabel)
-	_, weShouldSign := signing[ourLabel]
-	leaving := weShouldSign && !has(roles.Signing, ourLabel)
-	otherSigners := len(signing.others(ourLabel))
-	zoneSigned := len(signing) > 0
-	leavers := signing.leavers(in)
+	weShouldSign := has(r.Signing, ourLabel)
+	leaving := weShouldSign && !slices.Contains(in.Signers, trimDot(ourLabel))
+	otherSigners := len(othersIn(r.KeySigners, trimDot(ourLabel)))
+	zoneSigned := len(r.Signing) > 0
 
 	// Determine editing rights based on role.
 	// Non-signer servers in signed zones get disallow-edits but MPdata is
@@ -1186,9 +1202,8 @@ func (mpzd *MPZoneData) populateMPdata(mp *MultiProviderConf, signing signingSet
 		WeAreSigner:   weShouldSign,
 		OtherSigners:  otherSigners,
 		ZoneSigned:    zoneSigned,
-		Signing:       signing,
+		Sets:          r,
 		Leaving:       leaving,
-		Leavers:       leavers,
 		Options:       mpOpts,
 	}
 	mpzd.Logger.Printf("populateMPdata: zone %s: label=%q server=%v signer=%v leaving=%v auditor=%v otherSigners=%d zoneSigned=%v",
@@ -1367,46 +1382,44 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 	mpMu.Lock()
 	var resign bool
 	if new_zd.Options[tdns.OptMultiProvider] {
-		kdb := new_zd.KeyDB
-		if kdb == nil {
-			kdb = mpzd.KeyDB
-		}
 		newApex, _ := new_zd.OwnerForAnalysis(new_zd.ZoneName)
 		newMpzd := &MPZoneData{
 			ZoneData:  new_zd,
 			MP:        &MPState{},
 			MPOptions: make(map[tdns.ZoneOption]bool),
 		}
-		// A combiner or signer that holds a hand-over signs by the set
-		// handed, not by the incoming copy (S10, S11). A signer that waits
-		// for its agent's hand-over signs by the set it last signed by,
-		// unchanged by its copy, where it has one (rule 5). Every other role
-		// advances its signing set by the instructions it acts by: the
-		// active ones, from the thaw (S7), not a newer copy.
-		signing, handed := actingHeld.Load().signingSet(mpzd.ZoneName)
-		if !handed && tdns.Globals.App.Type == AppTypeMPSigner && signerWaits(mpzd.ZoneName, newApex) {
-			signing, handed = mpzd.lastSigningSet(kdb)
+		// A combiner or signer that holds a hand-over acts by the sets
+		// handed, not by the incoming copy (S10, S11); an agent, by the
+		// step's (S12, S13). A signer that waits for its agent's hand-over
+		// signs by the signer sets it last acted by, unchanged by its copy
+		// (rule 5), and keeps its data whole when the copy drops this
+		// provider. At its first load here it has acted by none: what the
+		// config parse leaves is no data (computed), and the first load
+		// takes its copy's, so that inline-signing is on before the first
+		// publish (main_init.go).
+		r := newMpzd.roles()
+		_, handed := actingHeld.Load().roles(mpzd.ZoneName)
+		kept := mpzd.MP.MPdata
+		waits := !handed && tdns.Globals.App.Type == AppTypeMPSigner && signerWaits(mpzd.ZoneName, newApex) && kept.computed()
+		if waits {
+			r.KeySigners, r.DSSigners, r.KeyConfirmers, r.Signing = kept.Sets.KeySigners, kept.Sets.DSSigners, kept.Sets.KeyConfirmers, kept.Sets.Signing
 		}
-		if !handed {
-			var changed bool
-			if signing, changed = mpzd.advanceSigningSet(newMpzd.instructions(), kdb); changed {
-				mpzd.MP.SigningChanged = true
-			}
+		newMpzd.populateMPdata(mp, r)
+		if !waits || newMpzd.MP.MPdata != nil {
+			// under the zone's lock, as a hand-over sets the two
+			mpzd.Lock()
+			mpzd.MP.MPdata = newMpzd.MP.MPdata
+			mpzd.MPOptions = newMpzd.MPOptions
+			mpzd.Unlock()
 		}
-		newMpzd.populateMPdata(mp, signing)
-		// under the zone's lock, as a hand-over sets the two
-		mpzd.Lock()
-		mpzd.MP.MPdata = newMpzd.MP.MPdata
-		mpzd.MPOptions = newMpzd.MPOptions
-		mpzd.Unlock()
 	}
 
 	// Signer: dynamically enable/disable inline-signing based on HSYNC
 	// analysis. The other signers whose DNSKEYs are kept as foreign rows are
-	// the ones handed (KeySigners, plan S11), or the incoming zone's signing
-	// set: the ones its signers= names, and those leaving it (#147).
+	// the ones handed (KeySigners, plan S11), or those of the sets the
+	// zone's data is computed from (plan S13).
 	if mpzd.MP.MPdata != nil && tdns.Globals.App.Type == AppTypeMPSigner {
-		others := mpzd.MP.MPdata.Signing.others(mpzd.MP.MPdata.OurLabel)
+		others := othersIn(mpzd.MP.MPdata.Sets.KeySigners, trimDot(mpzd.MP.MPdata.OurLabel))
 		if handed, ok := actingHeld.Load().roles(mpzd.ZoneName); ok {
 			others = othersIn(handed.KeySigners, labelOfIdentity(handed, ourHsyncIdentities(mp)))
 		}

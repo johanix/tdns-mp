@@ -62,6 +62,14 @@ func tells(active, newest *Instructions) InstrStamp {
 	return InstrStamp{Known: true, Active: active.Serial, ActiveDigest: active.Digest(), Newest: newest.Serial, NewestDigest: newest.Digest()}
 }
 
+// tellEveryZoneOnce has st tell every zone it shares with peer once, as a
+// peer's first stamp since st's start does (plan S22).
+func tellEveryZoneOnce(st *stampTable, peer string) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.tellOnceLocked(canonicalName(peer))
+}
+
 // rowFor is the status row of id.
 func rowFor(t *testing.T, rows []MemberInstructions, id string) MemberInstructions {
 	t.Helper()
@@ -74,13 +82,15 @@ func rowFor(t *testing.T, rows []MemberInstructions, id string) MemberInstructio
 	return MemberInstructions{}
 }
 
-// A beat to a peer tells every zone the two share, and only those.
+// A beat that tells every zone, as the first after a peer's start does,
+// tells every zone the two share, and only those.
 func TestAStampIsToldForEveryZoneTheTwoShare(t *testing.T) {
 	st := stampTableAt(t, stampAlpha, stampAt(t, 7, "a"))
 	other := stampAt(t, 3, "a")
 	noteKnown(t, st.store, "other.example.", other)
 	// a zone alpha has no role in
 	noteKnown(t, st.store, "elsewhere.example.", jAt(t, 4, `servers="beta"`, stampRecords[1]))
+	tellEveryZoneOnce(st, stampBeta)
 	e := st.entryFor(stampBeta)
 	if e == nil {
 		t.Fatal("no stamp entry for beta")
@@ -152,7 +162,9 @@ func TestTheStampEntryIsNotMergedAsAGroup(t *testing.T) {
 func TestAStampFromABeatIsFirstHand(t *testing.T) {
 	seven := stampAt(t, 7, "a")
 	bob := stampTableAt(t, stampBeta, seven)
-	bob.note(stampTableAt(t, stampAlpha, seven).entryFor(stampBeta), stampAlpha, "DNS")
+	alice := stampTableAt(t, stampAlpha, seven)
+	tellEveryZoneOnce(alice, stampBeta)
+	bob.note(alice.entryFor(stampBeta), stampAlpha, "DNS")
 	m := bob.heard(stampAlpha)
 	if m == nil || m.Instr[stampZone].Active != 7 || m.Mechanism != "DNS" || !m.Enveloped {
 		t.Fatalf("alice's stamp, heard: %+v", m)
@@ -479,6 +491,7 @@ func TestTheStampTellsPayloadEncryption(t *testing.T) {
 		t.Error("an agent with payload encryption off tells it on")
 	}
 	bob := stampTableAt(t, stampBeta, seven)
+	tellEveryZoneOnce(off, stampBeta)
 	bob.note(off.entryFor(stampBeta), stampAlpha, "DNS")
 	if r := rowFor(t, bob.members(stampZone), stampAlpha); r.Crypto {
 		t.Errorf("alice's row: %+v", r)

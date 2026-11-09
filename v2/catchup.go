@@ -200,7 +200,7 @@ const (
 var catchUpRoomRetry = 5 * time.Second
 
 // newCatchUpTracker is the agent's tracker. startZones are the
-// multi-provider zones the agent starts with (MPZoneNames as initMPAgent
+// multi-provider zones the agent starts with (mpZoneNames as initMPAgent
 // finds it): the first load of any other zone asks with join.
 func newCatchUpTracker(self AgentId, startZones []string, outage time.Duration) *catchUpTracker {
 	t := &catchUpTracker{
@@ -633,6 +633,24 @@ func (t *catchUpTracker) caughtUpLocked(zone ZoneName) (bool, catchUpWait) {
 		}
 	}
 	return w.OwnRead && len(w.Peers) == 0, w
+}
+
+// openWith are the zones whose catch-up with peer is not done: asked, and
+// not answered complete or with a request outstanding (plan S22).
+func (t *catchUpTracker) openWith(peer AgentId) []ZoneName {
+	if t == nil {
+		return nil
+	}
+	peer = AgentId(dns.Fqdn(string(peer)))
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []ZoneName
+	for zone, peers := range t.peers {
+		if e := peers[peer]; e != nil && (!e.Complete || e.outstanding()) {
+			out = append(out, zone)
+		}
+	}
+	return out
 }
 
 // noteCaughtUpLocked logs the zone's catch-up once, when it is caught up.
