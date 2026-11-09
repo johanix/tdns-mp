@@ -109,8 +109,7 @@ func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*t
 	// The identity zone has no delegation sync, whatever the parentsync:
 	// block says: it is delegated from the provider's own zone, and that
 	// delegation, NS and DS, is taken as it stands. The agent does not look
-	// for DSYNC at its parent and sends it nothing (tdns-mp #391; see
-	// isIdentityZone for one listed in the config).
+	// for DSYNC at its parent and sends it nothing (tdns-mp #391).
 
 	// Renewal. tdns registers a zone for periodic re-signing when its config
 	// carries a signing option; this zone has none (it is built here), so it
@@ -128,19 +127,6 @@ func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*t
 
 	return zd, txid, nil
 }
-
-// isIdentityZone reports whether zone is this daemon's own identity zone,
-// which has no delegation sync (tdns-mp #391). The zone the daemon builds
-// never has the parentsync option; one listed in the config may have it, so
-// the election and the syncher ask this too.
-func (conf *Config) isIdentityZone(zone string) bool {
-	mp := conf.MpConfig()
-	return mp != nil && sameName(zone, mp.Identity)
-}
-
-// identityZoneNoSync is the syncher's answer to a request for the identity
-// zone.
-const identityZoneNoSync = "the agent's identity zone has no delegation sync"
 
 // identityCommitTimeout bounds the wait for the commit's answer. The commit
 // travels the update queue behind the identity's records and publishes in the
@@ -445,12 +431,6 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 		zdp, ok := Zones.Get(identityZone)
 		if !ok {
 			return fmt.Errorf("SetupAgent: config zone %q not found in Zones", identityZone)
-		}
-		// The election and the syncher pass the identity zone by
-		// (isIdentityZone); the operator who gave it the option is told so
-		// here, once, at the start.
-		if zdp.Options[tdns.OptParentSync] {
-			lgAgent.Warn("identity zone: the parentsync option is ignored; the agent does not sync the identity zone's delegation", "zone", identityZone)
 		}
 		if wantApi {
 			zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *tdns.ZoneData) {

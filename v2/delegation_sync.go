@@ -41,18 +41,6 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 			zd := ds.ZoneData
 			dss := ds.SyncStatus
 
-			// The agent's own identity zone has no delegation sync
-			// (tdns-mp #391), whoever asks: an election, the DS engine,
-			// an update from outside. Nothing is analysed or sent, and
-			// the parent's DSYNC is not looked up.
-			if conf.isIdentityZone(ds.ZoneName) {
-				lg.Debug("DelegationSyncher: the identity zone has no delegation sync, skipping", "zone", ds.ZoneName, "command", ds.Command)
-				if ds.Response != nil {
-					ds.Response <- tdns.DelegationSyncStatus{ZoneName: ds.ZoneName, Time: time.Now(), Msg: identityZoneNoSync}
-				}
-				continue
-			}
-
 			switch ds.Command {
 
 			case "DELEGATION-SYNC-SETUP":
