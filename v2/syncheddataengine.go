@@ -188,6 +188,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			// what a zone kept, released when its freeze ended and the
 			// engine's queue had no room, or a restart came between
 			conf.releaseUnfrozen(ctx, zdr)
+			conf.nsmgmtRound(zdr, time.Now())
 
 		case <-owedRoomTicker.C:
 			if conf.InternalMp.CatchUp.roomWaits() {
@@ -603,6 +604,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				// zone this agent leads is taken up (plan S6)
 				conf.instrDone(ctx, zdr, sdcmd.Zone)
 				go conf.takeUp(ctx, sdcmd.Zone)
+
+			case "drop-ns":
+				// the zone's nsmgmt changed, or the owner has it and the
+				// data holds some (plan S19)
+				zdr.dropNS(sdcmd.Zone)
 
 			case "csync-progress":
 				// the time-out for the members with no role that the zone's
