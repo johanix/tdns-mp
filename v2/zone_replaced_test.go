@@ -73,6 +73,46 @@ func TestMPZonesFollowTheLiveZoneData(t *testing.T) {
 	})
 }
 
+// Items and IterBuffered work from a snapshot of tdns's zones, which can
+// still hold the ZoneData a reload has replaced. Wrapping it does not
+// displace the live zone's wrapper, nor the MP state that has gathered on
+// it; and a zone tdns no longer holds gets a wrapper that is not cached and
+// runs no hooks.
+func TestAStaleZoneDataDoesNotDisplaceTheLiveWrapper(t *testing.T) {
+	noZoneHooks(t)
+	kdb := newMPTestKeyDB(t)
+	old := signerTestZone(t, "stale.mpzones.example.", kdb)
+	stale := old.ZoneData
+	tdns.Zones.Remove(old.ZoneName)
+	live := signerTestZone(t, old.ZoneName, kdb)
+	live.EnsureMP()
+	live.MP.MPdata = &MPdata{}
+	hooked := 0
+	Zones.SetOnNew(func(*MPZoneData) { hooked++ })
+
+	if got := Zones.getOrCreate(old.ZoneName, stale); got != live {
+		t.Errorf("wrapping the replaced ZoneData: got the live wrapper %v", got == live)
+	}
+	if again, _ := Zones.Get(old.ZoneName); again != live || again.MP.MPdata == nil {
+		t.Error("the live wrapper was displaced, or lost its MP state")
+	}
+
+	tdns.Zones.Remove(old.ZoneName)
+	w := Zones.getOrCreate(old.ZoneName, stale)
+	if w == nil || w.ZoneData != stale {
+		t.Fatal("a zone tdns no longer holds got no wrapper of what the caller had")
+	}
+	Zones.mu.RLock()
+	cached := Zones.cache[old.ZoneName]
+	Zones.mu.RUnlock()
+	if cached == w {
+		t.Error("the wrapper of a zone tdns no longer holds was cached")
+	}
+	if hooked != 0 {
+		t.Errorf("the hooks ran %d times; want none", hooked)
+	}
+}
+
 // A zone looked up by its name in another case has the same wrapper: one
 // ZoneData, one MP state, as tdns files it under one name.
 func TestMPZonesOneWrapperPerZoneData(t *testing.T) {
