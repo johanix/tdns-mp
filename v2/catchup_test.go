@@ -1070,8 +1070,9 @@ func TestAPeerThatStartsAgainWhileAskedBackIsAskedAnew(t *testing.T) {
 	}
 }
 
-// A zone with HSYNC3 records and no HSYNCPARAM has no reading (#308) and is
-// not a multi-provider zone here: the load gives it no provider data, and no
+// A zone with HSYNC3 records and no HSYNCPARAM reads as its records with no
+// parameters (decision 108a): nobody has a role in it, so it is not a
+// multi-provider zone here: the load gives it no provider data, and no
 // agent can answer for it complete. It is asked about neither at its load
 // nor at a beat, first or after an outage; a zone with HSYNCPARAM beside it
 // is.

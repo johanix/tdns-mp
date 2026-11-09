@@ -156,11 +156,16 @@ func (mpzd *MPZoneData) LocalDnskeysChanged(new_zd *tdns.ZoneData) (bool, *Dnske
 // anything is recorded as distributed, so that no caller remembers a refused
 // distribution as sent: it returns errNoRoleInZone. The test reads apex, the
 // copy of the zone the distribution is judged against (the incoming copy at
-// a refresh), or the zone as it is when apex is nil.
+// a refresh), or the zone as it is when apex is nil. A copy with no
+// HSYNCPARAM, or none that reads, gives no instructions of its own: the
+// store's active serial is judged by, which an HSYNCPARAM dropped while it
+// lists several providers keeps (design 7).
 func (mpzd *MPZoneData) LocalDnskeysFromKeystate(self AgentId, apex *tdns.OwnerData) (bool, *DnskeyStatus, error) {
 	in := readingOf(apex)
-	if apex == nil {
-		apex, _ = mpzd.OwnerForAnalysis(mpzd.ZoneName)
+	if apex == nil || in == nil || !in.HasParam {
+		if apex == nil {
+			apex, _ = mpzd.OwnerForAnalysis(mpzd.ZoneName)
+		}
 		in = activeOr(mpzd.ZoneName, apex)
 	}
 	if !votesIn(in, self) {

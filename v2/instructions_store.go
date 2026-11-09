@@ -471,7 +471,10 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 	if s == nil {
 		return
 	}
-	if in == nil && readErr == nil {
+	// No HSYNCPARAM, with HSYNC3 records or without: the owner expresses no
+	// intent, and there is no serial to keep (the project owner, 2026-11-06).
+	noIntent := readErr == nil && (in == nil || !in.HasParam)
+	if noIntent {
 		s.mu.Lock()
 		_, kept := s.zones[zone]
 		s.mu.Unlock()
@@ -485,20 +488,29 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 			z.Copy, z.CopyError = SerialDigest{}, readErr.Error()
 			z.ownerError(zone, readErr.Error())
 			return nil
-		case in == nil:
+		case noIntent:
+			gone, copyErr := "HSYNC3 and HSYNCPARAM", "no HSYNC3 and no HSYNCPARAM"
+			if in != nil {
+				gone, copyErr = "HSYNCPARAM", "no HSYNCPARAM"
+			}
 			switch {
-			case z.Active == nil && len(z.Held) > 0:
-				// with no active serial known the end of service cannot
-				// be judged: the newest held may list one provider while
-				// the active one lists more (design 7, S9)
-				z.Copy, z.CopyError = SerialDigest{}, "no HSYNC3 and no HSYNCPARAM"
-				z.ownerError(zone, "HSYNC3 and HSYNCPARAM dropped while the active serial is not known")
+			case z.Active == nil && slices.ContainsFunc(z.Held, func(h heldSerial) bool { return givesRoles(h.Reading) }):
+				// with no active serial known, a serial held that gives
+				// roles may be the active one, listing more providers
+				// than the newest (design 7, S9). Where every serial
+				// held gives no role the serials end, active known or
+				// not: no hang (the project owner, 2026-11-06, (A))
+				z.Copy, z.CopyError = SerialDigest{}, copyErr
+				z.ownerError(zone, gone+" dropped while the active serial is not known")
 				return nil
-			case z.Active != nil && len(z.Active.Reading.Records) > 1:
-				z.Copy, z.CopyError = SerialDigest{}, "no HSYNC3 and no HSYNCPARAM"
-				z.ownerError(zone, fmt.Sprintf("HSYNC3 and HSYNCPARAM dropped while serial %d lists %d providers", z.Active.Serial, len(z.Active.Reading.Records)))
+			case z.Active != nil && len(z.Active.Reading.Records) > 1 && givesRoles(z.Active.Reading):
+				z.Copy, z.CopyError = SerialDigest{}, copyErr
+				z.ownerError(zone, fmt.Sprintf("%s dropped while serial %d lists %d providers", gone, z.Active.Serial, len(z.Active.Reading.Records)))
 				return nil
 			}
+			// The end of the zone's management: no serial gives roles, or
+			// one provider is listed (design 7). HSYNC3 records left are
+			// read as they stand: a group with no roles stays organized.
 			return errEndOfService
 		}
 		cp := SerialDigest{Serial: in.Serial, Digest: in.Digest()}
@@ -547,13 +559,19 @@ func (s *InstructionStore) Note(zone string, in *Instructions, readErr error) {
 	case errors.Is(err, errEndOfService):
 		// The end of multi-provider service (design 7): update dropped the
 		// zone's serials.
-		lg.Info("the zone's HSYNC3 and HSYNCPARAM records are gone with at most one provider listed; its serials end", "zone", zone)
+		lg.Info("the zone's HSYNCPARAM is gone with no role given or at most one provider listed; its serials end", "zone", zone)
 	case err != nil:
 		lg.Error("the zone's serials could not be kept", "zone", zone, "err", err)
 	}
 }
 
 var errEndOfService = errors.New("the zone's instructions are gone")
+
+// givesRoles: an ON record's label is in servers= or signers= under in, as
+// participantsOf counts the voting members.
+func givesRoles(in *Instructions) bool {
+	return in != nil && len(identities(in.providers(slices.Concat(in.Servers, in.Signers)))) > 0
+}
 
 // Activate makes the thaw's target the zone's active serial (S7). It
 // succeeds only when the target is held, above the active serial and not
@@ -1016,6 +1034,15 @@ func (s *InstructionStore) fillMPZoneInfo(zone string, info *MPZoneInfo) {
 	}
 }
 
+// noteLocks is a lock per zone (canonicalName), held while the zone's copy
+// is read and noted (noteInstructions). tdns can run two post-refresh runs
+// of a zone at once: a first load's owed callbacks, from its retry on the
+// refresh engine's loop, beside a refresh in its pool. Each reads the copy
+// under the lock, so the one that notes last read last, and an older copy
+// is never noted after a newer one, such as a serial after the copy that
+// dropped its HSYNCPARAM.
+var noteLocks sync.Map
+
 // noteInstructions has the store classify the zone's copy as a refresh left
 // it, at the first load and at every refresh (the post-refresh callback).
 func (conf *Config) noteInstructions(mpzd *MPZoneData) {
@@ -1023,6 +1050,9 @@ func (conf *Config) noteInstructions(mpzd *MPZoneData) {
 	if s == nil {
 		return
 	}
+	mu, _ := noteLocks.LoadOrStore(canonicalName(mpzd.ZoneName), &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	defer mu.(*sync.Mutex).Unlock()
 	apex, err := mpzd.OwnerForAnalysis(mpzd.ZoneName)
 	if err != nil || apex == nil {
 		return

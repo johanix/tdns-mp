@@ -115,8 +115,11 @@ func TestTheDelegationSyncFollowsHSYNCPARAM(t *testing.T) {
 		{"the agents again", &parentSyncAgent, false, true},
 		{"no parentsync key: the owner's", nil, false, false},
 		{"the agents once more", &parentSyncAgent, false, true},
-		// an owner error (#308): the zone holds at its last reading
-		{"no HSYNCPARAM", nil, true, true},
+		// no HSYNCPARAM is no intent (the project owner, 2026-11-06): the
+		// copy gives no parameters, and the owner syncs. This rig keeps no
+		// serials; the store's end of them is
+		// TestNoHSYNCPARAMEndsTheSerialsOfAZoneThatGivesNoRole's
+		{"no HSYNCPARAM: no intent, the owner's", nil, true, false},
 	}
 	for _, s := range steps {
 		servedParentSync(t, r.mpzd, s.parentsync, s.gone)
