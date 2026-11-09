@@ -76,6 +76,19 @@ func (h *holdRig) waitOwed(t *testing.T, what string) {
 	waitUntil(t, what+": the sync was not owed\n"+h.log.String(), h.owed)
 }
 
+// explicit asks for an explicit sync, as the operator does, and returns its
+// answer.
+func (h *holdRig) explicit(t *testing.T) tdns.DelegationSyncStatus {
+	t.Helper()
+	resp := make(chan tdns.DelegationSyncStatus, 1)
+	h.q <- tdns.DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: h.mpzd.ZoneName, ZoneData: h.mpzd.ZoneData, Response: resp}
+	got, ok := recvWithin(resp, 5*time.Second)
+	if !ok {
+		t.Fatalf("the explicit sync gave no answer\n%s", h.log.String())
+	}
+	return got
+}
+
 // A leader's sync with the parent is held while the zone is not caught up:
 // nothing is sent, and the sync is owed. Once the zone is caught up, the
 // owed sync is asked for, looks at the parent, and sends.
@@ -774,17 +787,6 @@ func TestADroppedNotifyEndsWhatTheChainHadOut(t *testing.T) {
 // took. The room ticker then asks for nothing more, and the status no longer
 // says the sync is owed.
 func TestAnExplicitSyncClearsTheOwedSyncItAnswers(t *testing.T) {
-	explicit := func(t *testing.T, h *holdRig) tdns.DelegationSyncStatus {
-		t.Helper()
-		resp := make(chan tdns.DelegationSyncStatus, 1)
-		h.q <- tdns.DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: h.mpzd.ZoneName, ZoneData: h.mpzd.ZoneData, Response: resp}
-		got, ok := recvWithin(resp, 5*time.Second)
-		if !ok {
-			t.Fatalf("the explicit sync gave no answer\n%s", h.log.String())
-		}
-		return got
-	}
-
 	t.Run("the parent in step", func(t *testing.T) {
 		h := newHoldRig(t, "instep.answered.example.", "NOTIFY", false, repeat(time.Hour, 4)...)
 		z := ZoneName(h.mpzd.ZoneName)
@@ -794,7 +796,7 @@ func TestAnExplicitSyncClearsTheOwedSyncItAnswers(t *testing.T) {
 		h.caughtUp()
 		h.tr.oweForRoom(z) // and the full queue's mark
 		h.parent.holdsDS(h.ds)
-		if got := explicit(t, h); !got.InSync {
+		if got := h.explicit(t); !got.InSync {
 			t.Fatalf("the parent is not found in step: %+v", got)
 		}
 		if h.owed() {
@@ -813,7 +815,7 @@ func TestAnExplicitSyncClearsTheOwedSyncItAnswers(t *testing.T) {
 		h.parent.holdsNS("ns1."+z, h.oldNS) // the parent has an NS the zone no longer lists
 		h.caughtUp()
 		h.tr.oweForRoom(ZoneName(z))
-		got := explicit(t, h)
+		got := h.explicit(t)
 		if h.parent.updatesSeen() == 0 || got.Error {
 			t.Fatalf("no UPDATE was taken: %+v\n%s", got, h.log.String())
 		}

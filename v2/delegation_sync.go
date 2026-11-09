@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/johanix/tdns-transport/v2/transport"
@@ -236,6 +237,16 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				// what was owed before the analysis, this sync answers
 				analysed := time.Now()
 				syncstate, err := zd.AnalyseZoneDelegation(imr().Imr)
+				// An analysis that could not read all it asked for (the
+				// parent's glue or DS, the keystore's DS intent) has failed,
+				// whether it says in sync or not: the parent may hold what
+				// was not read. It ends no retry, clears no owed sync and
+				// sends nothing; it is owed and asked again like one that
+				// could not ask the parent at all.
+				if err == nil && !syncstate.Complete() {
+					err = fmt.Errorf("the parent's delegation was not read in full; no answer for %s",
+						strings.Join(syncstate.Unread, ", "))
+				}
 				if err != nil {
 					syncstate.Error = true
 					syncstate.ErrorMsg = err.Error()

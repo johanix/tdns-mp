@@ -48,11 +48,12 @@ type fakeParent struct {
 	ns      []string
 	ds      []dns.RR
 	updates int
-	last    *dns.Msg // the last UPDATE taken, not refused
-	refuse  bool     // answer an UPDATE REFUSED, as a parent that will not take it yet
-	fail    int      // answer an UPDATE with this rcode, which tdns does not retry (0: take it)
-	queries int      // the questions it was asked
-	silent  bool     // answer every question SERVFAIL, as a parent that does not answer
+	last    *dns.Msg        // the last UPDATE taken, not refused
+	refuse  bool            // answer an UPDATE REFUSED, as a parent that will not take it yet
+	fail    int             // answer an UPDATE with this rcode, which tdns does not retry (0: take it)
+	queries int             // the questions it was asked
+	silent  bool            // answer every question SERVFAIL, as a parent that does not answer
+	unread  map[uint16]bool // answer the questions of these types SERVFAIL, as a parent whose server fails them
 }
 
 func newFakeParent(t *testing.T, child string) *fakeParent {
@@ -109,12 +110,12 @@ func (p *fakeParent) serve(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 	p.queries++
-	if p.silent {
+	q := r.Question[0]
+	if p.silent || p.unread[q.Qtype] {
 		m.Rcode = dns.RcodeServerFailure
 		_ = w.WriteMsg(m)
 		return
 	}
-	q := r.Question[0]
 	switch {
 	case q.Qtype == dns.TypeNS && q.Name == p.child:
 		for _, ns := range p.ns {
@@ -139,6 +140,18 @@ func (p *fakeParent) holdsNS(ns ...string) {
 func (p *fakeParent) holdsDS(ds ...dns.RR) {
 	p.mu.Lock()
 	p.ds = ds
+	p.mu.Unlock()
+}
+
+// failsQuestions has the parent answer the questions of these types (the
+// child's glue, its DS) SERVFAIL, and the others as before; none: answer
+// them all again.
+func (p *fakeParent) failsQuestions(rrtypes ...uint16) {
+	p.mu.Lock()
+	p.unread = map[uint16]bool{}
+	for _, rrtype := range rrtypes {
+		p.unread[rrtype] = true
+	}
 	p.mu.Unlock()
 }
 
