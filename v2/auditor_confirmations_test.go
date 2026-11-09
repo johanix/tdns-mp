@@ -314,6 +314,18 @@ func (f *auditFleet) awaitConfirmation(p *fleetPeer, from, distID string) string
 	return ""
 }
 
+// awaitBothWords waits for both of a member's words on a distribution to
+// reach p, the immediate PENDING and the final word, and returns them
+// sorted. The member sends the two from different goroutines, so when its
+// combiner answers at once the final word may arrive first; the originator
+// ignores a PENDING that comes after it.
+func (f *auditFleet) awaitBothWords(p *fleetPeer, from, distID string) []string {
+	f.t.Helper()
+	words := []string{f.awaitConfirmation(p, from, distID), f.awaitConfirmation(p, from, distID)}
+	slices.Sort(words)
+	return words
+}
+
 func waitingObservations(sm *AuditStateManager, zone, about string) (waiting, cleared []string) {
 	for _, o := range sm.SnapshotAllObservations(zone) {
 		if o.Provider != about {
@@ -354,11 +366,7 @@ func TestTheAuditorShowsWhichMemberADistributionWaitsFor(t *testing.T) {
 	if d := f.distribution(zone, fleetP1, "d0"); d.State != "unseen" {
 		t.Errorf("a distribution the auditor has only seen confirmations of is %q, want unseen: %+v", d.State, d)
 	}
-	// p2's PENDING and its final word are two sends, and the combiner
-	// answers here at once: the final word may reach the originator first.
-	words := []string{f.awaitConfirmation(origin, fleetP2, "d0"), f.awaitConfirmation(origin, fleetP2, "d0")}
-	slices.Sort(words)
-	if !slices.Equal(words, []string{"PENDING", "SUCCESS"}) {
+	if words := f.awaitBothWords(origin, fleetP2, "d0"); !slices.Equal(words, []string{"PENDING", "SUCCESS"}) {
 		t.Fatalf("p2's words on d0 are %v, want PENDING and SUCCESS", words)
 	}
 	copies := aud.receivedFrom(fleetP2)
@@ -468,9 +476,8 @@ func TestTheAuditorShowsWhichMemberADistributionWaitsFor(t *testing.T) {
 	}
 	f.distribute(fleetP1, fleetP2, unaudited, "d2", nsAdd(unaudited, "ns2.p1.example."), time.Now())
 	f.combinerAnswers(fleetP2, "SUCCESS")
-	f.awaitConfirmation(origin, fleetP2, "d2") // the PENDING
-	if got := f.awaitConfirmation(origin, fleetP2, "d2"); got != "SUCCESS" {
-		t.Errorf("p2's final word on d2 at the originator is %s, want SUCCESS", got)
+	if words := f.awaitBothWords(origin, fleetP2, "d2"); !slices.Equal(words, []string{"PENDING", "SUCCESS"}) {
+		t.Errorf("p2's words on d2 at the originator are %v, want PENDING and SUCCESS", words)
 	}
 	time.Sleep(50 * time.Millisecond)
 	for _, id := range []string{fleetAuditor, fleetP3} {
