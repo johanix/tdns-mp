@@ -90,7 +90,7 @@ func newCatchUpNet(t *testing.T, zone string) *catchUpNet {
 	conf.SetMpConfig(&MultiProviderConf{Role: "agent", Identity: n.alice, Combiner: &PeerConf{Identity: "combiner.alice.example."}})
 	conf.InternalMp.MPTransport = env.Alice.Bridge
 	conf.InternalMp.AgentRegistry = env.Alice.Registry
-	conf.InternalMp.MPZoneNames = []string{zone}
+	conf.InternalMp.mpZones.setForTest(zone)
 	env.Alice.Bridge.combinerID = "combiner.alice.example."
 	conf.InternalMp.editsRequest = func(context.Context, *tdns.ZoneData, *MPTransportBridge, *MsgQs) (*EditsResponseMsg, time.Time, error) {
 		return &EditsResponseMsg{SenderID: "combiner.alice.example.", Zone: zone, Message: editsLoaded}, time.Now(), nil

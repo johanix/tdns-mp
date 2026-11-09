@@ -37,7 +37,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 
 	// Register MP zone option handler before ParseZones runs inside MainInit.
 	tdns.RegisterZoneOptionHandler(tdns.OptMultiProvider, func(zname string, options map[tdns.ZoneOption]bool) {
-		conf.InternalMp.MPZoneNames = append(conf.InternalMp.MPZoneNames, zname)
+		conf.InternalMp.mpZones.add(zname)
 		// On a reload, tdns has built the ZoneData of a zone it adds by
 		// now, and queues its first load after this: looked up here, a
 		// zone whose ZoneData is new gets the role's zone hooks before
@@ -96,13 +96,17 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// config (via conf.MpConfig() / WiredMpConfig()).
 	conf.RegisterMpConfigParser()
 
-	// Reset MPZoneNames before ParseZones re-collects them via the callback above
-	conf.InternalMp.MPZoneNames = nil
+	// Empty the multi-provider zones before ParseZones collects them via the
+	// callback above
+	conf.InternalMp.mpZones.reset()
 
 	// DNS infrastructure (zones, KeyDB, handlers, channels)
 	if err := conf.Config.MainInit(ctx, defaultcfg); err != nil {
 		return err
 	}
+	// the multi-provider zones ParseZones found, for what reads them from
+	// here on (#401)
+	conf.InternalMp.mpZones.refresh()
 	// wiredMpConfig is set by RegisterMpConfigParser's hook during
 	// tdns.ParseConfig (inside conf.Config.MainInit above), so the
 	// two accessors should be live by the time we get here.
@@ -491,7 +495,8 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 
 	// Create SyncQ locally (was previously shared from tdns, now owned by tdns-mp)
 	conf.InternalMp.SyncQ = make(chan SyncRequest, 10)
-	// MPZoneNames is populated directly by the OptMultiProvider callback above
+	// the multi-provider zones are collected by the OptMultiProvider callback
+	// above and published after ParseZones (mpZoneNames)
 
 	// Initialize CombinerState (agent-side: just an ErrorJournal, no chunk handler)
 	combinerID := "combiner"
@@ -636,7 +641,7 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	conf.InternalMp.MPTransport = tm
 	// The catch-up tracker, before the refresh engine starts: a zone's
 	// first load asks through it.
-	catchUp := newCatchUpTracker(AgentId(mp.Identity), conf.InternalMp.MPZoneNames, catchUpOutageFor(mp))
+	catchUp := newCatchUpTracker(AgentId(mp.Identity), conf.mpZoneNames(), catchUpOutageFor(mp))
 	catchUp.wire(conf, tm, conf.InternalMp.AgentRegistry)
 	conf.InternalMp.CatchUp, tm.catchUp = catchUp, catchUp
 	// the DS set of a zone our own signer does not own (Amendment 2), and

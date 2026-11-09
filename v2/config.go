@@ -61,13 +61,15 @@ func (conf *Config) RegisterMPRefreshCallbacks() {
 		zd, ok := tdns.Zones.Get(zone)
 		return ok && zd.Options[tdns.OptMultiProvider]
 	})
-	// and nothing of tdns-mp's keeps a removed or replaced ZoneData alive
+	// the zones this parse found (#401), and nothing of tdns-mp's keeps a
+	// removed or replaced ZoneData alive
+	conf.InternalMp.mpZones.refresh()
 	Zones.Prune()
 	conf.InternalMp.refreshRegistered.prune()
 	conf.InternalMp.onFirstLoadRegistered.prune()
 	conf.InternalMp.firstLoadSetUp.prune()
 	conf.InternalMp.agentFirstLoad.prune()
-	for _, zoneName := range conf.InternalMp.MPZoneNames {
+	for _, zoneName := range conf.mpZoneNames() {
 		if zd, ok := Zones.Get(zoneName); ok {
 			conf.registerRefreshCallbacks(zd)
 		}
@@ -128,7 +130,7 @@ func (conf *Config) registerRefreshCallbacks(zd *MPZoneData) {
 // conf.Config.MainInit returns). OnFirstLoad callbacks attached
 // here will fire later when RefreshEngine processes initial loads.
 func (conf *Config) ForEachMPZone(fn func(zd *MPZoneData)) {
-	for _, zoneName := range conf.InternalMp.MPZoneNames {
+	for _, zoneName := range conf.mpZoneNames() {
 		zd, exists := Zones.Get(zoneName)
 		if !exists {
 			continue
@@ -157,7 +159,10 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 	if hdb == nil {
 		return
 	}
-	for _, zone := range providerZonesWithoutOption(conf.InternalMp.MPZoneNames) {
+	// the zones this parse found (#401): the combiner's reload hook runs
+	// this before RegisterMPRefreshCallbacks
+	conf.InternalMp.mpZones.refresh()
+	for _, zone := range providerZonesWithoutOption(conf.mpZoneNames()) {
 		lgCombiner.Warn("a provider zone lacks the multi-provider option: its _signal KEYs are not put back at a restart or a refresh, and a withdrawal from it waits for good",
 			"zone", zone)
 	}
@@ -179,7 +184,7 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 		allInstr = nil
 	}
 
-	for _, zoneName := range conf.InternalMp.MPZoneNames {
+	for _, zoneName := range conf.mpZoneNames() {
 		mpzd, exists := Zones.Get(zoneName)
 		if !exists || !conf.InternalMp.onFirstLoadRegistered.first(mpzd.ZoneData) {
 			continue
@@ -337,7 +342,6 @@ type InternalMpConf struct {
 	TransportManager      *transport.TransportManager
 	MPTransport           *MPTransportBridge
 	LeaderElectionManager *LeaderElectionManager
-	MPZoneNames           []string
 	DistributionCache     *DistributionCache
 	AuditStateManager     *AuditStateManager
 	AuditWebAuth          *AuditWebAuth
@@ -348,6 +352,9 @@ type InternalMpConf struct {
 	onFirstLoadRegistered zoneOnce
 	firstLoadSetUp        zoneOnce
 	agentFirstLoad        zoneOnce
+	// mpZones: the multi-provider zones of the last parse (mp_zone_names.go,
+	// #401); read through conf.mpZoneNames().
+	mpZones mpZoneNameSet
 
 	// mpConfig is the tdns-mp-side parse of the multi-provider: config
 	// block, installed by SetMpConfig from the config parser hook
