@@ -446,15 +446,11 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 		if !ok {
 			return fmt.Errorf("SetupAgent: config zone %q not found in Zones", identityZone)
 		}
-		// An identity zone has no delegation sync, the auditor's too: an
-		// option given it in the config is dropped here, for good (tdns
-		// lays a run-time option over the config at a reload), so that no
-		// syncher sees it, tdns's on the auditor included. The agent's
-		// election and syncher also pass the zone by (isIdentityZone), for
-		// what reads the option before this. The operator is told once.
+		// The election and the syncher pass the identity zone by
+		// (isIdentityZone); the operator who gave it the option is told so
+		// here, once, at the start.
 		if zdp.Options[tdns.OptParentSync] {
-			zdp.SetRuntimeOption(tdns.OptParentSync, false)
-			lgAgent.Warn("identity zone: the parentsync option is dropped; the identity zone's delegation is not synced", "zone", identityZone)
+			lgAgent.Warn("identity zone: the parentsync option is ignored; the agent does not sync the identity zone's delegation", "zone", identityZone)
 		}
 		if wantApi {
 			zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *tdns.ZoneData) {
