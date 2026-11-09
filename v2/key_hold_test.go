@@ -403,3 +403,57 @@ func TestASyncOwedForTheKeyDoesNotWaitForRoom(t *testing.T) {
 		t.Errorf("the status says %q, want the key", st.ParentSync)
 	}
 }
+
+// Whether the leader's sync waits for the zone's key follows the parent's
+// verdict on it, as tdns recorded it (#404). A key the parent never gave a
+// verdict on, a key from before S14 or one a parent that does not answer
+// KeyState holds, does not hold the sync: the next sync tests it. A verdict
+// that is not trusted holds it, and so does a poll of the key that runs.
+func TestTheHoldFollowsTheParentsVerdict(t *testing.T) {
+	r := newKeyHoldRig(t, "verdict.key.example.")
+	const notTaken = "the parent has not taken the key"
+	for _, tc := range []struct {
+		state uint8
+		held  bool
+	}{
+		{0, false},
+		{edns0.KeyStateUninitialized, false},
+		{edns0.KeyStateTrusted, false},
+		{edns0.KeyStateUnknown, true},
+		{edns0.KeyStateRefused, true},
+		{edns0.KeyStateInvalid, true},
+		{edns0.KeyStateValidationFail, true},
+		{edns0.KeyStateBootstrapManualRequired, true},
+	} {
+		tdns.UpdateParentState(r.mpzd.KeyDB, string(r.zone), r.key.keyid, tc.state)
+		want := ""
+		if tc.held {
+			want = notTaken
+		}
+		if _, why := r.conf.keyHold(r.ctx, r.zone); why != want {
+			t.Errorf("parent_state %s: held for %q, want %q", edns0.KeyStateToString(tc.state), why, want)
+		}
+		if got := r.conf.keyPending(r.ctx, r.zone); got != tc.held {
+			t.Errorf("parent_state %s: keyPending %v, want %v", edns0.KeyStateToString(tc.state), got, tc.held)
+		}
+	}
+
+	tdns.UpdateParentState(r.mpzd.KeyDB, string(r.zone), r.key.keyid, 0)
+	r.pollRuns(t)
+	if _, why := r.conf.keyHold(r.ctx, r.zone); why != "poll running" {
+		t.Errorf("a key with no verdict and a poll of it running: held for %q, want \"poll running\"", why)
+	}
+}
+
+// The leader's sync of a zone whose key the parent never gave a verdict on
+// goes out: it is what tests the key. tdns records the key trusted when the
+// parent answers it NOERROR, and starts its re-bootstrap on BADKEY.
+func TestASyncTestsAKeyTheParentNeverGaveAVerdictOn(t *testing.T) {
+	r := newKeyHoldRig(t, "tested.key.example.")
+	tdns.UpdateParentState(r.mpzd.KeyDB, string(r.zone), r.key.keyid, 0) // from before S14, or a parent that does not answer KeyState
+	got := r.explicit(t)
+	if strings.Contains(got.Msg, "the parent has not taken the key") {
+		t.Fatalf("the sync was held for a key the parent never gave a verdict on: %q", got.Msg)
+	}
+	waitUntil(t, "the sync went out to the parent\n"+r.log.String(), func() bool { return r.parent.updatesSeen() > 0 })
+}
