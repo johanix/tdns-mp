@@ -195,7 +195,7 @@ func TestAUsableSchemeThatAppearsLaterIsPickedUp(t *testing.T) {
 		t.Errorf("%d ERROR lines\n%s", n, logs)
 	}
 	// Picked up once: a later look has nothing to do for the zone.
-	if got := r.conf.InternalMp.parentNotices.rechecked(r.conf.InternalMp.parentNotices.noScheme); len(got) != 0 {
+	if got := r.conf.InternalMp.parentNotices.rechecked(&r.conf.InternalMp.parentNotices.noScheme); len(got) != 0 {
 		t.Errorf("zones still on the quiet look: %v", got)
 	}
 }
@@ -359,5 +359,33 @@ func TestTheIdentitySetupWaitsForTheParentsUpdateScheme(t *testing.T) {
 				t.Errorf("%d ERROR lines\n%s", n, logs)
 			}
 		})
+	}
+}
+
+// The hourly look reads the notice maps only under the lock: note makes a
+// map on a zone's first note, from the syncher or the identity loop, while
+// the look may be running. This shows its race only under -race (make
+// test-race).
+func TestTheQuietLookReadsTheNoticesUnderTheLock(t *testing.T) {
+	conf := &Config{Config: &tdns.Config{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q := make(chan tdns.DelegationSyncRequest, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200 && ctx.Err() == nil; i++ {
+			conf.recheckParentOffersOnce(ctx, nil, q)
+		}
+	}()
+	off := parentOffer{parent: "parent.example.", found: "no DSYNC"}
+	for i := 0; i < 50; i++ {
+		zone := fmt.Sprintf("child%d.parent.example.", i)
+		conf.noteParentOffer(zone, off, false)
+		conf.noteUpdateOffer(zone, off, false)
+	}
+	<-done
+	if got := conf.InternalMp.parentNotices.rechecked(&conf.InternalMp.parentNotices.noScheme); len(got) != 0 {
+		t.Errorf("zones on the quiet look without asking for it: %v", got)
 	}
 }

@@ -162,12 +162,14 @@ func (n *parentNotices) clear(m *map[string]*parentNotice, zone string) *parentN
 	return e
 }
 
-// rechecked lists the zones on the hourly look.
-func (n *parentNotices) rechecked(m map[string]*parentNotice) []string {
+// rechecked lists the zones on the hourly look. It takes the map's address,
+// as note and clear do, and reads the field only under n.mu: note makes the
+// map on a zone's first note, from the syncher or the identity loop.
+func (n *parentNotices) rechecked(m *map[string]*parentNotice) []string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	var out []string
-	for zone, e := range m {
+	for zone, e := range *m {
 		if e.recheck {
 			out = append(out, zone)
 		}
@@ -264,7 +266,7 @@ func (conf *Config) recheckParentOffersOnce(ctx context.Context, hdb *HsyncDB, q
 		{&n.noScheme, "EXPLICIT-SYNC-DELEGATION", func(zone string, off parentOffer) bool { return conf.noteParentOffer(zone, off, true) }},
 		{&n.noUpdate, "DELEGATION-SYNC-SETUP", func(zone string, off parentOffer) bool { return conf.noteUpdateOffer(zone, off, true) }},
 	} {
-		for _, zone := range n.rechecked(*set.m) {
+		for _, zone := range n.rechecked(set.m) {
 			mpzd, ok := Zones.Get(zone)
 			if !ok || mpzd == nil || mpzd.ZoneData == nil || !mpzd.Options[tdns.OptParentSync] ||
 				(mpzd.Options[tdns.OptMultiProvider] && !conf.leadsZone(zone)) {
