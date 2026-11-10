@@ -378,7 +378,7 @@ func (r *receiveRig) staleAt(in *Instructions, at time.Time, w *Withdraw) bool {
 
 // combinerStaleAt is the same at the combiner (staleCombinerReplace).
 func combinerStaleAt(zone string, in *Instructions, at time.Time) bool {
-	stale, _ := staleCombinerReplace(&CombinerSyncRequest{SenderID: roleN, DistributionID: nextDistributionID(), Timestamp: at,
+	stale, _, _, _ := staleCombinerReplace(&CombinerSyncRequest{SenderID: roleN, DistributionID: nextDistributionID(), Timestamp: at,
 		Instr: msgStampAt(in)}, zone, dns.TypeNS)
 	return stale
 }
