@@ -43,12 +43,33 @@ revert. It says that "parentsync does not apply" to a config-listed
 identity zone. That is true only for a zone whose config does not give it
 the parentsync option.
 
-A zone with the option is synced like any other zone with it: tdns queues
-its setup and the first load elects. So the warning is now given only when
-the option is absent.
+A zone with the option is synced, so the warning is now given only when the
+option is absent. tdns doesn't start that sync: `SetupZoneSync` queues the
+setup and the load-time compare only for an authoritative server's zone, or
+for a multi-provider agent's multi-provider zone. The identity zone is
+neither. So tdns-mp starts it:
 
-`TestAConfigListedIdentityZoneIsWarnedAbout` gains the case: no warning,
-and the option is still set after the set-up.
+- **On the agent**, the zone's first load elects (`electAtFirstLoad`). The
+  elected leader sets up the SIG(0) key and asks for the sync
+  (`onLeaderElected`).
+- **On the auditor**, there is no election. The zone's first load starts the
+  path the daemon-built zone takes (`startIdentityParentSync`): its CDS, then
+  `syncIdentityDelegation`, which asks the parent only once it offers a
+  usable scheme. `configIdentityZoneSyncedHere` decides this. It does not
+  start the path where an election runs, since that would race the leader's
+  SIG(0) key setup.
+
+Tests:
+
+- `TestAConfigListedIdentityZoneIsWarnedAbout` gains a case: no warning, and
+  the option is still set after the set-up.
+- `TestAConfigListedIdentityZoneWithTheOptionIsSynced`: the auditor's zone
+  with the option asks for its sync after the first load. Without the option,
+  or with an election, the first load starts nothing.
+
+Rev. 2026-11-10: the first version of this note said tdns queues the setup
+for such a zone. CodeRabbit's Major on #409 found that it does not, and the
+auditor's first-load start was added.
 
 ## No usable DSYNC: one warning per zone (`parent_offer.go`)
 
@@ -153,6 +174,7 @@ That covers tdns-auth children too. tdns-mp is re-pinned to it on top of
 |---|---|
 | `TestIdentityZoneParentSync`, `TestTheIdentityZonesParentSyncStartsAfterItsCommit` (restored) | An identity zone with a `parentsync:` block gets the sync |
 | `TestAConfigListedIdentityZoneIsWarnedAbout` (new case) | A config-listed identity zone keeps its option, with no warning |
+| `TestAConfigListedIdentityZoneWithTheOptionIsSynced` | On the auditor, such a zone's first load asks for its sync; without the option, or where an election runs, nothing more is started |
 | `TestAParentWithNoDsyncIsWarnedAboutOnce` | The real syncher, tdns's analysis and a resolver whose cache answers the DSYNC queries with no data. Five syncs of a multi-provider leader give one WARN naming the parent and what was found, four DEBUG lines, no ERROR, no failure chain, and nothing sent |
 | `TestAUsableSchemeThatAppearsLaterIsPickedUp` | The same parent publishes NOTIFY targets. The next quiet look logs INFO, and the sync goes out as NOTIFY(CDS) |
 | `TestARealFailureOnAUsableSchemeIsStillAnError` | A parent that offers UPDATE and fails it gives "error from SyncZoneDelegation" at ERROR, and no "offers nothing" notice |

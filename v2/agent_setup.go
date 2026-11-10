@@ -498,7 +498,8 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 		}
 		// The zone this daemon builds becomes a parentsync child
 		// (SetupAgentAutoZone). One from the config is one only if its config
-		// gives it the option, which it keeps; without it, an operator who
+		// gives it the option, which it keeps, and is then synced (below, and
+		// configIdentityZoneSyncedHere); without it, an operator who
 		// configured parentsync: is told so here, once, at the start.
 		conf.warnConfigIdentityZoneNotSynced(zdp.ZoneData)
 		if wantApi {
@@ -519,6 +520,13 @@ func (conf *Config) SetupAgent(ctx context.Context, all_zones []string) error {
 			lgAgent.Info("identity zone loaded and its transport records queued; the first hello may leave", "zone", zd.ZoneName)
 			conf.InternalMp.IdentityReady.Publish()
 		})
+		if conf.configIdentityZoneSyncedHere(zdp.ZoneData) {
+			// Off the refresh engine's loop, which drains OnFirstLoad: the
+			// auditor's CDS publish waits for the zone to serve it.
+			zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *tdns.ZoneData) {
+				go conf.startIdentityParentSync(ctx, zd)
+			})
+		}
 	}
 
 	lgAgent.Debug("SetupAgent exit")
@@ -723,8 +731,9 @@ const configIdentityZoneNotSynced = "identity zone is listed in the config, so p
 // not a parentsync child, when one the daemon builds would have been
 // (identityZoneParentSync). The daemon builds its zone a parentsync child
 // (tdns-mp #73); a config-listed zone is one only if its config gives it the
-// parentsync option, and then it is synced as any other zone with the option
-// and keeps it (Johan, 2026-11-09): there is nothing to warn about. Without
+// parentsync option, which it keeps (Johan, 2026-11-09). It is then synced,
+// by the election on the agent and from its first load on the auditor
+// (configIdentityZoneSyncedHere): there is nothing to warn about. Without
 // the option it gets none of it, and until #73 nothing said so. The daemon
 // keeps running; the zone still serves its transport records.
 //
@@ -738,6 +747,25 @@ func (conf *Config) warnConfigIdentityZoneNotSynced(zd *tdns.ZoneData) {
 		return
 	}
 	lgAgent.Warn(configIdentityZoneNotSynced, "zone", zd.ZoneName)
+}
+
+// configIdentityZoneSyncedHere reports whether SetupAgent starts the
+// delegation sync of a config-listed identity zone itself, from the zone's
+// first load, through the path the daemon-built zone takes
+// (startIdentityParentSync): its CDS, then syncIdentityDelegation, which
+// asks the parent only once it offers a usable scheme.
+//
+// That is for a zone whose config gives it the parentsync option, with a
+// parentsync: block and the resolver, where no leader election runs: the
+// auditor. tdns starts nothing for such a zone in an agent or an auditor:
+// SetupZoneSync queues the setup, and the compare at load, only for an
+// authoritative server's zone or a multi-provider agent's multi-provider
+// zone. On the agent the zone's first load elects (electAtFirstLoad), and
+// the elected leader sets up its SIG(0) key and asks for the sync
+// (onLeaderElected); a second start here would race that key setup.
+func (conf *Config) configIdentityZoneSyncedHere(zd *tdns.ZoneData) bool {
+	return zd.Options[tdns.OptParentSync] && conf.identityZoneParentSync() &&
+		conf.InternalMp.LeaderElectionManager == nil
 }
 
 // identitySyncPace is how syncIdentityDelegation paces its asks, and how

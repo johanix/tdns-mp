@@ -866,3 +866,80 @@ func TestAgentSig0KeyPrepUsesParentSyncAlgorithm(t *testing.T) {
 		})
 	}
 }
+
+// A config-listed identity zone whose config gives it the parentsync option
+// is synced (Johan, 2026-11-09). tdns starts nothing for it in an agent or
+// an auditor, and the auditor holds no election, so there its first load
+// starts the sync the daemon-built zone has (configIdentityZoneSyncedHere).
+// On the agent the election does it, and the first load starts nothing more.
+func TestAConfigListedIdentityZoneWithTheOptionIsSynced(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		zone     string
+		option   bool
+		election bool
+		want     bool
+	}{
+		{"auditor, the zone has the option", "auditor.listed-option.example.", true, false, true},
+		{"auditor, no option", "auditor.listed-plain.example.", false, false, false},
+		{"agent: the election syncs it", "agent.listed-elects.example.", true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conf, zd := configListedIdentityZone(t, tc.zone)
+			conf.Config.ParentSync.Schemes = []string{"notify"}
+			q := make(chan tdns.DelegationSyncRequest, 4)
+			conf.Config.Internal.DelegationSyncQ = q
+			conf.Config.Internal.ImrReady = tdns.NewImrReadiness()
+			conf.Config.Internal.ImrReady.Publish()
+			conf.InternalMp.parentOffer = func(context.Context, *tdns.ZoneData) (parentOffer, error) {
+				return parentOffer{parent: "example.", found: "NOTIFY", usable: true, schemes: "NOTIFY"}, nil
+			}
+			if tc.election {
+				conf.InternalMp.LeaderElectionManager = &LeaderElectionManager{}
+			}
+			zd.Options[tdns.OptParentSync] = tc.option
+			logs := captureAgentLog(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+
+			if err := conf.SetupAgent(ctx, []string{tc.zone}); err != nil {
+				t.Fatalf("SetupAgent: %v", err)
+			}
+			zdp, ok := Zones.Get(tc.zone)
+			if !ok {
+				t.Fatal("the config-listed identity zone is not registered")
+			}
+			for _, f := range zdp.OnFirstLoad {
+				f(zdp.ZoneData)
+			}
+
+			wait := 5 * time.Second
+			if !tc.want {
+				wait = 300 * time.Millisecond
+			}
+			select {
+			case req := <-q:
+				if !tc.want {
+					t.Fatalf("the first load asked for %s; want nothing: %s", req.Command, logs)
+				}
+				if req.Command != "EXPLICIT-SYNC-DELEGATION" || req.Response == nil || !sameName(req.ZoneName, tc.zone) {
+					t.Fatalf("ask = %q for %q (response channel %v), want EXPLICIT-SYNC-DELEGATION for %s with a response channel",
+						req.Command, req.ZoneName, req.Response != nil, tc.zone)
+				}
+				// In sync: the identity loop ends.
+				req.Response <- tdns.DelegationSyncStatus{InSync: true}
+				deadline := time.Now().Add(5 * time.Second)
+				for !strings.Contains(logs.String(), "identity zone: delegation in sync with the parent") {
+					if time.Now().After(deadline) {
+						t.Fatalf("the identity loop did not take the answer: %s", logs)
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			case <-time.After(wait):
+				if tc.want {
+					t.Fatalf("the first load started no delegation sync for the zone: %s", logs)
+				}
+			}
+		})
+	}
+}
