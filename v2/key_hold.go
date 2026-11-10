@@ -31,10 +31,12 @@ import (
 //     (ParentSyncAfterKeyPublication): it bootstraps the key once the key
 //     is served, and the sync signed with it waits for that; or
 //   - a key this agent made or took was not published; or
-//   - the parent does not trust the zone's key yet, by what tdns last
-//     recorded of it (keyPending, plan S14): every sync the leader asks for,
-//     the election's included, waits until the key is usable, and tdns asks
-//     for one when the parent trusts it (ParentSyncAfterKeyPublication).
+//   - the parent's last verdict on the zone's key, as tdns recorded it, is
+//     that it does not trust the key yet (keyPending, plan S14): every sync
+//     the leader asks for, the election's included, waits until the key is
+//     usable, and tdns asks for one when the parent trusts it
+//     (ParentSyncAfterKeyPublication). A key the parent never gave a verdict
+//     on does not wait (parentHoldsKey).
 //
 // The held sync is owed, and asked for when the hold ends: when the last
 // poll of the zone's key ends (keyPollEnded), when the key is retired to one,
@@ -349,7 +351,7 @@ func (conf *Config) keyHold(ctx context.Context, zone ZoneName) (uses bool, why 
 	if unpublished {
 		return true, "not published"
 	}
-	if zk.held.parentState != edns0.KeyStateTrusted {
+	if parentHoldsKey(zk.held.parentState) {
 		return true, "the parent has not taken the key"
 	}
 	return true, ""
@@ -502,12 +504,31 @@ func parentTrustsActive(kdb *tdns.KeyDB, zone ZoneName, keyid uint16) bool {
 	return false
 }
 
+// parentHoldsKey: tdns's record of the zone's key (parent_state) holds the
+// leader's sync. The parent trusts the key: no hold. The parent never gave a
+// verdict on it (0, or tdns's uninitialised sentinel): no hold either. A
+// parent that does not answer KeyState never gives one, so the next sync
+// tests the key (tdns-mp #404, ruling (a)): tdns records the key trusted when
+// the parent answers that UPDATE with NOERROR, and a BADKEY starts tdns's
+// re-bootstrap, which waits for the key to be served. The cost: that one
+// sync may be signed with a key the parent has not verified yet, and only
+// where the parent never says. Any verdict the parent did give that is not
+// trusted holds, as it did.
+func parentHoldsKey(state uint8) bool {
+	switch state {
+	case edns0.KeyStateTrusted, 0, edns0.KeyStateUninitialized:
+		return false
+	}
+	return true
+}
+
 // keyPending: this agent leads the zone, the zone uses a key, and this agent
-// holds no key, or holds one the parent does not trust yet by what tdns last
-// recorded of it (parent_state). While it is true every sync the leader asks
-// for is held (keyHold), and the key rounds offer the key again
-// (reofferZoneKey). Nothing is pending for a parent known to take no UPDATE
-// (plan S14).
+// holds no key, or holds one whose last verdict from the parent, as tdns
+// recorded it (parent_state), holds the sync (parentHoldsKey). While it is
+// true every sync the leader asks for is held (keyHold), and the key rounds
+// offer the key again (reofferZoneKey). Nothing is pending for a parent known
+// to take no UPDATE (plan S14), or for a key the parent never gave a verdict
+// on (#404).
 func (conf *Config) keyPending(ctx context.Context, zone ZoneName) bool {
 	if lem := conf.InternalMp.LeaderElectionManager; lem == nil || !lem.IsLeader(zone) {
 		return false
@@ -520,7 +541,7 @@ func (conf *Config) keyPending(ctx context.Context, zone ZoneName) bool {
 		return true
 	}
 	zk, err := readZoneKey(kdb, zone)
-	return err != nil || zk.held == nil || zk.held.parentState != edns0.KeyStateTrusted
+	return err != nil || zk.held == nil || parentHoldsKey(zk.held.parentState)
 }
 
 // rolloverInZone: a key rollover is under way in the zone, at this provider
