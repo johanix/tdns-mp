@@ -708,17 +708,19 @@ func (mpzd *MPZoneData) combinerResyncSignalKeys(senderID, zone string, hdb *Hsy
 // (ApplyPendingSignalKeys, CombinerReapplyContributions), and when a
 // provider zone refreshes (MPPreRefresh). The customer zone's own refresh
 // asks too, when its HSYNCPARAM has changed (PostRefresh). The agent asks
-// for at-ns only when the customer's HSYNCPARAM says pubkey
-// (publishLocations), but a stored instruction can say at-ns for a zone that
-// does not: an agent from before that rule sent it, or the customer has
-// taken the flag away since. So every use of a stored instruction asks the
-// zone first.
+// for at-ns only when the customer's HSYNCPARAM says pubkey and the zone has
+// HSYNC3 (publishLocations), but a stored instruction can say at-ns for a
+// zone that does not: an agent from before that rule sent it, or the
+// customer has taken the flag or the HSYNC3 records away since. So every
+// use of a stored instruction asks the zone first.
 
 // lacksPubkeyConsent: the customer's zone is loaded and its HSYNCPARAM does
-// not say pubkey. A zone that has not loaded yet says nothing either way,
-// and its stored instructions are left as they are until it has.
+// not say pubkey, or it has no HSYNC3, so its signal names are tdns's
+// use-hsyncparam's to publish (pubkeyHere). A zone that has not loaded yet
+// says nothing either way, and its stored instructions are left as they are
+// until it has.
 func (mpzd *MPZoneData) lacksPubkeyConsent() bool {
-	return mpzd.HasPublishedData() && !mpzd.hasPubkey()
+	return mpzd.HasPublishedData() && !mpzd.pubkeyHere()
 }
 
 // contributionsLoaded: the zone has loaded, its persisted contributions are
@@ -776,7 +778,7 @@ func withdrawSignalKeys(stored *StoredPublishInstruction, hdb *HsyncDB) {
 	kept := append(append([]string(nil), waiting...), failed...)
 	if len(kept) > 0 && len(retracted) == 0 {
 		if len(waiting) > 0 {
-			lgCombiner.Info("at-ns publication to be withdrawn when the provider zone has loaded: the zone's HSYNCPARAM does not say pubkey",
+			lgCombiner.Info("at-ns publication to be withdrawn when the provider zone has loaded: the zone's HSYNCPARAM does not say pubkey, or it has no HSYNC3",
 				"zone", stored.Zone, "sender", stored.SenderID, "waiting", waiting)
 		}
 		return
@@ -794,7 +796,7 @@ func withdrawSignalKeys(stored *StoredPublishInstruction, hdb *HsyncDB) {
 	if err := SavePublishInstruction(hdb, stored.Zone, stored.SenderID, instr, kept); err != nil {
 		lgCombiner.Error("failed to save the publish instruction after withdrawing at-ns", "zone", stored.Zone, "sender", stored.SenderID, "err", err)
 	}
-	lgCombiner.Info("at-ns publication withdrawn: the zone's HSYNCPARAM does not say pubkey",
+	lgCombiner.Info("at-ns publication withdrawn: the zone's HSYNCPARAM does not say pubkey, or it has no HSYNC3",
 		"zone", stored.Zone, "sender", stored.SenderID, "retracted", retracted, "waiting", waiting, "failed", failed, "locations", instr.Locations)
 }
 
