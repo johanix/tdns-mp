@@ -56,8 +56,7 @@ func trustKey(kdb *tdns.KeyDB, zone string, keyid uint16) {
 
 // parentDoesNotKnowKey records that the parent answered it does not know the
 // zone's key keyid, as tdns's poll does: a verdict that holds the leader's
-// sync (parentHoldsKey). A key the parent never gave a verdict on holds
-// nothing (#404).
+// sync (parentHoldsKey), whether or not a poll of the key has ended.
 func parentDoesNotKnowKey(kdb *tdns.KeyDB, zone string, keyid uint16) {
 	tdns.UpdateParentState(kdb, zone, keyid, edns0.KeyStateUnknown)
 }
