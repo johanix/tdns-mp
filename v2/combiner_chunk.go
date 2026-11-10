@@ -1322,11 +1322,24 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 			// the agent forwards a peer's REPLACEs to its combiner in the
 			// order it applied them, and the queue can still deliver an
 			// older one after a newer one. The newest origin wins here too.
-			if stale, applied := staleCombinerReplace(req, zonename, rrtype); stale {
+			// A REPLACE that is not applied below gives its place back
+			// (unclaim), at each of the exits that refuse it.
+			stale, newest, unclaim, gerr := staleCombinerReplace(req, zonename, rrtype)
+			if gerr != nil {
+				// refused as a failed REPLACE is, so that the sender
+				// sends it again
+				lgCombiner.Error("REPLACE refused: its order guard could not be saved", "zone", zonename, "sender", req.SenderID, "rrtype", op.RRtype, "err", gerr)
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: fmt.Sprintf("(replace %s)", op.RRtype),
+					Reason: fmt.Sprintf("replace failed: %v", gerr),
+				})
+				continue
+			}
+			if stale {
 				lgCombiner.Warn("ignored a stale REPLACE: older than the one applied",
 					"zone", zonename, "sender", req.SenderID, "rrtype", op.RRtype,
 					"this", req.Timestamp.UTC().Format(time.RFC3339Nano), "thisDistrib", req.DistributionID,
-					"applied", applied.Time.UTC().Format(time.RFC3339Nano), "appliedDistrib", applied.DistID)
+					"applied", newest.Time.UTC().Format(time.RFC3339Nano), "appliedDistrib", newest.DistID)
 				continue
 			}
 
@@ -1355,6 +1368,7 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 							if derr != nil {
 								// refused as a failed REPLACE is, so that
 								// the sender sends it again
+								unclaim()
 								lgCombiner.Error("removing the sender's own contribution failed", "zone", zonename, "sender", req.SenderID, "rrtype", op.RRtype, "err", derr)
 								rejectedItems = append(rejectedItems, RejectedItem{
 									Record: fmt.Sprintf("(replace %s)", op.RRtype),
@@ -1393,6 +1407,7 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 			if rrtype == dns.TypeCSYNC && len(parsedRRs) > 0 {
 				reason, drop := mpzd.csyncVerdict(req.SenderID, zonename, parsedRRs)
 				if reason != "" {
+					unclaim()
 					for _, rr := range parsedRRs {
 						rejectedItems = append(rejectedItems, RejectedItem{Record: rr.String(), Reason: reason})
 					}
@@ -1403,6 +1418,7 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 
 			applied, removed, changed, err := mpzd.ReplaceCombinerDataByRRtype(req.SenderID, zonename, rrtype, parsedRRs)
 			if err != nil {
+				unclaim()
 				lgCombiner.Error("REPLACE operation failed", "err", err)
 				rejectedItems = append(rejectedItems, RejectedItem{
 					Record: fmt.Sprintf("(replace %s)", op.RRtype),
@@ -1827,27 +1843,73 @@ var combinerReplaceOrigins = struct {
 // staleCombinerReplace answers whether a REPLACE is older than the one last
 // applied for the same (zone, sender, rrtype), by the active serial its
 // agent stamped at the send, then by the time (olderThan), and records it
-// as the newest when it is not, on disk too (best-effort, as the agent's
-// guard). A request without a time is never stale.
-func staleCombinerReplace(req *CombinerSyncRequest, zonename string, rrtype uint16) (bool, replaceOrigin) {
+// as the newest when it is not, on disk too. A request without a time is
+// never stale.
+//
+// It records before the apply, so that a REPLACE the queue delivers in the
+// meantime is judged against this one, and so the record must hold to what
+// is applied (tdns-mp #390, path 1). A REPLACE whose origin cannot be saved
+// is refused (err), with the previous origin kept: applied without it, an
+// older REPLACE queued across a restart would undo it. And a REPLACE that
+// is then not applied gives its origin back (unclaim): else an older one,
+// a delete say, would be skipped as stale, and answered, for one that
+// never was applied.
+func staleCombinerReplace(req *CombinerSyncRequest, zonename string, rrtype uint16) (stale bool, newest replaceOrigin, unclaim func(), err error) {
+	unclaim = func() {}
 	if req.Timestamp.IsZero() {
-		return false, replaceOrigin{}
+		return false, replaceOrigin{}, unclaim, nil
 	}
 	key := zonename + "|" + req.SenderID + "|" + dns.TypeToString[rrtype]
 	origin := originOf(req.Timestamp, req.DistributionID, req.Instr)
 	combinerReplaceOrigins.mu.Lock()
 	defer combinerReplaceOrigins.mu.Unlock()
-	if cur, ok := combinerReplaceOrigins.m[key]; ok && origin.olderThan(cur) {
-		return true, cur
+	prev, hadPrev := combinerReplaceOrigins.m[key]
+	if hadPrev && origin.olderThan(prev) {
+		return true, prev, unclaim, nil
 	}
-	combinerReplaceOrigins.m[key] = origin
 	// under the lock, so that the rows are written in the order the map is
 	if hdb := combinerReplaceOrigins.hdb; hdb != nil {
 		if err := SaveCombinerReplaceOrigin(hdb, zonename, req.SenderID, rrtype, origin); err != nil {
-			lgCombiner.Error("failed to persist replace origin", "zone", zonename, "sender", req.SenderID, "rrtype", dns.TypeToString[rrtype], "err", err)
+			return false, replaceOrigin{}, unclaim, fmt.Errorf("its order guard could not be saved: %w", err)
 		}
 	}
-	return false, replaceOrigin{}
+	combinerReplaceOrigins.m[key] = origin
+	return false, replaceOrigin{}, func() {
+		unclaimCombinerReplace(key, zonename, req.SenderID, rrtype, origin, prev, hadPrev)
+	}, nil
+}
+
+// unclaimCombinerReplace puts back the origin that a REPLACE which was not
+// applied took the place of (staleCombinerReplace), in memory and on disk,
+// or none when there was none; unless a newer one has taken it since.
+func unclaimCombinerReplace(key, zone, sender string, rrtype uint16, origin, prev replaceOrigin, hadPrev bool) {
+	combinerReplaceOrigins.mu.Lock()
+	defer combinerReplaceOrigins.mu.Unlock()
+	if cur, ok := combinerReplaceOrigins.m[key]; !ok || !sameOrigin(cur, origin) {
+		return
+	}
+	hdb := combinerReplaceOrigins.hdb
+	var err error
+	if hadPrev {
+		combinerReplaceOrigins.m[key] = prev
+		if hdb != nil {
+			err = SaveCombinerReplaceOrigin(hdb, zone, sender, rrtype, prev)
+		}
+	} else {
+		delete(combinerReplaceOrigins.m, key)
+		if hdb != nil {
+			err = DeleteCombinerReplaceOrigin(hdb, zone, sender, rrtype)
+		}
+	}
+	if err != nil {
+		lgCombiner.Error("failed to put back the replace origin of a REPLACE not applied: after a restart an older REPLACE stays refused",
+			"zone", zone, "sender", sender, "rrtype", dns.TypeToString[rrtype], "err", err)
+	}
+}
+
+// sameOrigin: a and b are the same REPLACE's origin.
+func sameOrigin(a, b replaceOrigin) bool {
+	return a.Time.Equal(b.Time) && a.DistID == b.DistID && a.Under == b.Under && a.HasUnder == b.HasUnder
 }
 
 // loadCombinerReplaceOrigins attaches hdb to combinerReplaceOrigins and
