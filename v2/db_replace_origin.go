@@ -33,6 +33,18 @@ func SaveCombinerReplaceOrigin(hdb *HsyncDB, zone, senderID string, rrtype uint1
 	return saveReplaceOriginIn(hdb, "CombinerReplaceOrigin", zone, senderID, rrtype, origin)
 }
 
+// DeleteCombinerReplaceOrigin removes the combiner's guard row for (zone,
+// senderID, rrtype): the place a REPLACE that was not applied took, with
+// none held before it.
+func DeleteCombinerReplaceOrigin(hdb *HsyncDB, zone, senderID string, rrtype uint16) error {
+	hdb.Lock()
+	defer hdb.Unlock()
+	if _, err := hdb.DB.Exec(`DELETE FROM CombinerReplaceOrigin WHERE zone = ? AND agent_id = ? AND rrtype = ?`, zone, senderID, rrtype); err != nil {
+		return fmt.Errorf("delete replace origin in CombinerReplaceOrigin: %w", err)
+	}
+	return nil
+}
+
 // LoadCombinerReplaceOrigins is LoadAllReplaceOrigins for the combiner's
 // guard, in the key shape of combinerReplaceOrigins: "zone|sender|RRTYPE".
 func LoadCombinerReplaceOrigins(hdb *HsyncDB) (map[string]replaceOrigin, error) {
