@@ -26,23 +26,73 @@ import (
 	"github.com/miekg/dns"
 )
 
-// servingLookup asks the nameserver ns, by name, for the zone's SOA RRset
-// with its RRSIGs. A test stands in for it.
+// servedAnswer is one address's answer to the serving check's query: the
+// zone's SOA RRset with its RRSIGs, or why there is none.
+type servedAnswer struct {
+	Addr  string
+	RRset *core.RRset
+	Err   error
+}
+
+// servingLookup asks each address of the nameserver ns, found by name, for
+// the zone's SOA RRset with its RRSIGs: an answer per address. A test
+// stands in for it.
 var servingLookup = imrServingLookup
 
-// servingKeysLookup is servingLookup for the zone's DNSKEY RRset.
+// servingKeysLookup asks the nameserver ns, by name, for the zone's DNSKEY
+// RRset (imrServingQuery). A test stands in for it.
 var servingKeysLookup = func(ctx context.Context, zone, ns string) (*core.RRset, error) {
 	return imrServingQuery(ctx, zone, ns, dns.TypeDNSKEY)
 }
 
-// imrServingLookup asks ns for the zone's SOA (imrServingQuery).
-func imrServingLookup(ctx context.Context, zone, ns string) (*core.RRset, error) {
-	return imrServingQuery(ctx, zone, ns, dns.TypeSOA)
+// imrServingLookup asks each of ns's addresses (servingAddrs), without
+// recursion and with DNSSEC OK, for the zone's SOA. Each on its own: over a
+// list of addresses AuthDNSQuery takes the first that answers, and another
+// address of the same name can serve an older or an unsigned copy.
+func imrServingLookup(ctx context.Context, zone, ns string) ([]servedAnswer, error) {
+	addrs, err := servingAddrs(ctx, ns)
+	if err != nil {
+		return nil, err
+	}
+	imr := tdns.Globals.ImrEngine
+	answers := make([]servedAnswer, 0, len(addrs))
+	for _, addr := range addrs {
+		a := servedAnswer{Addr: addr}
+		rrset, rcode, _, err := imr.AuthDNSQuery(ctx, zone, dns.TypeSOA, []string{addr}, log.Default(), false)
+		switch {
+		case err != nil:
+			a.Err = err
+		case rrset == nil:
+			// NODATA, NXDOMAIN or a referral: no error, and no RRset
+			a.Err = fmt.Errorf("no SOA in the answer (%s)", dns.RcodeToString[rcode])
+		default:
+			a.RRset = rrset
+		}
+		answers = append(answers, a)
+	}
+	return answers, nil
 }
 
-// imrServingQuery finds ns's addresses through the IMR and asks them,
-// without recursion and with DNSSEC OK, for the zone's RRset of qtype.
+// imrServingQuery asks ns's addresses (servingAddrs), without recursion and
+// with DNSSEC OK, for the zone's RRset of qtype: the first that answers.
 func imrServingQuery(ctx context.Context, zone, ns string, qtype uint16) (*core.RRset, error) {
+	addrs, err := servingAddrs(ctx, ns)
+	if err != nil {
+		return nil, err
+	}
+	rrset, rcode, _, err := tdns.Globals.ImrEngine.AuthDNSQuery(ctx, zone, qtype, addrs, log.Default(), false)
+	switch {
+	case err != nil:
+		return nil, err
+	case rrset == nil:
+		// NODATA, NXDOMAIN or a referral: no error, and no RRset
+		return nil, fmt.Errorf("no %s in the answer (%s)", dns.TypeToString[qtype], dns.RcodeToString[rcode])
+	}
+	return rrset, nil
+}
+
+// servingAddrs are ns's addresses, found through the IMR, each with its port.
+func servingAddrs(ctx context.Context, ns string) ([]string, error) {
 	imr := tdns.Globals.ImrEngine
 	if imr == nil {
 		return nil, errors.New("the IMR is not running")
@@ -67,22 +117,14 @@ func imrServingQuery(ctx context.Context, zone, ns string, qtype uint16) (*core.
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("the IMR finds no address for %s", ns)
 	}
-	rrset, rcode, _, err := imr.AuthDNSQuery(ctx, zone, qtype, addrs, log.Default(), false)
-	switch {
-	case err != nil:
-		return nil, err
-	case rrset == nil:
-		// NODATA, NXDOMAIN or a referral: no error, and no RRset
-		return nil, fmt.Errorf("no %s in the answer (%s)", dns.TypeToString[qtype], dns.RcodeToString[rcode])
-	}
-	return rrset, nil
+	return addrs, nil
 }
 
-// servingChainOK: each of the nameservers serves the zone at an SOA serial
-// no lower than minSerial (RFC 1982), signed by the expected signers: there
-// is an RRSIG over the SOA, and each is by one of keys, in its validity
-// period, and verifies. It returns the lowest serial served, and why the
-// check fails.
+// servingChainOK: each of the nameservers serves the zone, at each of its
+// addresses, at an SOA serial no lower than minSerial (RFC 1982), signed by
+// the expected signers: there is an RRSIG over the SOA, and each is by one
+// of keys, in its validity period, and verifies. It returns the lowest
+// serial served, and why the check fails.
 func servingChainOK(ctx context.Context, zone string, nameservers []string, keys []dns.RR, minSerial uint32, now time.Time) (uint32, error) {
 	if len(nameservers) == 0 {
 		return 0, errors.New("multi-provider.local.nameservers names none")
@@ -91,31 +133,43 @@ func servingChainOK(ctx context.Context, zone string, nameservers []string, keys
 		return 0, errors.New("no DNSKEY of the expected signers is known here")
 	}
 	var lowest uint32
-	for i, ns := range nameservers {
-		rrset, err := servingLookup(ctx, zone, ns)
+	seen := false
+	for _, ns := range nameservers {
+		answers, err := servingLookup(ctx, zone, ns)
 		if err != nil {
 			return lowest, fmt.Errorf("%s: %w", ns, err)
 		}
-		if rrset == nil {
+		if len(answers) == 0 {
 			return lowest, fmt.Errorf("%s serves no SOA for the zone", ns)
 		}
-		var soa *dns.SOA
-		for _, rr := range rrset.RRs {
-			if s, ok := rr.(*dns.SOA); ok {
-				soa = s
+		for _, a := range answers {
+			at := ns
+			if a.Addr != "" {
+				at = ns + " at " + a.Addr
 			}
-		}
-		if soa == nil {
-			return lowest, fmt.Errorf("%s serves no SOA for the zone", ns)
-		}
-		if i == 0 || CompareSerial(soa.Serial, lowest) < 0 {
-			lowest = soa.Serial
-		}
-		if CompareSerial(soa.Serial, minSerial) < 0 {
-			return lowest, fmt.Errorf("%s serves serial %d, below %d", ns, soa.Serial, minSerial)
-		}
-		if err := signedByOneOf(rrset, keys, now); err != nil {
-			return lowest, fmt.Errorf("%s: %w", ns, err)
+			if a.Err != nil {
+				return lowest, fmt.Errorf("%s: %w", at, a.Err)
+			}
+			var soa *dns.SOA
+			if a.RRset != nil {
+				for _, rr := range a.RRset.RRs {
+					if s, ok := rr.(*dns.SOA); ok {
+						soa = s
+					}
+				}
+			}
+			if soa == nil {
+				return lowest, fmt.Errorf("%s serves no SOA for the zone", at)
+			}
+			if !seen || CompareSerial(soa.Serial, lowest) < 0 {
+				lowest, seen = soa.Serial, true
+			}
+			if CompareSerial(soa.Serial, minSerial) < 0 {
+				return lowest, fmt.Errorf("%s serves serial %d, below %d", at, soa.Serial, minSerial)
+			}
+			if err := signedByOneOf(a.RRset, keys, now); err != nil {
+				return lowest, fmt.Errorf("%s: %w", at, err)
+			}
 		}
 	}
 	return lowest, nil

@@ -95,14 +95,14 @@ func soa(t *testing.T, zone string, serial uint32, key *dns.DNSKEY, priv crypto.
 func serving(t *testing.T, rrset *core.RRset, asked *[]string) {
 	t.Helper()
 	saved := servingLookup
-	servingLookup = func(_ context.Context, _ string, ns string) (*core.RRset, error) {
+	servingLookup = func(_ context.Context, _ string, ns string) ([]servedAnswer, error) {
 		if asked != nil {
 			*asked = append(*asked, ns)
 		}
 		if rrset == nil {
 			return nil, errors.New("no answer")
 		}
-		return rrset, nil
+		return []servedAnswer{{RRset: rrset}}, nil
 	}
 	t.Cleanup(func() { servingLookup = saved })
 }
@@ -112,8 +112,36 @@ func serving(t *testing.T, rrset *core.RRset, asked *[]string) {
 func nodata(t *testing.T) {
 	t.Helper()
 	saved := servingLookup
-	servingLookup = func(context.Context, string, string) (*core.RRset, error) { return nil, nil }
+	servingLookup = func(context.Context, string, string) ([]servedAnswer, error) { return []servedAnswer{{}}, nil }
 	t.Cleanup(func() { servingLookup = saved })
+}
+
+// Every address of a nameserver is asked, and each must pass: one that
+// serves an older copy, or an unsigned one, fails the check, though the
+// other address of the same name serves the zone as it should.
+func TestTheServingCheckAsksEveryAddressOfANameserver(t *testing.T) {
+	const zone = "addrs.serving.example."
+	const v4, v6 = "192.0.2.53:53", "[2001:db8::53]:53"
+	key, priv := signingKey(t, zone)
+	keys, ns, now := []dns.RR{key}, []string{"ns1." + zone}, time.Now()
+	answering := func(answers ...servedAnswer) {
+		saved := servingLookup
+		servingLookup = func(context.Context, string, string) ([]servedAnswer, error) { return answers, nil }
+		t.Cleanup(func() { servingLookup = saved })
+	}
+
+	answering(servedAnswer{Addr: v4, RRset: soa(t, zone, 40, key, priv)}, servedAnswer{Addr: v6, RRset: soa(t, zone, 39, key, priv)})
+	if _, err := servingChainOK(context.Background(), zone, ns, keys, 40, now); err == nil || !strings.Contains(err.Error(), v6) {
+		t.Errorf("an address that lags at 39, with the other at 40: %v", err)
+	}
+	answering(servedAnswer{Addr: v4, RRset: soa(t, zone, 40, key, priv)}, servedAnswer{Addr: v6, RRset: soa(t, zone, 40, nil, nil)})
+	if _, err := servingChainOK(context.Background(), zone, ns, keys, 40, now); err == nil || !strings.Contains(err.Error(), v6) {
+		t.Errorf("an address that serves the zone unsigned: %v", err)
+	}
+	answering(servedAnswer{Addr: v4, RRset: soa(t, zone, 41, key, priv)}, servedAnswer{Addr: v6, RRset: soa(t, zone, 40, key, priv)})
+	if served, err := servingChainOK(context.Background(), zone, ns, keys, 40, now); err != nil || served != 40 {
+		t.Errorf("both addresses at 40 or later: served %d, %v", served, err)
+	}
 }
 
 func serverRoleStep(id string) InstrStep {
