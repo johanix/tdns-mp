@@ -37,7 +37,17 @@ func newMPTestKeyDB(t *testing.T) *tdns.KeyDB {
 	if err != nil {
 		t.Fatalf("NewKeyDB: %v", err)
 	}
-	t.Cleanup(func() { kdb.DB.Close() })
+	t.Cleanup(func() {
+		// The combiner's guard lets go of a store that closes here
+		// (RegisterCombinerOnFirstLoad attaches it): a later test's
+		// REPLACE would be refused for a guard it cannot save.
+		combinerReplaceOrigins.mu.Lock()
+		if h := combinerReplaceOrigins.hdb; h != nil && h.KeyDB == kdb {
+			combinerReplaceOrigins.hdb = nil
+		}
+		combinerReplaceOrigins.mu.Unlock()
+		kdb.DB.Close()
+	})
 	return kdb
 }
 
