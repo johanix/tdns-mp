@@ -367,6 +367,13 @@ type InternalMpConf struct {
 	// went to the parent as a NOTIFY, and how often, for the asks that
 	// follow, and what is scheduled for them (mp_s5_leader_sync.go)
 	delegationSyncChains delegationSyncChains
+	// parentNotices: the zones whose parent offers no usable delegation
+	// sync scheme, or no UPDATE scheme for the SIG(0) bootstrap, as the log
+	// has been told once (parent_offer.go)
+	parentNotices parentNotices
+	// parentOffer stands in for the look at a zone's parent's DSYNC records
+	// in a test (parentOfferOf). Nil looks them up.
+	parentOffer func(ctx context.Context, zd *tdns.ZoneData) (parentOffer, error)
 	// keyLogs: when the key rounds' lines were last logged (step 7b, the
 	// first time and then once an hour).
 	keyLogs hourlyLog

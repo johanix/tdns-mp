@@ -314,10 +314,11 @@ func TestTheLeadersNotifyCDSWaitsForTheSignersCDS(t *testing.T) {
 }
 
 // The one zone the agent's DS engine writes a CDS for is the agent's own
-// identity zone, and there it is the only writer: the set-up writes none.
-// The zone's delegation is not synced (tdns-mp #391), and the CDS follows the
-// keys all the same: with a second KSK that is published and not yet standby
-// (served, no DS) it is the active KSK's alone.
+// identity zone, and there it is the only writer. The set-up used to write
+// one too, for every SEP key of the served DNSKEY RRset; the engine writes
+// the keys whose DS belongs at the parent. With a second KSK that is
+// published and not yet standby (served, no DS) the two rules differ, and
+// the zone would serve one set and then the other at every start.
 func TestTheIdentityZonesCDSIsTheDSEnginesAlone(t *testing.T) {
 	asMPAgent(t)
 	kdb := newMPTestKeyDB(t)
@@ -325,16 +326,16 @@ func TestTheIdentityZonesCDSIsTheDSEnginesAlone(t *testing.T) {
 	ctx := startIdentityUpdater(t, kdb)
 	startAgentDSEngine(t, ctx, kdb)
 	conf.Config.ParentSync.Schemes = []string{"notify"}
+	// never published: the delegation sync the set-up starts waits for the
+	// resolver, and what it would send is not this test's
+	conf.Config.Internal.ImrReady = tdns.NewImrReadiness()
 
 	if err := conf.SetupAgent(ctx, nil); err != nil {
 		t.Fatalf("SetupAgent: %v", err)
 	}
 	zd, ok := tdns.Zones.Get(identityTestZone)
-	if !ok {
-		t.Fatal("the identity zone is not registered")
-	}
-	if zd.Options[tdns.OptParentSync] {
-		t.Fatal("the identity zone is a parentsync child")
+	if !ok || !zd.Options[tdns.OptParentSync] {
+		t.Fatal("the identity zone is not a parentsync child")
 	}
 	var active uint16
 	if rrset, err := zd.GetRRset(identityTestZone, dns.TypeDNSKEY); err == nil && rrset != nil {
@@ -355,12 +356,41 @@ func TestTheIdentityZonesCDSIsTheDSEnginesAlone(t *testing.T) {
 	}
 	waitFor(t, "the published KSK in the served DNSKEY RRset", func() bool { return servedDnskeyTagsOf(t, zd)[next] })
 
+	// the set-up's last step, as the next start takes it with these keys
+	conf.startIdentityParentSync(ctx, zd)
+	for _, tag := range servedCdsTags(t, zd) {
+		if tag == next {
+			t.Fatalf("the identity set-up published a CDS for KSK %d, which is published and has no DS: the zone serves %v", next, servedCdsTags(t, zd))
+		}
+	}
+
 	// the engine's turn, as at the key state worker's next tick
 	kdb.KeysChanged(zd)
 	waitFor(t, "the CDS of the active KSK alone", func() bool {
 		got := servedCdsTags(t, zd)
 		return len(got) == 1 && got[0] == active
 	})
+
+	// and over the NOTIFY scheme: the engine has the CDS to point at
+	in, err := tdns.DSIntentForZone(kdb, identityTestZone, dns.SHA256)
+	if err != nil || !in.Known || len(in.Set) != 1 {
+		t.Fatalf("the identity zone's DS intent: known=%v set=%v err=%v, want the active KSK", in.Known, in.Set, err)
+	}
+	notifyq := make(chan tdns.NotifyRequest, 4)
+	if _, _, err := zd.SyncZoneDelegationViaNotify(ctx, kdb, notifyq, tdns.DelegationSyncStatus{ZoneName: identityTestZone, DSAdds: in.Set}, notifyOnlyParent); err != nil {
+		t.Fatalf("the identity zone's sync over the NOTIFY scheme: %v", err)
+	}
+	select {
+	case req := <-notifyq:
+		if req.ZoneName != identityTestZone || req.RRtype != dns.TypeCDS {
+			t.Errorf("the notifier got %s NOTIFY(%s), want NOTIFY(CDS) for the identity zone", req.ZoneName, dns.TypeToString[req.RRtype])
+		}
+	default:
+		t.Fatal("no NOTIFY(CDS) for the identity zone reached the notifier")
+	}
+	if got := servedCdsTags(t, zd); len(got) != 1 || got[0] != active {
+		t.Errorf("the identity zone serves CDS %v after the sync, want the active KSK %d alone", got, active)
+	}
 }
 
 // waitFor polls cond until it holds, for at most ten seconds.

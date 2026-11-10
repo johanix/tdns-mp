@@ -27,6 +27,9 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 	imr := func() *Imr {
 		return &Imr{conf.Config.Internal.ImrEngine}
 	}
+	// The parents that offered no usable scheme are looked at again, once
+	// an hour, quietly (parent_offer.go).
+	go conf.recheckParentOffers(ctx, hdb, delsyncq)
 	var err error
 	for {
 		select {
@@ -41,18 +44,6 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 			zd := ds.ZoneData
 			dss := ds.SyncStatus
 
-			// The agent's own identity zone has no delegation sync
-			// (tdns-mp #391), whoever asks: an election, the DS engine,
-			// an update from outside. Nothing is analysed or sent, and
-			// the parent's DSYNC is not looked up.
-			if conf.isIdentityZone(ds.ZoneName) {
-				lg.Debug("DelegationSyncher: the identity zone has no delegation sync, skipping", "zone", ds.ZoneName, "command", ds.Command)
-				if ds.Response != nil {
-					ds.Response <- tdns.DelegationSyncStatus{ZoneName: ds.ZoneName, Time: time.Now(), Msg: identityZoneNoSync}
-				}
-				continue
-			}
-
 			switch ds.Command {
 
 			case "DELEGATION-SYNC-SETUP":
@@ -61,6 +52,13 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				// when none is held, or publish another beside the zone's
 				if !setupArmRuns(zd) {
 					lg.Info("DelegationSyncher: a multi-provider zone's SIG(0) key is the leader's key set-up's, skipping the setup", "zone", ds.ZoneName)
+					continue
+				}
+				// The bootstrap goes to the parent's UPDATE target. A parent
+				// that advertises none is told once, as a warning, and the
+				// setup ends here with no error; it is looked at again
+				// quietly (parent_offer.go). Nothing known: the setup runs.
+				if off, oerr := conf.parentOfferOf(ctx, zd, hdb.KeyDB); oerr == nil && !conf.noteUpdateOffer(ds.ZoneName, off, true) {
 					continue
 				}
 				err = zd.DelegationSyncSetup(ctx, hdb.KeyDB)
@@ -114,8 +112,8 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				}
 
 				// Only the elected leader of a multi-provider zone sends to the
-				// parent; a zone this daemon is primary for alone has no
-				// election to wait for.
+				// parent; a zone this daemon is primary for alone (its
+				// identity zone) has no election to wait for.
 				if lem := conf.InternalMp.LeaderElectionManager; lem != nil && ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] {
 					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
 						lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
@@ -169,6 +167,12 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 				}
 
 				msg, rcode, ur, pending, err := hdb.syncDelegation(ctx, conf, notifyq, ds, ds.SyncStatus, imr().Imr)
+				var none errNoUsableScheme
+				if errors.As(err, &none) {
+					// Not a failure: nothing is retried (parent_offer.go)
+					lg.Debug("DelegationSyncher: nothing sent", "zone", ds.ZoneName, "reason", none.Error())
+					continue
+				}
 				if err != nil {
 					if !retried() {
 						lg.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
@@ -220,8 +224,8 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					continue
 				}
 				// Only the elected leader of a multi-provider zone sends to the
-				// parent; a zone this daemon is primary for alone has no
-				// election to wait for.
+				// parent; a zone this daemon is primary for alone (its
+				// identity zone) has no election to wait for.
 				if lem := conf.InternalMp.LeaderElectionManager; lem != nil && ds.ZoneData != nil && ds.ZoneData.Options[tdns.OptMultiProvider] {
 					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
 						lg.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
@@ -319,6 +323,17 @@ func (hdb *HsyncDB) DelegationSyncher(ctx context.Context, delsyncq chan tdns.De
 					continue
 				}
 				msg, rcode, ur, pending, err := hdb.syncDelegation(ctx, conf, notifyq, ds, syncstate, imr().Imr)
+				var none errNoUsableScheme
+				if errors.As(err, &none) {
+					// Not a failure: the answer says why nothing was sent,
+					// with no error, and nothing is retried (parent_offer.go)
+					lg.Debug("DelegationSyncher: nothing sent", "zone", ds.ZoneName, "reason", none.Error())
+					syncstate.Msg = none.Error()
+					if ds.Response != nil {
+						ds.Response <- syncstate
+					}
+					continue
+				}
 				if err != nil {
 					lg.Error("DelegationSyncher: error from SyncZoneDelegation", "zone", ds.ZoneName, "err", err)
 					syncstate.Error = true
@@ -409,6 +424,10 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 	// option here, before the run is listed, let a takeover that came in
 	// between send one last sync down it.
 	if conf == nil || ds.ZoneData == nil || !ds.ZoneData.Options[tdns.OptMultiProvider] {
+		// Nothing goes to a parent that offers no scheme this zone can use
+		if err := conf.noUsableScheme(ctx, hdb, ds); err != nil {
+			return "", 0, tdns.UpdateResult{}, false, err
+		}
 		msg, rcode, ur, err = ds.ZoneData.SyncZoneDelegation(ctx, hdb.KeyDB, notifyq, syncstate, imr)
 		return msg, rcode, ur, false, err
 	}
@@ -436,6 +455,12 @@ func (hdb *HsyncDB) syncDelegation(ctx context.Context, conf *Config, notifyq ch
 	var csyncErr error
 	if len(conf.zoneFrozen(ds.ZoneName)) == 0 {
 		csyncErr = conf.delegationCsyncStep(runCtx, ds.ZoneName, syncstate)
+	}
+	// Nothing goes to a parent that offers no scheme this zone can use. The
+	// CSYNC above is made all the same: it is in the zone for a parent that
+	// scans for it, whether or not it publishes DSYNC.
+	if err := conf.noUsableScheme(runCtx, hdb, ds); err != nil {
+		return "", 0, tdns.UpdateResult{}, false, err
 	}
 	// Room for more than the two NOTIFYs a sync sends (CSYNC, CDS): the sync
 	// must not wait for a reader that comes only when it has returned.
