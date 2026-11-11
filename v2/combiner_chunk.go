@@ -1840,7 +1840,25 @@ var combinerReplaceOrigins = struct {
 	mu  sync.Mutex
 	m   map[string]replaceOrigin
 	hdb *HsyncDB
-}{m: map[string]replaceOrigin{}}
+	// loaded: hdb's rows are in m. While they are not (a load failed) a
+	// REPLACE is refused, and the load is tried again at each: judged
+	// against what m holds without them, an older REPLACE queued across
+	// the restart would be applied, and its row would take the newer's
+	// place.
+	loaded bool
+	// dirty: the rows that may not hold what m holds, since putting back
+	// the origin of a REPLACE not applied failed on disk
+	// (unclaimCombinerReplace). Each is written again at the next REPLACE
+	// judged, until it holds: else after a restart the row of the one not
+	// applied would refuse an older REPLACE that is not stale.
+	dirty map[string]originRow
+}{m: map[string]replaceOrigin{}, dirty: map[string]originRow{}}
+
+// originRow names a row of the combiner's guard on disk.
+type originRow struct {
+	zone, sender string
+	rrtype       uint16
+}
 
 // staleCombinerReplace answers whether a REPLACE is older than the one last
 // applied for the same (zone, sender, rrtype), by the active serial its
@@ -1852,7 +1870,8 @@ var combinerReplaceOrigins = struct {
 // meantime is judged against this one, and so the record must hold to what
 // is applied (tdns-mp #390, path 1). A REPLACE whose origin cannot be saved
 // is refused (err), with the previous origin kept: applied without it, an
-// older REPLACE queued across a restart would undo it. And a REPLACE that
+// older REPLACE queued across a restart would undo it. So is every REPLACE
+// while the rows on disk are not loaded (a load failed). And a REPLACE that
 // is then not applied gives its origin back (unclaim): else an older one,
 // a delete say, would be skipped as stale, and answered, for one that
 // never was applied.
@@ -1865,6 +1884,9 @@ func staleCombinerReplace(req *CombinerSyncRequest, zonename string, rrtype uint
 	origin := originOf(req.Timestamp, req.DistributionID, req.Instr)
 	combinerReplaceOrigins.mu.Lock()
 	defer combinerReplaceOrigins.mu.Unlock()
+	if err := readyCombinerGuardLocked(); err != nil {
+		return false, replaceOrigin{}, unclaim, err
+	}
 	prev, hadPrev := combinerReplaceOrigins.m[key]
 	if hadPrev && origin.olderThan(prev) {
 		return true, prev, unclaim, nil
@@ -1874,6 +1896,7 @@ func staleCombinerReplace(req *CombinerSyncRequest, zonename string, rrtype uint
 		if err := SaveCombinerReplaceOrigin(hdb, zonename, req.SenderID, rrtype, origin); err != nil {
 			return false, replaceOrigin{}, unclaim, fmt.Errorf("its order guard could not be saved: %w", err)
 		}
+		delete(combinerReplaceOrigins.dirty, key)
 	}
 	combinerReplaceOrigins.m[key] = origin
 	return false, replaceOrigin{}, func() {
@@ -1904,8 +1927,57 @@ func unclaimCombinerReplace(key, zone, sender string, rrtype uint16, origin, pre
 		}
 	}
 	if err != nil {
-		lgCombiner.Error("failed to put back the replace origin of a REPLACE not applied: after a restart an older REPLACE stays refused",
+		// memory holds what is applied; the row is written again at the
+		// next REPLACE judged (readyCombinerGuardLocked)
+		combinerReplaceOrigins.dirty[key] = originRow{zone: zone, sender: sender, rrtype: rrtype}
+		lgCombiner.Error("failed to put back the replace origin of a REPLACE not applied: written again at the next REPLACE; a restart before then refuses an older REPLACE",
 			"zone", zone, "sender", sender, "rrtype", dns.TypeToString[rrtype], "err", err)
+	}
+}
+
+// readyCombinerGuardLocked readies the guard to judge a REPLACE, under its
+// lock: it loads the rows on disk if their load failed, refusing (err)
+// while it fails, and writes again each row a put back left behind
+// (dirty), as far as it can. A row that still cannot be written stays
+// dirty; the REPLACE judged is not refused for it, as it saves its own row.
+func readyCombinerGuardLocked() error {
+	g := &combinerReplaceOrigins
+	if g.hdb == nil {
+		return nil
+	}
+	if !g.loaded {
+		origins, err := LoadCombinerReplaceOrigins(g.hdb)
+		if err != nil {
+			return fmt.Errorf("its order guard's rows could not be loaded: %w", err)
+		}
+		mergeCombinerOriginsLocked(origins)
+		g.loaded = true
+		lgCombiner.Info("loaded replace origins, after a load that failed", "count", len(origins))
+	}
+	for key, row := range g.dirty {
+		var err error
+		if o, ok := g.m[key]; ok {
+			err = SaveCombinerReplaceOrigin(g.hdb, row.zone, row.sender, row.rrtype, o)
+		} else {
+			err = DeleteCombinerReplaceOrigin(g.hdb, row.zone, row.sender, row.rrtype)
+		}
+		if err != nil {
+			lgCombiner.Warn("a replace origin left behind by a failed put back still cannot be written",
+				"zone", row.zone, "sender", row.sender, "rrtype", dns.TypeToString[row.rrtype], "err", err)
+			continue
+		}
+		delete(g.dirty, key)
+	}
+	return nil
+}
+
+// mergeCombinerOriginsLocked takes origins loaded from disk into the guard,
+// under its lock, keeping an origin already held when it is the newer.
+func mergeCombinerOriginsLocked(origins map[string]replaceOrigin) {
+	for k, o := range origins {
+		if cur, ok := combinerReplaceOrigins.m[k]; !ok || cur.olderThan(o) {
+			combinerReplaceOrigins.m[k] = o
+		}
 	}
 }
 
@@ -1917,21 +1989,20 @@ func sameOrigin(a, b replaceOrigin) bool {
 // loadCombinerReplaceOrigins attaches hdb to combinerReplaceOrigins and
 // loads its rows, keeping an origin already held when it is the newer (a
 // reload). Called at startup before the message router starts, and on
-// reload (RegisterCombinerOnFirstLoad).
+// reload (RegisterCombinerOnFirstLoad). A load that fails leaves the guard
+// not loaded: every REPLACE is refused until a load succeeds, tried again
+// at each (readyCombinerGuardLocked).
 func loadCombinerReplaceOrigins(hdb *HsyncDB) {
 	origins, err := LoadCombinerReplaceOrigins(hdb)
 	combinerReplaceOrigins.mu.Lock()
 	defer combinerReplaceOrigins.mu.Unlock()
 	combinerReplaceOrigins.hdb = hdb
+	combinerReplaceOrigins.loaded = err == nil
 	if err != nil {
-		lgCombiner.Error("failed to load replace origins: an older REPLACE queued across the restart is not refused", "err", err)
+		lgCombiner.Error("failed to load replace origins: every REPLACE is refused until a load succeeds, tried again at each", "err", err)
 		return
 	}
-	for k, o := range origins {
-		if cur, ok := combinerReplaceOrigins.m[k]; !ok || cur.olderThan(o) {
-			combinerReplaceOrigins.m[k] = o
-		}
-	}
+	mergeCombinerOriginsLocked(origins)
 	if len(origins) > 0 {
 		lgCombiner.Info("loaded replace origins", "count", len(origins))
 	}

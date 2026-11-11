@@ -72,10 +72,18 @@ func serverRoleOf(step InstrStep) (string, bool) {
 
 // serverRoleHolds: at the provider's own agent a server role's step is held
 // only once the transfer confirmation passes. Every other agent's part of
-// it is its parts holding the step's sets.
+// it is its parts holding the step's sets. An agent with no MP config (a
+// reload that dropped it) cannot tell whose role it is, and holds none.
 func serverRoleHolds(conf *Config, zone string, step InstrStep) bool {
 	id, ok := serverRoleOf(step)
-	if mp := conf.MpConfig(); !ok || mp == nil || !core.EqualNames(id, mp.Identity) {
+	if !ok {
+		return true
+	}
+	mp := conf.MpConfig()
+	if mp == nil {
+		return false
+	}
+	if !core.EqualNames(id, mp.Identity) {
 		return true
 	}
 	return conf.InternalMp.transfers.confirmed(conf, zone, step)
@@ -114,14 +122,28 @@ func serverRoleStatus(conf *Config, zone string, step heldStep, now time.Time) s
 	return line
 }
 
-// toldStepHeld: id's first-hand stamp tells that it holds step.
+// toldStepHeld: id's first-hand stamp tells that it holds step, of the
+// transition to the active serial this agent knows.
 func (conf *Config) toldStepHeld(zone, id string, step InstrStep) bool {
+	active, _ := conf.InternalMp.Instructions.activeSerial(zone)
+	if active == nil {
+		return false
+	}
 	var t *stampTable
 	if tm := conf.InternalMp.MPTransport; tm != nil {
 		t = tm.stamps
 	}
 	st, ok := t.firstHand(canonicalName(zone))[canonicalName(id)]
-	return ok && st.StepHeld && st.Step != nil && st.Step.Number == step.Number && st.Step.Digest == step.Digest
+	return ok && stampHoldsStep(st.InstrStamp, *active, step)
+}
+
+// stampHoldsStep: st tells that its member holds step of the transition to
+// active, read as stepWaits reads a stamp: at that active serial and digest
+// first, since a stamp of an earlier transition can tell the same step and
+// sets (a server role given again), and then the step and its sets.
+func stampHoldsStep(st InstrStamp, active SerialDigest, step InstrStep) bool {
+	return st.Known && st.Active == active.Serial && st.ActiveDigest == active.Digest &&
+		st.StepHeld && st.Step != nil && st.Step.Number == step.Number && st.Step.Digest == step.Digest
 }
 
 // copySerial is the SOA serial this agent's copy of the zone came in at from
@@ -398,10 +420,11 @@ func contributedTypes(in *Instructions, id string) []string {
 // contributes. Every agent asks it for its state (peer-role) in any case.
 func (conf *Config) putBack(zdr *ZoneDataRepo, zone ZoneName) {
 	tm := conf.InternalMp.MPTransport
-	if tm == nil {
+	mp := conf.MpConfig()
+	if tm == nil || mp == nil {
 		return
 	}
-	self := AgentId(conf.MpConfig().Identity)
+	self := AgentId(mp.Identity)
 	ops, toCombiner, types := conf.putBackOps(zdr, zone)
 	if len(ops) == 0 {
 		return
@@ -428,7 +451,11 @@ func (conf *Config) putBack(zdr *ZoneDataRepo, zone ZoneName) {
 // combiner; none when the provider contributes nothing or its answer
 // cannot be complete yet.
 func (conf *Config) putBackOps(zdr *ZoneDataRepo, zone ZoneName) (ops, toCombiner []core.RROperation, types []string) {
-	self := AgentId(conf.MpConfig().Identity)
+	mp := conf.MpConfig()
+	if mp == nil {
+		return nil, nil, nil
+	}
+	self := AgentId(mp.Identity)
 	types = contributedTypes(instructionsFor(zone), string(self))
 	if len(types) == 0 {
 		return nil, nil, nil
