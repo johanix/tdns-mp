@@ -147,8 +147,8 @@ type MultiProviderConf struct {
 	// reconciliation for this long (plan S12). Zero or absent: 3600.
 	// NoRoleTimeout: how long a step, a distribution and the leader's
 	// NOTIFY for its CSYNC wait for a member with no role, on its way in or
-	// out, before they go on without it (design 4, plan S12). Zero or
-	// absent: 900.
+	// out, before they go on without it, and a distribution and that NOTIFY
+	// for an auditor (design 4, plan S12). Zero or absent: 900.
 	Transitions struct {
 		LeavingTimeout int `yaml:"leaving-timeout" mapstructure:"leaving-timeout"`
 		NoRoleTimeout  int `yaml:"no-role-timeout" mapstructure:"no-role-timeout"`
