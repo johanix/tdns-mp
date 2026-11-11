@@ -280,7 +280,7 @@ func (conf *Config) combinerTakeHandover(msg *AgentMsgPostPlus, localAgents map[
 		return refuse("this combiner keeps no hand-overs")
 	}
 	// what the combiner acted by before
-	pubkeyBefore := mpzd.hasPubkey()
+	pubkeyBefore := mpzd.pubkeyHere()
 	prev, changed, err := store.take(h, sender)
 	switch {
 	case errors.Is(err, errHandoverOlder):
@@ -349,7 +349,7 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 			lgCombiner.Error("combining by the hand-over failed", "zone", mpzd.ZoneName, "err", combineErr)
 		}
 	}
-	if mpzd.hasPubkey() != pubkeyBefore {
+	if mpzd.pubkeyHere() != pubkeyBefore {
 		if err := mpzd.withdrawZoneSignalKeysWithoutConsent(NewHsyncDB(mpzd.KeyDB)); err != nil {
 			lgCombiner.Error("failed to load publish instructions; the zone's at-ns publication is not checked against the customer's consent", "zone", mpzd.ZoneName, "err", err)
 		}
@@ -465,7 +465,7 @@ func (conf *Config) reportCombinerStart(ctx context.Context, tm *MPTransportBrid
 // agent's hand-over (waitsForHandover).
 func (conf *Config) zonesWaitingForHandover() []string {
 	var out []string
-	for _, zone := range conf.InternalMp.MPZoneNames {
+	for _, zone := range conf.mpZoneNames() {
 		if mpzd, ok := Zones.Get(zone); ok && mpzd.Ready && mpzd.waitsForHandover() {
 			out = append(out, zone)
 		}

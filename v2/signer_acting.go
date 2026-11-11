@@ -278,7 +278,7 @@ func signerActingLine(zone string) string {
 // that have reported. A withheld zone reports again whatever its copy says by
 // now: only its agent's word ends the withholding, and that answers a report.
 func (conf *Config) signerStartReport(reported map[string]bool) {
-	for _, zone := range conf.InternalMp.MPZoneNames {
+	for _, zone := range conf.mpZoneNames() {
 		mpzd, ok := Zones.Get(zone)
 		if !ok || mpzd == nil {
 			continue

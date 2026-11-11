@@ -47,13 +47,13 @@ func unlistedMultiProviderZones(served, listed []string) []string {
 // policy. A multi-provider zone the signer only serves, as a non-signing
 // provider does (the signed zone comes from another provider's signer),
 // has no keys here and no key lifecycle for anyone to own. Multi-provider
-// is what ParseZones collected (InternalMp.MPZoneNames: the zones whose
-// option was accepted); the policy is the zone config's, bound or not yet
+// is what ParseZones collected (mpZoneNames: the zones whose option was
+// accepted); the policy is the zone config's, bound or not yet
 // (a secondary binds it after its first transfer, which is later than the
 // signer's start).
 func (conf *Config) signedMultiProviderZones() []string {
 	mp := map[string]bool{}
-	for _, z := range conf.InternalMp.MPZoneNames {
+	for _, z := range conf.mpZoneNames() {
 		mp[lifecycleZoneName(z)] = true
 	}
 	if len(mp) == 0 || conf.Config == nil {

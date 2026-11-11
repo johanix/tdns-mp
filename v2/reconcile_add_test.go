@@ -1705,7 +1705,7 @@ func TestAWithheldZoneReportsAtEveryRound(t *testing.T) {
 	records := sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)
 	r := newSignerRig(t, zone, records...)
 	r.firstLoad(t, records...)
-	r.conf.InternalMp.MPZoneNames = []string{zone}
+	r.conf.InternalMp.mpZones.setForTest(zone)
 	reported := map[string]bool{}
 	for round := 1; round <= 3; round++ {
 		r.conf.signerStartReport(reported)
@@ -1718,7 +1718,7 @@ func TestAWithheldZoneReportsAtEveryRound(t *testing.T) {
 	// while it is withheld
 	const none = "noreading.rounds.withheld.signer.example."
 	o := newSignerRig(t, none, sigRecords(`servers="us,p2" signers="us,p2"`)...)
-	o.conf.InternalMp.MPZoneNames = []string{none}
+	o.conf.InternalMp.mpZones.setForTest(none)
 	o.restart(t)
 	if err := o.mpzd.Withhold(); err != nil {
 		t.Fatal(err)
