@@ -90,12 +90,12 @@ func newRestartNet(t *testing.T, zone string) *restartNet {
 	conf.SetMpConfig(&MultiProviderConf{Role: "agent", Identity: n.alice.Identity, Combiner: &PeerConf{Identity: "combiner.alice.example."}})
 	conf.InternalMp.MPTransport = n.alice.Bridge
 	conf.InternalMp.AgentRegistry = n.alice.Registry
-	conf.InternalMp.MPZoneNames = []string{zone}
+	conf.InternalMp.mpZones.setForTest(zone)
 	n.alice.Bridge.combinerID = "combiner.alice.example."
 	conf.InternalMp.editsRequest = func(context.Context, *tdns.ZoneData, *MPTransportBridge, *MsgQs) (*EditsResponseMsg, time.Time, error) {
 		return &EditsResponseMsg{SenderID: "combiner.alice.example.", Zone: zone, Message: editsLoaded}, time.Now(), nil
 	}
-	catchUp := newCatchUpTracker(AgentId(n.alice.Identity), conf.InternalMp.MPZoneNames, time.Hour)
+	catchUp := newCatchUpTracker(AgentId(n.alice.Identity), conf.mpZoneNames(), time.Hour)
 	catchUp.wire(conf, n.alice.Bridge, n.alice.Registry)
 	conf.InternalMp.CatchUp, n.alice.Bridge.catchUp = catchUp, catchUp
 	msgQs := n.alice.MsgQs

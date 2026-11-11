@@ -51,7 +51,7 @@ func TestSignerRefusesToStartOverAMultiProviderZoneNotInKeyLifecycleZones(t *tes
 		for _, z := range unsigned {
 			conf.Config.Zones = append(conf.Config.Zones, tdns.ZoneConf{Name: z, Type: "secondary"})
 		}
-		conf.InternalMp.MPZoneNames = append(append([]string{}, served...), unsigned...)
+		conf.InternalMp.mpZones.setForTest(append(append([]string{}, served...), unsigned...)...)
 		if mp != nil {
 			conf.SetMpConfig(mp)
 		}
@@ -159,8 +159,9 @@ func TestAZoneReloadPassesTheGateOrStopsTheSigner(t *testing.T) {
 		conf := &Config{Config: &tdns.Config{}}
 		for _, z := range signed {
 			conf.Config.Zones = append(conf.Config.Zones, tdns.ZoneConf{Name: z, Type: "secondary", DnssecPolicy: "default"})
+			mpTestZone(t, z) // tdns holds what the reload parsed (#401)
 		}
-		conf.InternalMp.MPZoneNames = append([]string{}, signed...)
+		conf.InternalMp.mpZones.setForTest(signed...)
 		conf.SetMpConfig(&MultiProviderConf{Role: "signer", KeyLifecycleZones: listed, KeyLifecycleZonesIncomplete: incomplete})
 		conf.signerZonesReloaded()
 	}

@@ -160,6 +160,7 @@ func TestAGroupWithParentsyncOwnerElects(t *testing.T) {
 // load gets all three: the parentsync detection, the first-load election,
 // and zoneChanged.
 func TestAFirstLoadAfterTheSetUpGetsEveryElectionCheck(t *testing.T) {
+	noZoneHooks(t) // the set-up installs the agent's zone hooks (#396)
 	multi := seedZoneWithHSYNC3(t, "multi.firstload.example.")
 	multi.Logger = log.New(io.Discard, "", 0)
 	plain := seedZoneWithHSYNC3(t, "plain.setup.firstload.example.")

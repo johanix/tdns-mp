@@ -894,7 +894,7 @@ func TestTheTrackerSendsOnceTheHydrationIsOver(t *testing.T) {
 		zd.Options[tdns.OptMultiProvider] = true
 		zd.EnsureMP()
 		zd.MP.MPdata = &MPdata{WeAreProvider: true}
-		conf.InternalMp.MPZoneNames = []string{zone}
+		conf.InternalMp.mpZones.setForTest(zone)
 		conf.InternalMp.CatchUp = r.t
 		conf.InternalMp.editsRequest = func(ctx context.Context, _ *tdns.ZoneData, _ *MPTransportBridge, _ *MsgQs) (*EditsResponseMsg, time.Time, error) {
 			select {

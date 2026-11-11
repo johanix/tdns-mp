@@ -94,7 +94,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 	// 1. RFI EDITS -> combiner: all agents' contributions (baseline)
 	// 2. RFI KEYSTATE -> signer: DNSKEY inventory (local vs foreign keys)
 	//
-	// Uses conf.InternalMp.MPZoneNames (collected at parse time) instead of
+	// Uses conf.mpZoneNames() (collected at parse time) instead of
 	// scanning Zones.IterBuffered() -- avoids race with RefreshEngine.
 	tm := conf.InternalMp.MPTransport
 	hasCombiner := tm != nil && conf.namesCombiner()
@@ -103,8 +103,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 	lgEngine.Info("SynchedDataEngine started")
 
 	if hasCombiner || hasSigner {
-		lgEngine.Info("startup hydration: MP zones to hydrate", "count", len(conf.InternalMp.MPZoneNames), "zones", conf.InternalMp.MPZoneNames)
-		for _, zname := range conf.InternalMp.MPZoneNames {
+		zones := conf.mpZoneNames()
+		lgEngine.Info("startup hydration: MP zones to hydrate", "count", len(zones), "zones", zones)
+		for _, zname := range zones {
 			zd, ok := Zones.Get(zname)
 			if !ok || zd == nil {
 				lgEngine.Warn("startup hydration: zone not in Zones map, skipping", "zone", zname)
