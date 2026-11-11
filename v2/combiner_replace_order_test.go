@@ -287,3 +287,63 @@ func TestAGuardRowLeftByAFailedPutBackIsWrittenAgain(t *testing.T) {
 		t.Fatalf("after a restart, b's REPLACE newer than the one applied: stale %v, err %v", stale, err)
 	}
 }
+
+// A reload after a put back that failed on disk, of an origin or of none,
+// keeps what memory holds for the key: its row still holds the origin of
+// the REPLACE not applied, which would else come back, be saved, and make a
+// REPLACE newer than the one applied stale. The reload writes the row again.
+func TestAReloadKeepsTheGuardOfAFailedPutBack(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	for _, c := range []struct {
+		name    string
+		applied bool // an origin was applied before the one not applied
+	}{
+		{"an origin put back", true},
+		{"none put back", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			zone := fmt.Sprintf("reload-%t-%d.example.", c.applied, time.Now().UnixNano())
+			key := zone + "|agent.b.|NS"
+			hdb := NewHsyncDB(newMPTestKeyDB(t))
+			if err := hdb.InitCombinerEditTables(); err != nil {
+				t.Fatalf("InitCombinerEditTables: %v", err)
+			}
+			t.Cleanup(func() { forgetCombinerOrigins(zone) })
+			claim := func(ts time.Time, dist string) func() {
+				t.Helper()
+				stale, _, unclaim, err := staleCombinerReplace(&CombinerSyncRequest{SenderID: "agent.b.", Zone: zone, Timestamp: ts, DistributionID: dist}, zone, dns.TypeNS)
+				if stale || err != nil {
+					t.Fatalf("b's REPLACE at %v: stale %v, err %v", ts, stale, err)
+				}
+				return unclaim
+			}
+
+			loadCombinerReplaceOrigins(hdb)
+			if c.applied {
+				claim(t0, "6aa51b60")
+			}
+			unclaim := claim(t0.Add(2*time.Second), "6aa51b62")
+			renameTable(t, hdb, "CombinerReplaceOrigin", "CombinerReplaceOriginAway")
+			unclaim() // its apply failed, and the put back fails on disk
+			renameTable(t, hdb, "CombinerReplaceOriginAway", "CombinerReplaceOrigin")
+			loadCombinerReplaceOrigins(hdb) // a reload, before any further REPLACE
+
+			combinerReplaceOrigins.mu.Lock()
+			held, ok := combinerReplaceOrigins.m[key]
+			_, dirty := combinerReplaceOrigins.dirty[key]
+			combinerReplaceOrigins.mu.Unlock()
+			switch {
+			case c.applied && (!ok || held.DistID != "6aa51b60"):
+				t.Errorf("after the reload memory holds %+v (%v), want the origin applied", held, ok)
+			case !c.applied && ok:
+				t.Errorf("after the reload memory holds %+v, want none", held)
+			}
+			if dirty {
+				t.Error("the reload did not write the row again")
+			}
+			forgetCombinerOrigins(zone) // and a restart
+			loadCombinerReplaceOrigins(hdb)
+			claim(t0.Add(time.Second), "6aa51b61")
+		})
+	}
+}

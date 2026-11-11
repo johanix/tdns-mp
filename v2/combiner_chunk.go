@@ -1954,6 +1954,15 @@ func readyCombinerGuardLocked() error {
 		g.loaded = true
 		lgCombiner.Info("loaded replace origins, after a load that failed", "count", len(origins))
 	}
+	rewriteDirtyOriginsLocked()
+	return nil
+}
+
+// rewriteDirtyOriginsLocked writes again each row a failed put back left
+// behind (dirty) from what memory holds, a save or a delete, under the
+// guard's lock; a row that still cannot be written stays dirty.
+func rewriteDirtyOriginsLocked() {
+	g := &combinerReplaceOrigins
 	for key, row := range g.dirty {
 		var err error
 		if o, ok := g.m[key]; ok {
@@ -1968,13 +1977,17 @@ func readyCombinerGuardLocked() error {
 		}
 		delete(g.dirty, key)
 	}
-	return nil
 }
 
 // mergeCombinerOriginsLocked takes origins loaded from disk into the guard,
-// under its lock, keeping an origin already held when it is the newer.
+// under its lock, keeping an origin already held when it is the newer. A
+// dirty key keeps what memory holds, origin or none: its row may hold the
+// origin of a REPLACE not applied, newer than the one applied.
 func mergeCombinerOriginsLocked(origins map[string]replaceOrigin) {
 	for k, o := range origins {
+		if _, dirty := combinerReplaceOrigins.dirty[k]; dirty {
+			continue
+		}
 		if cur, ok := combinerReplaceOrigins.m[k]; !ok || cur.olderThan(o) {
 			combinerReplaceOrigins.m[k] = o
 		}
@@ -1988,8 +2001,10 @@ func sameOrigin(a, b replaceOrigin) bool {
 
 // loadCombinerReplaceOrigins attaches hdb to combinerReplaceOrigins and
 // loads its rows, keeping an origin already held when it is the newer (a
-// reload). Called at startup before the message router starts, and on
-// reload (RegisterCombinerOnFirstLoad). A load that fails leaves the guard
+// reload), and what memory holds for a key whose put back failed (dirty),
+// whose row it then writes again. Called at startup before the message
+// router starts, and on reload (RegisterCombinerOnFirstLoad). A load that
+// fails leaves the guard
 // not loaded: every REPLACE is refused until a load succeeds, tried again
 // at each (readyCombinerGuardLocked).
 func loadCombinerReplaceOrigins(hdb *HsyncDB) {
@@ -2003,6 +2018,7 @@ func loadCombinerReplaceOrigins(hdb *HsyncDB) {
 		return
 	}
 	mergeCombinerOriginsLocked(origins)
+	rewriteDirtyOriginsLocked()
 	if len(origins) > 0 {
 		lgCombiner.Info("loaded replace origins", "count", len(origins))
 	}
