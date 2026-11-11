@@ -6,6 +6,7 @@ package tdnsmp
 import (
 	"context"
 	"crypto"
+	"encoding/base64"
 	"errors"
 	"slices"
 	"strings"
@@ -556,4 +557,80 @@ func TestAPassingTransferConfirmationAsksTheZonesTurn(t *testing.T) {
 	if !asked {
 		t.Error("the zone's turn is not asked when the transfer confirmation passes")
 	}
+}
+
+// An agent with no MP config (a reload that dropped it) cannot tell whose
+// server role a step is: it holds none, and a put back sends nothing.
+func TestAnAgentWithNoMPConfigHoldsNoServerRoleAndPutsNothingBack(t *testing.T) {
+	zone := "nompconf.serving.example."
+	conf := &Config{Config: &tdns.Config{}}
+	conf.InternalMp.MPTransport = &MPTransportBridge{}
+	if serverRoleHolds(conf, zone, serverRoleStep(srNewcomer)) {
+		t.Error("held with no MP config")
+	}
+	conf.putBack(nil, ZoneName(zone))
+	if ops, toCombiner, types := conf.putBackOps(nil, ZoneName(zone)); ops != nil || toCombiner != nil || types != nil {
+		t.Errorf("a put back with no MP config: %v, %v, %v", ops, toCombiner, types)
+	}
+}
+
+// A stamp tells that its member holds a step of the transition to the
+// active serial only at that serial and digest: one of an earlier
+// transition can tell the same step and sets (a server role given again).
+func TestAToldStepIsHeldOnlyAtTheActiveSerial(t *testing.T) {
+	step := serverRoleStep(srNewcomer)
+	active := SerialDigest{Serial: 7, Digest: "d7"}
+	told := InstrStamp{Known: true, Active: 7, ActiveDigest: "d7", Reconciling: true, Step: &step, StepHeld: true}
+	if !stampHoldsStep(told, active, step) {
+		t.Fatal("a stamp at the active serial that holds the step is not read as holding it")
+	}
+	for name, change := range map[string]func(*InstrStamp){
+		"an earlier transition's":      func(s *InstrStamp) { s.Active, s.ActiveDigest = 5, "d5" },
+		"another digest at the serial": func(s *InstrStamp) { s.ActiveDigest = "dx" },
+		"not known":                    func(s *InstrStamp) { s.Known = false },
+		"not held":                     func(s *InstrStamp) { s.StepHeld = false },
+	} {
+		st := told
+		change(&st)
+		if stampHoldsStep(st, active, step) {
+			t.Errorf("%s stamp is read as holding the step", name)
+		}
+	}
+}
+
+// Keys can share a key tag: an RRSIG holds when one of the keys that match
+// its tag, algorithm and signer verifies it, the first of them or not.
+func TestTheServingCheckTriesEveryKeyOfTheRRSIGsTag(t *testing.T) {
+	zone := "tag.serving.example."
+	key, priv := signingKey(t, zone)
+	twin := sameTagKey(t, key)
+	rrset := soa(t, zone, 10, key, priv)
+	if err := signedByOneOf(rrset, []dns.RR{twin, key}, time.Now()); err != nil {
+		t.Errorf("a key of the same tag listed first: %v", err)
+	}
+	if err := signedByOneOf(rrset, []dns.RR{twin}, time.Now()); err == nil {
+		t.Error("verified by the key of the same tag alone")
+	}
+}
+
+// sameTagKey is a DNSKEY other than key with key's tag: its public key with
+// two of its 16-bit words swapped, which the tag's sum does not see.
+func sameTagKey(t *testing.T, key *dns.DNSKEY) *dns.DNSKEY {
+	t.Helper()
+	pub, err := base64.StdEncoding.DecodeString(key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for j := 2; j+1 < len(pub); j += 2 {
+		if pub[0] != pub[j] || pub[1] != pub[j+1] {
+			pub[0], pub[1], pub[j], pub[j+1] = pub[j], pub[j+1], pub[0], pub[1]
+			break
+		}
+	}
+	twin := *key
+	twin.PublicKey = base64.StdEncoding.EncodeToString(pub)
+	if twin.PublicKey == key.PublicKey || twin.KeyTag() != key.KeyTag() {
+		t.Fatalf("no other key of tag %d", key.KeyTag())
+	}
+	return &twin
 }

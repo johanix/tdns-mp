@@ -100,6 +100,11 @@ func forgetCombinerOrigins(zone string) {
 			delete(combinerReplaceOrigins.m, k)
 		}
 	}
+	for k := range combinerReplaceOrigins.dirty {
+		if strings.HasPrefix(k, zone+"|") {
+			delete(combinerReplaceOrigins.dirty, k)
+		}
+	}
 	combinerReplaceOrigins.hdb = nil
 }
 
@@ -196,5 +201,89 @@ func TestAReplaceThatFailsToApplyGivesItsGuardBack(t *testing.T) {
 	if stale, _, _, _ := staleCombinerReplace(&CombinerSyncRequest{SenderID: goneOrigin, Zone: mpzd.ZoneName,
 		DistributionID: nextDistributionID(), Timestamp: at.Add(-time.Second)}, mpzd.ZoneName, dns.TypeNS); stale {
 		t.Error("an older REPLACE is stale against a withdrawal that was not applied")
+	}
+}
+
+// renameTable renames a table of hdb's: a store that fails, and is back.
+func renameTable(t *testing.T, hdb *HsyncDB, from, to string) {
+	t.Helper()
+	if _, err := hdb.DB.Exec(`ALTER TABLE ` + from + ` RENAME TO ` + to); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A guard whose rows on disk failed to load refuses every REPLACE, so that
+// its sender sends it again: judged without them, an older REPLACE queued
+// across the restart would be applied. Once they load it judges as ever.
+func TestTheCombinerRefusesEveryReplaceUntilItsGuardIsLoaded(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	zone := fmt.Sprintf("unloaded-%d.example.", time.Now().UnixNano())
+	hdb := NewHsyncDB(newMPTestKeyDB(t))
+	if err := hdb.InitCombinerEditTables(); err != nil {
+		t.Fatalf("InitCombinerEditTables: %v", err)
+	}
+	t.Cleanup(func() { forgetCombinerOrigins(zone) })
+	req := func(ts time.Time, dist string) *CombinerSyncRequest {
+		return &CombinerSyncRequest{SenderID: "agent.b.", Zone: zone, Timestamp: ts, DistributionID: dist}
+	}
+
+	loadCombinerReplaceOrigins(hdb)
+	// the leader's withdrawal of b's NS, in b's name
+	if stale, _, _, err := staleCombinerReplace(req(t0.Add(time.Second), "6aa51b6c"), zone, dns.TypeNS); stale || err != nil {
+		t.Fatalf("the withdrawal: stale %v, err %v", stale, err)
+	}
+	forgetCombinerOrigins(zone) // a restart, whose load fails
+	renameTable(t, hdb, "CombinerReplaceOrigin", "CombinerReplaceOriginAway")
+	loadCombinerReplaceOrigins(hdb)
+	if stale, _, _, err := staleCombinerReplace(req(t0, "6aa51b6a"), zone, dns.TypeNS); err == nil {
+		t.Fatalf("b's older REPLACE, with the guard not loaded: stale %v, and not refused", stale)
+	}
+	renameTable(t, hdb, "CombinerReplaceOriginAway", "CombinerReplaceOrigin")
+	stale, applied, _, err := staleCombinerReplace(req(t0, "6aa51b6a"), zone, dns.TypeNS)
+	if err != nil || !stale {
+		t.Fatalf("once the rows load, b's older REPLACE: stale %v, err %v", stale, err)
+	}
+	if applied.DistID != "6aa51b6c" {
+		t.Errorf("applied %+v, want the withdrawal's", applied)
+	}
+}
+
+// The row of a REPLACE not applied whose put back failed on disk is written
+// again at the next REPLACE judged, another sender's say: after a restart
+// it then does not refuse a REPLACE newer than the one applied.
+func TestAGuardRowLeftByAFailedPutBackIsWrittenAgain(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	zone := fmt.Sprintf("dirty-%d.example.", time.Now().UnixNano())
+	hdb := NewHsyncDB(newMPTestKeyDB(t))
+	if err := hdb.InitCombinerEditTables(); err != nil {
+		t.Fatalf("InitCombinerEditTables: %v", err)
+	}
+	t.Cleanup(func() { forgetCombinerOrigins(zone) })
+	claim := func(sender string, ts time.Time, dist string) func() {
+		t.Helper()
+		stale, _, unclaim, err := staleCombinerReplace(&CombinerSyncRequest{SenderID: sender, Zone: zone, Timestamp: ts, DistributionID: dist}, zone, dns.TypeNS)
+		if stale || err != nil {
+			t.Fatalf("%s's REPLACE at %v: stale %v, err %v", sender, ts, stale, err)
+		}
+		return unclaim
+	}
+
+	loadCombinerReplaceOrigins(hdb)
+	claim("agent.b.", t0, "6aa51b60")
+	unclaim := claim("agent.b.", t0.Add(2*time.Second), "6aa51b62")
+	renameTable(t, hdb, "CombinerReplaceOrigin", "CombinerReplaceOriginAway")
+	unclaim() // its apply failed, and putting its origin back fails on disk
+	renameTable(t, hdb, "CombinerReplaceOriginAway", "CombinerReplaceOrigin")
+	claim("agent.c.", t0, "6aa51b70")
+	combinerReplaceOrigins.mu.Lock()
+	_, dirty := combinerReplaceOrigins.dirty[zone+"|agent.b.|NS"]
+	combinerReplaceOrigins.mu.Unlock()
+	if dirty {
+		t.Error("b's row is still to be written again after the next REPLACE")
+	}
+	forgetCombinerOrigins(zone) // a restart
+	loadCombinerReplaceOrigins(hdb)
+	if stale, _, _, err := staleCombinerReplace(&CombinerSyncRequest{SenderID: "agent.b.", Zone: zone, Timestamp: t0.Add(time.Second), DistributionID: "6aa51b61"}, zone, dns.TypeNS); stale || err != nil {
+		t.Fatalf("after a restart, b's REPLACE newer than the one applied: stale %v, err %v", stale, err)
 	}
 }

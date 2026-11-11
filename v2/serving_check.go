@@ -292,7 +292,8 @@ func servingSOAs(ctx context.Context, zone string, nameservers []string, minSeri
 }
 
 // signedByOneOf: rrset has an RRSIG, and each is by one of keys, valid at
-// now, and verifies.
+// now, and verifies. Keys can share a key tag, algorithm and signer: an
+// RRSIG verifies when one of the keys that match it verifies it.
 func signedByOneOf(rrset *core.RRset, keys []dns.RR, now time.Time) error {
 	if len(rrset.RRSIGs) == 0 {
 		return errors.New("the SOA is not signed")
@@ -302,17 +303,25 @@ func signedByOneOf(rrset *core.RRset, keys []dns.RR, now time.Time) error {
 		if !ok {
 			continue
 		}
-		i := slices.IndexFunc(keys, func(k dns.RR) bool {
-			dk, ok := k.(*dns.DNSKEY)
-			return ok && dk.KeyTag() == sig.KeyTag && dk.Algorithm == sig.Algorithm && core.EqualNames(dk.Hdr.Name, sig.SignerName)
-		})
+		var matching []*dns.DNSKEY
+		for _, k := range keys {
+			if dk, ok := k.(*dns.DNSKEY); ok && dk.KeyTag() == sig.KeyTag && dk.Algorithm == sig.Algorithm && core.EqualNames(dk.Hdr.Name, sig.SignerName) {
+				matching = append(matching, dk)
+			}
+		}
 		switch {
-		case i < 0:
+		case len(matching) == 0:
 			return fmt.Errorf("the SOA's RRSIG by key %d is by none of the expected signers' keys", sig.KeyTag)
 		case !sig.ValidityPeriod(now):
 			return fmt.Errorf("the SOA's RRSIG by key %d is outside its validity period", sig.KeyTag)
 		}
-		if err := sig.Verify(keys[i].(*dns.DNSKEY), rrset.RRs); err != nil {
+		var err error
+		for _, dk := range matching {
+			if err = sig.Verify(dk, rrset.RRs); err == nil {
+				break
+			}
+		}
+		if err != nil {
 			return fmt.Errorf("the SOA's RRSIG by key %d does not verify: %w", sig.KeyTag, err)
 		}
 	}
