@@ -128,20 +128,15 @@ func TestReconcileExpectsNoPeersInAZoneThatDoesNotListThisAgent(t *testing.T) {
 	}
 }
 
-// Until the switch, standing is a role: an agent whose record is ON but whose
-// label HSYNCPARAM does not list expects no peers either.
-func TestReconcileExpectsNoPeersWhereThisAgentHasNoRole(t *testing.T) {
+// From the switch (plan S15) an ON record is a member, with a role or
+// without: an agent whose label HSYNCPARAM does not list expects the zone's
+// peers as a voting member does.
+func TestReconcileAMemberWithNoRoleExpectsThePeers(t *testing.T) {
 	const zone = "customer.test."
 	zl := mapZoneLookup{zone: standingZone(t, zone, []string{"self", "fox"}, []string{"fox"})}
 	e := NewEngine(Deps{LocalID: "self.agent.example.", Transport: &mockTransport{}, Zones: zl}, DefaultConfig())
-	added, _, _ := e.ReconcileZone(zone)
-	if added != 0 {
-		t.Fatalf("%d peer(s) added where this agent has no role, want 0", added)
-	}
-
-	zl[zone].hsyncparam.Value = []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: []string{"fox", "self"}}}
-	if added, _, _ = e.ReconcileZone(zone); added != 1 {
-		t.Fatalf("%d peer(s) added once this agent has a role, want 1", added)
+	if added, _, _ := e.ReconcileZone(zone); added != 1 {
+		t.Fatalf("%d peer(s) added where this agent is a member with no role, want 1", added)
 	}
 }
 
@@ -175,7 +170,10 @@ func TestTheZoneLeavesItsGroupWhenThisAgentsRecordTurnsOFF(t *testing.T) {
 	}
 }
 
-func TestTheZoneLeavesItsGroupWhenThisAgentLosesItsRole(t *testing.T) {
+// An agent whose role is taken and whose record stays is a member with no
+// role (plan S15): a diff registers peers in the zone, and the zone stays
+// on them.
+func TestTheZoneStaysWhenThisAgentLosesItsRoleAndKeepsItsRecord(t *testing.T) {
 	const zone = "customer.test."
 	z := standingZone(t, zone, []string{"self", "fox", "hare"}, []string{"self", "fox"})
 	zl := mapZoneLookup{zone: z}
@@ -187,14 +185,14 @@ func TestTheZoneLeavesItsGroupWhenThisAgentLosesItsRole(t *testing.T) {
 
 	z.hsyncparam.Value = []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: []string{"fox", "hare"}}}
 	_ = e.ApplyHsyncDiff(zone, HsyncDiff{Entered: idsOf(z.rrs[2])})
-	if _, ok := e.registry.S.Get("hare.agent.example."); ok {
-		t.Error("a diff registered a peer in a zone where this agent has no role")
+	if _, ok := e.registry.S.Get("hare.agent.example."); !ok {
+		t.Error("a diff registered no peer in a zone where this agent is a member with no role")
 	}
 	if h.hsync3Changed != 1 {
 		t.Errorf("the groups were recomputed %d times, want 1", h.hsync3Changed)
 	}
 	e.ReconcileZone(zone)
-	if peerZones(t, e, "fox.agent.example.")[zone] {
-		t.Error("the zone stayed on fox after this agent lost its role")
+	if !peerZones(t, e, "fox.agent.example.")[zone] {
+		t.Error("the zone left fox when this agent lost its role and kept its record")
 	}
 }

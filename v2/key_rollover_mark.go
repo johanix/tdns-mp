@@ -34,7 +34,7 @@ func (conf *Config) watchRolloverMarks(ctx context.Context, tm *MPTransportBridg
 // askOnOldRolloverMarks calls ask for each zone whose signer's last word is a
 // rollover, and that word is rolloverMarkMaxAge old at now.
 func (conf *Config) askOnOldRolloverMarks(now time.Time, ask func(*MPZoneData)) {
-	for _, zone := range conf.InternalMp.MPZoneNames {
+	for _, zone := range conf.mpZoneNames() {
 		mpzd, ok := Zones.Get(zone)
 		if !ok || mpzd == nil {
 			continue

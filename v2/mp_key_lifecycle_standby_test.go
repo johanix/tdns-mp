@@ -185,6 +185,9 @@ func TestTheInventoryReadsTheKeysByTheHoldItConfirms(t *testing.T) {
 	clock, wire := &fakeClock{t: time.Now()}, newFakeWire("p2")
 	r := &driverRig{t: t, kdb: s.kdb, zd: s.mpzd, clock: clock, wire: wire, l: NewZoneKeyLifecycle(zone, s.kdb, clock, pol, wire)}
 	s.e.zones[zone] = r.l
+	// made on the zone's ZoneData, or the engine makes a driver of its own
+	// from the keystore in its place (tdns-mp #396)
+	s.e.madeOn[zone], _ = tdns.Zones.Get(zone)
 	bootstrapKSK(t, r)
 	r.tick("the standby minted")
 	r.confirmAll("applied", r.onlyKey(KeyStateMpdist, "ZSK"))
@@ -225,6 +228,9 @@ func TestAnInventoryLeavesTheMachinesHoldAlone(t *testing.T) {
 	clock, wire := &fakeClock{t: time.Now()}, newFakeWire("p2")
 	r := &driverRig{t: t, kdb: s.kdb, zd: s.mpzd, clock: clock, wire: wire, l: NewZoneKeyLifecycle(zone, s.kdb, clock, pol, wire)}
 	s.e.zones[zone] = r.l
+	// made on the zone's ZoneData, or the engine makes a driver of its own
+	// from the keystore in its place (tdns-mp #396)
+	s.e.madeOn[zone], _ = tdns.Zones.Get(zone)
 	bootstrapKSK(t, r)
 	clock.Advance(lifetime + time.Hour)
 	r.l.SetHold(true)
@@ -375,7 +381,7 @@ func TestAnOldRolloverMarkIsAskedAgain(t *testing.T) {
 	newRig := func(t *testing.T, zone string) *rig {
 		t.Helper()
 		r := &rig{freezeRig: newFreezeRig(t, zone)}
-		r.conf.InternalMp.MPZoneNames = []string{zone}
+		r.conf.InternalMp.mpZones.setForTest(zone)
 		r.mpzd, _ = Zones.Get(zone)
 		return r
 	}

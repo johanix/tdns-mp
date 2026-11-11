@@ -108,61 +108,17 @@ func APIgossip(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// providerGroupForGossipZone finds the provider group serving zone.
-// Prefer ProviderGroupManager; fall back to gossip state when PGM
-// has not been populated yet (common on auditors).
+// providerGroupForGossipZone finds the provider group serving zone, from the
+// group manager only: a row of gossip lists no zone (plan S22), so an agent
+// or an auditor that has not loaded the zone finds no group for it.
 func providerGroupForGossipZone(ar *AgentRegistry, zone string) (*ProviderGroup, string, error) {
 	zone = dns.Fqdn(zone)
-	zn := ZoneName(zone)
 	if ar.ProviderGroupManager != nil {
-		if pg := ar.ProviderGroupManager.GetGroupForZone(zn); pg != nil {
+		if pg := ar.ProviderGroupManager.GetGroupForZone(ZoneName(zone)); pg != nil {
 			return pg, pg.GroupHash, nil
 		}
 	}
-	if ar.GossipStateTable == nil {
-		return nil, "", fmt.Errorf("no provider group for zone %s", zone)
-	}
-	ar.GossipStateTable.mu.RLock()
-	defer ar.GossipStateTable.mu.RUnlock()
-	for hash, states := range ar.GossipStateTable.States {
-		for _, ms := range states {
-			for _, z := range ms.Zones {
-				if dns.Fqdn(z) == zone {
-					return providerGroupFromGossipState(hash, states, ar.GossipStateTable.Names[hash]), hash, nil
-				}
-			}
-		}
-	}
 	return nil, "", fmt.Errorf("no provider group for zone %s", zone)
-}
-
-func providerGroupFromGossipState(hash string, states map[string]*MemberState, nameProposal *GroupNameProposal) *ProviderGroup {
-	members := make([]string, 0, len(states))
-	zoneSet := make(map[ZoneName]bool)
-	for id, ms := range states {
-		members = append(members, id)
-		if ms != nil {
-			for _, z := range ms.Zones {
-				zoneSet[ZoneName(dns.Fqdn(z))] = true
-			}
-		}
-	}
-	slices.Sort(members)
-	zones := make([]ZoneName, 0, len(zoneSet))
-	for z := range zoneSet {
-		zones = append(zones, z)
-	}
-	slices.Sort(zones)
-	pg := &ProviderGroup{
-		GroupHash: hash,
-		Members:   members,
-		Zones:     zones,
-	}
-	if nameProposal != nil {
-		pg.Name = nameProposal.Name
-		pg.NameProposal = nameProposal
-	}
-	return pg
 }
 
 func buildGossipMatrixRows(members []string, states map[string]*MemberState) []map[string]interface{} {
@@ -198,7 +154,6 @@ func gossipMatrixRow(reporter string, ms *MemberState) map[string]interface{} {
 	row["peer_states"] = ms.PeerStates
 	row["timestamp"] = ms.Timestamp.Format(time.RFC3339)
 	row["age"] = time.Since(ms.Timestamp).Truncate(time.Second).String()
-	row["zones"] = len(ms.Zones)
 	if ms.BeatInterval > 0 {
 		row["beat_interval"] = ms.BeatInterval
 	}

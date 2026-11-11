@@ -71,6 +71,9 @@ type stepRunner struct {
 	// servers serve the zone from its upstream. It is asked at every
 	// agent, of every step; nil for nothing more.
 	holds func(conf *Config, zone string, step InstrStep) bool
+	// status is what the step held waits for, as this agent's status shows
+	// it (S18a: a newcomer's nameservers); "" for nothing. Nil for none.
+	status func(conf *Config, zone string, step heldStep, now time.Time) string
 }
 
 // stepRunners are the runners registered, in the order they were.
@@ -467,14 +470,26 @@ func (b *reconcileBook) forget(zone string) {
 	delete(b.zones, zone)
 }
 
+// noVotingMember: no ON record's label is in servers= or signers= under in,
+// as participantsOf counts the voting members; true for no instructions.
+func noVotingMember(in *Instructions) bool {
+	return in == nil || len(identities(in.providers(slices.Concat(in.Servers, in.Signers)))) == 0
+}
+
 // reconcileTurn is the zone's reconciliation, at its turn (thawTurn): the
 // leader under the active serial takes the next step, or says "done", once
 // the step it holds is held; every other agent takes the leader's step and
-// its "done" from the leader's stamp.
+// its "done" from the leader's stamp. With no voting member under the active
+// serial nobody carries a step or confirms one: every agent ends the
+// transition as it takes effect (the project owner, 2026-11-06).
 func (conf *Config) reconcileTurn(zone string, now time.Time) {
 	s := conf.InternalMp.Instructions
 	in, ok := s.reconcileInputs(zone)
 	if !ok || !in.enforced || !in.reconciling || conf.MpConfig() == nil {
+		return
+	}
+	if noVotingMember(in.active.Reading) {
+		conf.transitionDone(in.name, in.active.Serial)
 		return
 	}
 	key := canonicalName(in.name)
@@ -530,7 +545,7 @@ func (conf *Config) reconcileTurn(zone string, now time.Time) {
 // under V is never a provider that V takes away (design 3.2).
 func (conf *Config) leadsReconciliation(in reconcileInputs) bool {
 	local := AgentId(dns.Fqdn(conf.MpConfig().Identity))
-	_, voters := participantsOf(in.active.Reading)
+	_, voters, _ := participantsOf(in.active.Reading)
 	switch {
 	case !isAmong(voters, local):
 		return false
@@ -561,10 +576,10 @@ type reconcileView struct {
 func (conf *Config) reconcileView(in reconcileInputs, told map[string]toldStamp, now time.Time) reconcileView {
 	mp := conf.MpConfig()
 	local := dns.Fqdn(mp.Identity)
-	_, votersV := participantsOf(in.active.Reading)
+	_, votersV, _ := participantsOf(in.active.Reading)
 	var votersN []string
 	if in.from != nil {
-		_, votersN = participantsOf(in.from.Reading)
+		_, votersN, _ = participantsOf(in.from.Reading)
 	}
 	var v reconcileView
 
@@ -592,7 +607,7 @@ func (conf *Config) reconcileView(in reconcileInputs, told map[string]toldStamp,
 	if !in.hasStep && len(unheard) > 0 {
 		v.adopt = nil
 		for _, id := range unheard {
-			v.waits = append(v.waits, id+" (not heard)")
+			v.waits = append(v.waits, id+" ("+conf.unheard(id)+")")
 		}
 		return v
 	}
@@ -654,8 +669,9 @@ func (conf *Config) reconcileView(in reconcileInputs, told map[string]toldStamp,
 
 // stepWaits adds to v whom the step held waits for: this agent's parts;
 // every other voting member under V, without a time-out; a member with no
-// role under V that is heard, up to no-role-timeout from the step (design
-// 4): a newcomer whose agent is not running holds nothing up. A leaving
+// role under V that is heard and tells V or a serial below it, up to
+// no-role-timeout from the step (design 4, plan S12's item 9): a newcomer
+// whose agent is not running holds nothing up. A leaving
 // member (voting under N and not under V, or one whose removal is under
 // way) has no role too, and once it has not confirmed a step for
 // leaving-timeout it is excused (design 3.2). The auditor is not waited
@@ -743,6 +759,12 @@ func (conf *Config) stepWaits(in reconcileInputs, told map[string]toldStamp, vot
 		if !heard || now.Sub(st.heard) > timeout || holds(st) {
 			continue
 		}
+		// one that knows no active serial, or one above V, cannot hold a step
+		// of V: the leader's word may need an election it cannot hear, and
+		// waiting would only run out the time-out at every step
+		if !st.Known || CompareSerial(st.Active, in.active.Serial) > 0 {
+			continue
+		}
 		if now.Sub(in.step.at) < noRole {
 			v.waits = append(v.waits, id+" (no role)")
 		} else {
@@ -764,7 +786,7 @@ func (conf *Config) emergencyRollover(in reconcileInputs, told map[string]toldSt
 	if t != nil && t.rollover != nil && t.rollover(in.name) && !pausedOn(t.waitsOnOf(in.name), in.active.Reading, excused) {
 		return local
 	}
-	_, votersV := participantsOf(in.active.Reading)
+	_, votersV, _ := participantsOf(in.active.Reading)
 	for _, id := range votersV {
 		if core.EqualNames(id, local) {
 			continue
@@ -841,7 +863,7 @@ func (conf *Config) followStep(in reconcileInputs, told map[string]toldStamp) {
 	if st, ok := told[canonicalName(string(leader))]; leader != "" && ok {
 		src = append(src, st)
 	} else if !votesIn(in.active.Reading, AgentId(conf.MpConfig().Identity)) {
-		_, voters := participantsOf(in.active.Reading)
+		_, voters, _ := participantsOf(in.active.Reading)
 		for _, id := range voters {
 			if st, ok := told[canonicalName(id)]; ok {
 				src = append(src, st)
@@ -929,6 +951,14 @@ func (conf *Config) reconcileLine(zone string, now time.Time) string {
 		}
 	} else if in.hasStep && in.step.Number == 0 {
 		line += ", waiting for the leader's first step"
+	}
+	for _, r := range stepRunners {
+		if r.status == nil || !in.hasStep {
+			continue
+		}
+		if s := r.status(conf, in.name, in.step, now); s != "" {
+			line += ", " + s
+		}
 	}
 	if in.newer != nil {
 		line += fmt.Sprintf("; %d held, waits until done", in.newer.Serial)

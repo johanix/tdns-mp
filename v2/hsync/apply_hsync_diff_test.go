@@ -101,13 +101,13 @@ func TestApplyHsyncDiff_failsClosedWhenZoneViewMissing(t *testing.T) {
 	}
 }
 
-// Delta (b): a role-less (OFF) HSYNC3 add is excluded; a member add is
-// registered, and the groups are recomputed once.
-func TestApplyHsyncDiff_roleLessAddExcluded(t *testing.T) {
+// Delta (b): an OFF HSYNC3 add is excluded; a member add is registered,
+// and the groups are recomputed once.
+func TestApplyHsyncDiff_offRecordExcluded(t *testing.T) {
 	local := mustHSYNC3RR(t, "loc", "local.example.")
 	member := mustHSYNC3RR(t, "mem", "mem.example.")
 	off := mustHSYNC3RR(t, "off", "off.example.")
-	off.Data.(*core.HSYNC3).State = 0 // OFF — not a participant
+	off.Data.(*core.HSYNC3).State = 0 // OFF: no member
 
 	zones := mapZoneLookup{"z.test.": {zone: "z.test.", rrs: []dns.RR{local, member, off}}}
 	e, h := newDiffEngine("local.example.", true, zones)
@@ -118,10 +118,31 @@ func TestApplyHsyncDiff_roleLessAddExcluded(t *testing.T) {
 		t.Fatal("member add should be registered")
 	}
 	if _, ok := e.registry.S.Get("off.example."); ok {
-		t.Fatal("role-less (OFF) add must be excluded")
+		t.Fatal("an OFF add must be excluded")
 	}
 	if h.hsync3Changed != 1 {
 		t.Fatalf("the groups are recomputed once after the adds, fired %d", h.hsync3Changed)
+	}
+}
+
+// An ON record that HSYNCPARAM lists in no role is a member (plan S15): its
+// add is registered, and the groups are recomputed once.
+func TestApplyHsyncDiff_memberWithNoRoleRegistered(t *testing.T) {
+	local := mustHSYNC3RR(t, "loc", "local.example.")
+	member := mustHSYNC3RR(t, "mem", "mem.example.")
+	noRole := mustHSYNC3RR(t, "nor", "norole.example.")
+	param := &core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{&core.HSYNCPARAMServers{Servers: []string{"loc", "mem"}}}}
+
+	zones := mapZoneLookup{"z.test.": {zone: "z.test.", rrs: []dns.RR{local, member, noRole}, hsyncparam: param}}
+	e, h := newDiffEngine("local.example.", true, zones)
+
+	_ = e.ApplyHsyncDiff("z.test.", HsyncDiff{Entered: idsOf(noRole)})
+
+	if _, ok := e.registry.S.Get("norole.example."); !ok {
+		t.Fatal("a member with no role was not registered")
+	}
+	if h.hsync3Changed != 1 {
+		t.Fatalf("the groups are recomputed once after the add, fired %d", h.hsync3Changed)
 	}
 }
 

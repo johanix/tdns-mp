@@ -489,7 +489,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 			}
 		}
 		if notYet {
-			tm.noteNotYet(ZoneName(zone), AgentId(senderID), distributionID, instr)
+			tm.noteNotYetAfter(ZoneName(zone), AgentId(senderID), distributionID, instr, notYetWait(c.Message))
 		}
 
 		// Phase 6: Check if this confirmation is for a pending DNSKEY propagation
@@ -1218,10 +1218,25 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			sentAt = t
 		}
 	}
+	// A withdrawal is the named provider's update, delivered by the leader
+	// that sent it (plan S16). An agent's update to its combiner, already
+	// in the provider's name, keeps the field as the combiner's flag. Any
+	// other message keeps its authenticated sender, and the field is
+	// dropped.
+	originator := senderID
+	if payload.Withdraw != nil {
+		switch messageType {
+		case AgentMsgNotify:
+			originator = payload.Withdraw.Provider
+		case AgentMsg("update"):
+		default:
+			payload.Withdraw = nil
+		}
+	}
 	msgPost := &AgentMsgPostPlus{
 		AgentMsgPost: AgentMsgPost{
 			MessageType:    messageType,
-			OriginatorID:   AgentId(senderID),
+			OriginatorID:   AgentId(originator),
 			DeliveredBy:    AgentId(deliveredBy),
 			Zone:           ZoneName(zone),
 			Records:        records,
@@ -1236,6 +1251,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			Publish:        payload.GetPublish(),
 			CatchUp:        payload.CatchUp,
 			Acting:         payload.Acting,
+			Withdraw:       payload.Withdraw,
 		},
 		Mechanism: msg.Mechanism,
 	}
@@ -1461,9 +1477,10 @@ func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID str
 		Nonce:      nonce,
 		Timestamp:  time.Now(),
 	}
-	// The answer about the zone's SIG(0) key may go to a peer that lets this
-	// agent in for the key alone (keyHandOverAdmits): its delivery
-	// confirmation is let in by its distribution id.
+	// The answer about the zone's SIG(0) key may go to a peer that is no
+	// member of the zone here, which then lets this agent in for the key
+	// alone (keyHandOverAdmits): its delivery confirmation is let in by its
+	// distribution id.
 	if subtype == "sig0key" {
 		req.DistributionID = transport.GenerateDistributionID()
 		tm.keyAsks.expectConfirm(requesterID, req.DistributionID)
@@ -2010,8 +2027,9 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		beatGossip = tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
 			string(agent.ID), tm.agentRegistry.ProviderGroupManager, tm.agentRegistry.LeaderElectionManager)
 	}
-	if e := tm.stamps.entryFor(string(agent.ID)); e != nil {
-		beatGossip = append(beatGossip, *e)
+	stampEntry := tm.stamps.entryFor(string(agent.ID))
+	if stampEntry != nil {
+		beatGossip = append(beatGossip, *stampEntry)
 	}
 	if len(beatGossip) > 0 {
 		gossipData, _ = json.Marshal(beatGossip)
@@ -2096,9 +2114,11 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 		}
 	}
 	// A beat that succeeded, on one mechanism or both, is one successful
-	// beat to the peer for the catch-up tracker.
+	// beat to the peer for the catch-up tracker, and has told the zones its
+	// stamp entry carried (plan S22).
 	if (apiBeatEligible && beatSucceeded(apiResp, apiErr)) || (dnsBeatEligible && beatSucceeded(dnsResp, dnsErr)) {
 		tm.catchUp.PeerOperational(agent.ID)
+		tm.stamps.acknowledged(string(agent.ID), stampEntry)
 	}
 	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
 		for _, resp := range []*transport.BeatResponse{apiResp, dnsResp} {
@@ -2252,6 +2272,10 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 		// the leader's KEY goes to the other agents with its publish
 		// instruction too, for their combiners (#206)
 		syncReq.Publish = update.Publish
+		// to the agents from the leader, which sends it; to the combiner
+		// in the provider's name, as the flag it takes from its own agent
+		// only (S16)
+		syncReq.Withdraw = update.Withdraw
 		if !isCombiner {
 			syncReq.CatchUp = update.CatchUp // an answer's marker is for the asker, not the combiner it is passed on to
 		}
@@ -2716,8 +2740,9 @@ func (tm *MPTransportBridge) dnskeyNoRoleTimedOut(ctx context.Context, distID st
 	}
 }
 
-// signingAgents: those of a zone's agents whose provider signs the zone, by
-// the identities of the step's signing set. nil when the zone or its
+// signingAgents: those of a zone's agents whose confirmations a key's
+// distribution expects, by the identities of the step's KeyConfirmers (plan
+// S13): a leaving signer counts until it leaves them. nil when the zone or its
 // HSYNCPARAM is not here to ask; the tracker then takes every answer as it
 // comes.
 func signingAgents(zone ZoneName, agents []AgentId) map[AgentId]bool {
@@ -2728,7 +2753,7 @@ func signingAgents(zone ZoneName, agents []AgentId) map[AgentId]bool {
 	if in := mpzd.instructions(); in == nil || !in.HasParam {
 		return nil
 	}
-	signing := identities(mpzd.roles().Signing)
+	signing := identities(mpzd.roles().KeyConfirmers)
 	out := map[AgentId]bool{}
 	for _, a := range agents {
 		if isAmong(signing, a) {

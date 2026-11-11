@@ -174,20 +174,6 @@ func (s *actingStore) owe(zone string, owed bool) {
 	}
 }
 
-// signingSet is the handed set of who signs, as the signing set
-// populateMPdata reads (#275), and whether the part holds one.
-func (s *actingStore) signingSet(zone string) (signingSet, bool) {
-	r, ok := s.roles(zone)
-	if !ok {
-		return nil, false
-	}
-	set := signingSet{}
-	for _, p := range r.Signing {
-		set[p.Label] = p.Identity
-	}
-	return set, true
-}
-
 // take stores a hand-over from the agent by: refused when its records do not
 // give the serial and digest it names, or when it is older than the one held
 // (errHandoverOlder, with the one held). A hand-over of no instructions drops
@@ -289,7 +275,7 @@ func (conf *Config) combinerTakeHandover(msg *AgentMsgPostPlus, localAgents map[
 		return refuse("this combiner keeps no hand-overs")
 	}
 	// what the combiner acted by before
-	pubkeyBefore := mpzd.hasPubkey()
+	pubkeyBefore := mpzd.pubkeyHere()
 	prev, changed, err := store.take(h, sender)
 	switch {
 	case errors.Is(err, errHandoverOlder):
@@ -328,10 +314,7 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 	if !mpzd.Ready {
 		return nil
 	}
-	signing, ok := actingHeld.Load().signingSet(mpzd.ZoneName)
-	if !ok {
-		signing = nextSigningSetOf(mpzd.instructions(), mpzd.signingSet())
-	}
+	r := mpzd.roles() // the sets held
 	// Computed on a wrapper of the zone as served, with a map of its own:
 	// the zone's options map is read without a lock. One refresh or
 	// hand-over at a time (mpDataLock).
@@ -345,7 +328,7 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 	}
 	w := &MPZoneData{ZoneData: mpzd.ZoneData, MP: &MPState{MPdata: mpzd.MP.MPdata}, MPOptions: opts}
 	mpzd.Unlock()
-	w.populateMPdata(mp, signing)
+	w.populateMPdata(mp, r)
 	if w.MP.MPdata == nil {
 		w.MPOptions[tdns.OptAllowEdits] = false
 	}
@@ -361,7 +344,7 @@ func (mpzd *MPZoneData) actByHandover(mp *MultiProviderConf, pubkeyBefore bool) 
 			lgCombiner.Error("combining by the hand-over failed", "zone", mpzd.ZoneName, "err", combineErr)
 		}
 	}
-	if mpzd.hasPubkey() != pubkeyBefore {
+	if mpzd.pubkeyHere() != pubkeyBefore {
 		if err := mpzd.withdrawZoneSignalKeysWithoutConsent(NewHsyncDB(mpzd.KeyDB)); err != nil {
 			lgCombiner.Error("failed to load publish instructions; the zone's at-ns publication is not checked against the customer's consent", "zone", mpzd.ZoneName, "err", err)
 		}
@@ -477,7 +460,7 @@ func (conf *Config) reportCombinerStart(ctx context.Context, tm *MPTransportBrid
 // agent's hand-over (waitsForHandover).
 func (conf *Config) zonesWaitingForHandover() []string {
 	var out []string
-	for _, zone := range conf.InternalMp.MPZoneNames {
+	for _, zone := range conf.mpZoneNames() {
 		if mpzd, ok := Zones.Get(zone); ok && mpzd.Ready && mpzd.waitsForHandover() {
 			out = append(out, zone)
 		}
