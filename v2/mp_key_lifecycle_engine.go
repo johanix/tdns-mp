@@ -436,10 +436,14 @@ type KeyLifecycleEngine struct {
 	waiting map[string]string // configured zones not ready to take, with why (logged once per reason)
 	refused map[string]bool   // configured zones that are not multi-provider: never taken
 	idle    map[string]bool   // owned zones driverState found this provider does not sign, said once (plan S11; isIdle judges now)
+	// madeOn: the ZoneData each cached driver was made on. A driver holds
+	// its policy from that ZoneData, so one tdns replaces gets a new driver,
+	// restored from the keystore as at a start (tdns-mp #396).
+	madeOn map[string]*tdns.ZoneData
 }
 
 func NewKeyLifecycleEngine(conf *Config, owner *MPKeyLifecycleOwner) *KeyLifecycleEngine {
-	return &KeyLifecycleEngine{conf: conf, owner: owner, wire: &signerWire{conf: conf}, zones: map[string]*ZoneKeyLifecycle{}}
+	return &KeyLifecycleEngine{conf: conf, owner: owner, wire: &signerWire{conf: conf}, zones: map[string]*ZoneKeyLifecycle{}, madeOn: map[string]*tdns.ZoneData{}}
 }
 
 // driver returns the zone's driver, made on first use once the zone is
@@ -464,7 +468,7 @@ func (e *KeyLifecycleEngine) driverState(zone string) (l *ZoneKeyLifecycle, owne
 	// a zone named in key-lifecycle-zones is owned before it is taken
 	// (#191), but its driver runs from the take (TakeConfiguredZones)
 	if !ok || zd == nil || !e.owner.Owns(zd) || !e.owner.taken(zone) {
-		delete(e.zones, zone)
+		e.dropDriverLocked(zone)
 		return nil, false
 	}
 	if !e.wire.IsSigner(zone) {
@@ -480,12 +484,16 @@ func (e *KeyLifecycleEngine) driverState(zone string) (l *ZoneKeyLifecycle, owne
 			}
 			e.idle[zone] = true
 		}
-		delete(e.zones, zone)
+		e.dropDriverLocked(zone)
 		return nil, true
 	}
 	delete(e.idle, zone)
 	if l := e.zones[zone]; l != nil {
-		return l, true
+		if e.madeOn[zone] == zd {
+			return l, true
+		}
+		lgSigner.Info("key lifecycle: the zone's ZoneData was replaced; its driver is made again from the keystore", "zone", zone)
+		e.dropDriverLocked(zone)
 	}
 	if zd.DnssecPolicy == nil {
 		lgSigner.Error("key lifecycle: the zone has no DNSSEC policy; nothing to run its keys by", "zone", zone)
@@ -506,7 +514,14 @@ func (e *KeyLifecycleEngine) driverState(zone string) (l *ZoneKeyLifecycle, owne
 		return nil, true
 	}
 	e.zones[zone] = l
+	e.madeOn[zone] = zd
 	return l, true
+}
+
+// dropDriverLocked forgets the zone's cached driver. e.mu held.
+func (e *KeyLifecycleEngine) dropDriverLocked(zone string) {
+	delete(e.zones, zone)
+	delete(e.madeOn, zone)
 }
 
 // Signal routes a KEYSTATE signal from an agent to the zone's driver:
@@ -640,6 +655,12 @@ func (e *KeyLifecycleEngine) TakeConfiguredZones() {
 	if e.waiting == nil {
 		e.waiting = map[string]string{}
 	}
+	// A zone taken on a ZoneData tdns no longer holds is released first,
+	// with its driver, and taken below on the new one once that is ready.
+	for _, zone := range e.owner.ReleaseReplaced() {
+		e.dropDriverLocked(zone)
+		lgSigner.Info("key lifecycle: the zone's ZoneData was removed or replaced; the take is released, and made again on the new one", "zone", zone)
+	}
 	for _, z := range mp.KeyLifecycleZones {
 		// as tdns keys its zones and as the rollout gate reads the
 		// list: "A.EXAMPLE." names a.example.
@@ -673,7 +694,9 @@ func (e *KeyLifecycleEngine) TakeConfiguredZones() {
 		}
 		delete(e.waiting, zone)
 		delete(e.refused, zone)
-		e.owner.Take(zone)
+		// on the ZoneData found ready: one tdns replaced since is taken
+		// again at the next call, after ReleaseReplaced
+		e.owner.takeOn(zone, zd)
 		lgSigner.Info("key lifecycle: zone taken by tdns-mp's state machine", "zone", zone)
 	}
 }

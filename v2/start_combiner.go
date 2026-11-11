@@ -27,6 +27,11 @@ func (conf *Config) StartMPCombiner(ctx context.Context, apirouter *mux.Router) 
 		conf.RegisterCombinerOnFirstLoad()
 		conf.RegisterMPRefreshCallbacks()
 	}
+	// A zone whose ZoneData tdns replaces gets its refresh callbacks again
+	// when it is first looked up (#396). Its contributions are restored by
+	// the reload hook above: that reads the keystore, which a lookup made
+	// under tdns's config lock must not.
+	conf.installZoneHooks(conf.registerRefreshCallbacks, conf.firstLoadSetup)
 
 	// Register all combiner API routes from tdns-mp
 	conf.SetupMPCombinerRoutes(ctx, apirouter)

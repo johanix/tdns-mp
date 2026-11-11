@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	tdns "github.com/johanix/tdns/v2"
+	core "github.com/johanix/tdns/v2/core"
 )
 
 // MPZoneData embeds *tdns.ZoneData. All core ZoneData fields and
@@ -52,9 +53,22 @@ type MPZoneTuple struct {
 // *MPZoneData, creating and caching the wrapper on first access.
 // tdns.Zones remains the authoritative source of zones; MPZones
 // never creates or deletes zones, only wraps them.
+//
+// A cached wrapper is valid only while it wraps the *tdns.ZoneData
+// that tdns.Zones holds under its name (tdns-mp #396). tdns replaces
+// a zone's ZoneData when a config reload removes the zone and a later
+// one adds it back, and on its dynamic and catalog paths; a lookup
+// then builds a new wrapper, with fresh MP state, as a start does,
+// and the role's per-zone hooks run for the new ZoneData (OnNew).
 type MPZones struct {
-	mu    sync.RWMutex
+	mu sync.RWMutex
+	// cache is filed by the name as tdns files its zones
+	// (core.CanonicalizeName), so that one ZoneData has one wrapper
+	// however its name is spelled.
 	cache map[string]*MPZoneData
+	// onNew is told of every wrapper built once the role's start has
+	// installed it (SetOnNew); nil before that and in most tests.
+	onNew func(*MPZoneData)
 }
 
 // Zones is the package-level accessor. tdns-mp code uses Zones.Get()
@@ -64,34 +78,41 @@ var Zones = &MPZones{
 	cache: make(map[string]*MPZoneData),
 }
 
+// SetOnNew installs what is told of each wrapper built from now on:
+// the role's per-zone hooks, which run once per ZoneData whoever looks
+// it up first. It returns the one it replaces.
+func (mz *MPZones) SetOnNew(f func(*MPZoneData)) func(*MPZoneData) {
+	mz.mu.Lock()
+	defer mz.mu.Unlock()
+	prev := mz.onNew
+	mz.onNew = f
+	return prev
+}
+
 // Get returns the *MPZoneData for the named zone, creating and
-// caching the wrapper on first access. Returns false if the zone
+// caching the wrapper on first access, and again when tdns has
+// replaced the zone's ZoneData since. Returns false if the zone
 // does not exist in tdns.Zones.
 func (mz *MPZones) Get(name string) (*MPZoneData, bool) {
-	mz.mu.RLock()
-	if mpzd, ok := mz.cache[name]; ok {
-		mz.mu.RUnlock()
-		return mpzd, true
-	}
-	mz.mu.RUnlock()
-
 	zd, ok := tdns.Zones.Get(name)
 	if !ok {
 		return nil, false
 	}
+	return mz.getOrCreate(name, zd), true
+}
 
-	mz.mu.Lock()
-	defer mz.mu.Unlock()
-	// Double-check after lock upgrade.
-	if mpzd, ok := mz.cache[name]; ok {
-		return mpzd, true
+// GetFor returns the wrapper of zd as long as zd is the ZoneData that
+// tdns.Zones holds under its name. A callback registered on a zone that
+// a reload has removed or replaced since is handed the old ZoneData, and
+// gets false: it has nothing left to act on.
+func (mz *MPZones) GetFor(zd *tdns.ZoneData) (*MPZoneData, bool) {
+	if zd == nil {
+		return nil, false
 	}
-	mpzd := &MPZoneData{
-		ZoneData:  zd,
-		MP:        &MPState{},
-		MPOptions: make(map[tdns.ZoneOption]bool),
+	mpzd, ok := mz.Get(zd.ZoneName)
+	if !ok || mpzd.ZoneData != zd {
+		return nil, false
 	}
-	mz.cache[name] = mpzd
 	return mpzd, true
 }
 
@@ -133,43 +154,72 @@ func (mz *MPZones) IterCb(fn func(key string, v *MPZoneData)) {
 	}
 }
 
-// Set stores a pre-populated *MPZoneData in the cache. Used by
-// OnFirstLoad callbacks to ensure the cached object has MP fields
-// initialized before any Get() call.
-func (mz *MPZones) Set(name string, mpzd *MPZoneData) {
-	mz.mu.Lock()
-	defer mz.mu.Unlock()
-	mz.cache[name] = mpzd
-}
-
-// Invalidate removes a cached entry. Call when a zone is deleted
-// from tdns.Zones.
+// Invalidate removes a cached entry. A lookup no longer needs it to
+// see a replaced ZoneData; tests use it for a fresh wrapper of the same
+// one.
 func (mz *MPZones) Invalidate(name string) {
 	mz.mu.Lock()
 	defer mz.mu.Unlock()
-	delete(mz.cache, name)
+	delete(mz.cache, core.CanonicalizeName(name))
 }
 
-// getOrCreate returns the cached *MPZoneData or creates one from
-// the given *tdns.ZoneData.
+// Prune drops the cached wrappers of zones that tdns no longer holds,
+// or holds under another ZoneData, so that nothing here keeps a removed
+// zone alive. Run after every zone reload (RegisterMPRefreshCallbacks).
+func (mz *MPZones) Prune() {
+	mz.mu.Lock()
+	defer mz.mu.Unlock()
+	for name, mpzd := range mz.cache {
+		if zd, ok := tdns.Zones.Get(name); !ok || zd != mpzd.ZoneData {
+			delete(mz.cache, name)
+		}
+	}
+}
+
+// getOrCreate returns the cached *MPZoneData of zd, or creates one
+// when nothing is cached under name or what is wraps another
+// ZoneData. zd is what tdns.Zones held a moment ago, or what a
+// snapshot of it held (Items, IterBuffered): before anything is
+// cached, what tdns holds now is looked at again under the lock, so
+// that a ZoneData a reload has replaced since never displaces the
+// live zone's wrapper and the MP state it has gathered. A zone tdns
+// no longer holds gets a wrapper of zd that is not cached and runs no
+// hooks. The hook runs outside the lock, since it reads the zone and
+// registers callbacks on it.
 func (mz *MPZones) getOrCreate(name string, zd *tdns.ZoneData) *MPZoneData {
+	name = core.CanonicalizeName(name)
 	mz.mu.RLock()
-	if mpzd, ok := mz.cache[name]; ok {
+	if mpzd, ok := mz.cache[name]; ok && mpzd.ZoneData == zd {
 		mz.mu.RUnlock()
 		return mpzd
 	}
 	mz.mu.RUnlock()
 
 	mz.mu.Lock()
-	defer mz.mu.Unlock()
-	if mpzd, ok := mz.cache[name]; ok {
+	live, ok := tdns.Zones.Get(name)
+	if !ok {
+		mz.mu.Unlock()
+		return newMPZoneData(zd)
+	}
+	if mpzd, ok := mz.cache[name]; ok && mpzd.ZoneData == live {
+		mz.mu.Unlock()
 		return mpzd
 	}
-	mpzd := &MPZoneData{
+	mpzd := newMPZoneData(live)
+	mz.cache[name] = mpzd
+	onNew := mz.onNew
+	mz.mu.Unlock()
+	if onNew != nil {
+		onNew(mpzd)
+	}
+	return mpzd
+}
+
+// newMPZoneData is a wrapper of zd with fresh MP state.
+func newMPZoneData(zd *tdns.ZoneData) *MPZoneData {
+	return &MPZoneData{
 		ZoneData:  zd,
 		MP:        &MPState{},
 		MPOptions: make(map[tdns.ZoneOption]bool),
 	}
-	mz.cache[name] = mpzd
-	return mpzd
 }

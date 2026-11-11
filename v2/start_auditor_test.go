@@ -64,6 +64,7 @@ func startTestAuditor(t *testing.T) (*Config, *tdns.ZoneData) {
 		close(conf.Config.Internal.StopCh)
 		tdns.Zones.Remove(auditorTestZone)
 		Zones.Invalidate(auditorTestZone)
+		Zones.SetOnNew(nil) // the start installs the auditor's zone hooks
 	})
 	if err := conf.StartMPAuditor(ctx, nil); err != nil {
 		t.Fatalf("StartMPAuditor: %v", err)

@@ -132,6 +132,23 @@ func servingChainOK(ctx context.Context, zone string, nameservers []string, keys
 	if len(keys) == 0 {
 		return 0, errors.New("no DNSKEY of the expected signers is known here")
 	}
+	return servingSOAs(ctx, zone, nameservers, minSerial, func(rrset *core.RRset) error { return signedByOneOf(rrset, keys, now) })
+}
+
+// servingSerialOK: each of the nameservers serves the zone, at each of its
+// addresses, at an SOA serial no lower than minSerial (RFC 1982), signed or
+// not: the check where no provider's key signs the copy they serve.
+func servingSerialOK(ctx context.Context, zone string, nameservers []string, minSerial uint32) (uint32, error) {
+	if len(nameservers) == 0 {
+		return 0, errors.New("multi-provider.local.nameservers names none")
+	}
+	return servingSOAs(ctx, zone, nameservers, minSerial, nil)
+}
+
+// servingSOAs asks each address of each of the nameservers for the zone's
+// SOA: its serial no lower than minSerial, and signed passes, unless nil.
+// It returns the lowest serial served, and why the check fails.
+func servingSOAs(ctx context.Context, zone string, nameservers []string, minSerial uint32, signed func(*core.RRset) error) (uint32, error) {
 	var lowest uint32
 	seen := false
 	for _, ns := range nameservers {
@@ -167,7 +184,10 @@ func servingChainOK(ctx context.Context, zone string, nameservers []string, keys
 			if CompareSerial(soa.Serial, minSerial) < 0 {
 				return lowest, fmt.Errorf("%s serves serial %d, below %d", at, soa.Serial, minSerial)
 			}
-			if err := signedByOneOf(a.RRset, keys, now); err != nil {
+			if signed == nil {
+				continue
+			}
+			if err := signed(a.RRset); err != nil {
 				return lowest, fmt.Errorf("%s: %w", at, err)
 			}
 		}

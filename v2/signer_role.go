@@ -101,7 +101,7 @@ func (conf *Config) runSignerRoles(ctx context.Context) {
 				conf.signerRoleTurn(ctx, zone)
 			}
 		case <-ticker.C:
-			for _, zone := range conf.InternalMp.MPZoneNames {
+			for _, zone := range conf.mpZoneNames() {
 				conf.signerRoleTurn(ctx, zone)
 			}
 		}
