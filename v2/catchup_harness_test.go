@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -34,16 +35,29 @@ type catchUpNet struct {
 
 func newCatchUpNet(t *testing.T, zone string) *catchUpNet {
 	t.Helper()
+	return newCatchUpNetAs(t, zone, false)
+}
+
+// newCatchUpNetAs is newCatchUpNet, or with noRole the rig in which alice is
+// a member with no role: the zone's HSYNCPARAM names bob alone, and no peer
+// is authorized by configuration, so each side admits the other by the
+// zone's records (isInHSYNC).
+func newCatchUpNetAs(t *testing.T, zone string, noRole bool) *catchUpNet {
+	t.Helper()
 	asMPAgent(t)
-	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: true, ChunkMode: "edns0", ControlZoneIsIdentity: true})
+	env := newIntegEnv(t, &integEnvConfig{AuthorizeAllPeers: !noRole, ChunkMode: "edns0", ControlZoneIsIdentity: true})
 	n := &catchUpNet{env: env, zone: ZoneName(zone), alice: dns.Fqdn(env.Alice.Identity), bob: dns.Fqdn(env.Bob.Identity)}
 
 	zd := seedZoneWithHSYNC3(t, zone, n.alice, n.bob)
 	zd.Logger = log.New(io.Discard, "", 0)
 	zd.Options[tdns.OptMultiProvider] = true
 	apex, _ := zd.GetOwner(zd.ZoneName)
+	servers := []string{shortLabel(n.alice), shortLabel(n.bob)}
+	if noRole {
+		servers = []string{shortLabel(n.bob)}
+	}
 	hp := numbered(&core.HSYNCPARAM{Value: []core.HSYNCPARAMKeyValue{
-		&core.HSYNCPARAMServers{Servers: []string{shortLabel(n.alice), shortLabel(n.bob)}},
+		&core.HSYNCPARAMServers{Servers: servers},
 		&core.HSYNCPARAMSigners{Signers: []string{shortLabel(n.bob)}},
 	}})
 	apex.RRtypes.Set(core.TypeHSYNCPARAM, core.RRset{RRs: []dns.RR{&dns.PrivateRR{
@@ -220,5 +234,67 @@ func TestTransportBoundary_CatchUpRequestAndAnswer(t *testing.T) {
 	n.env.Alice.Bridge.ChunkHandler.OnConfirmationReceived(confirmIn(ids[0], n.bob, transport.ConfirmSuccess, string(n.zone), nil, nil, nil, nil, false, ""))
 	waitUntil(t, "bob's confirmation did not close the answer's entry in alice's queue", func() bool {
 		return len(queued(n.env.Alice, n.bob)) == 0
+	})
+}
+
+// The member with no role catches up (plan S15): alice, the real agent, has
+// a record and no role, and bob, the stand-in, leads the zone. Each admits
+// the other by the zone's records: alice's hello is accepted, where before
+// the switch it was refused; bob's beats and gossip name the zone to alice,
+// a member of its group with no role; and alice's request for the zone's
+// state reaches bob, whose complete answer alice takes.
+func TestTransportBoundary_MemberWithNoRoleCatchesUp(t *testing.T) {
+	n := newCatchUpNetAs(t, "norole.catchup.harness.example.", true)
+	if resp := postAPIHello(t, n.env.Bob, n.alice, string(n.zone)); resp.Error || resp.Status != "ok" {
+		t.Fatalf("bob refuses the hello of alice, a member with no role: %+v", resp)
+	}
+	if zones := n.env.Bob.Registry.sharedParticipantZones(AgentId(n.alice)); !slices.Contains(zones, n.zone) {
+		t.Errorf("bob's beats to alice name %v, not the zone", zones)
+	}
+	pgm := NewProviderGroupManager(n.bob)
+	pgm.RecomputeGroups()
+	if pg := pgm.GetGroupForZone(n.zone); pg == nil || !slices.Equal(pg.NoRole, []string{n.alice}) || !slices.Contains(pg.Members, n.alice) {
+		t.Errorf("bob's group of the zone, whose gossip goes to its members: %+v", pg)
+	}
+
+	// alice asks, over the wire, and the request reaches bob
+	agent, _ := n.env.Alice.Registry.S.Get(AgentId(n.bob))
+	if _, err := n.env.Alice.Registry.sendRfiToAgent(agent, &AgentMsgPost{MessageType: AgentMsgRfi, OriginatorID: AgentId(n.alice),
+		YourIdentity: AgentId(n.bob), Zone: n.zone, RfiType: "SYNC", CatchUp: &CatchUp{Request: "q-alice", Reason: catchUpJoin}}); err != nil {
+		t.Fatalf("alice's request: %v", err)
+	}
+	m, ok := recvMsgWithin(t, n.env.Bob.MsgQs.Msg, 10*time.Second)
+	if !ok || m.CatchUp == nil || m.CatchUp.Request != "q-alice" {
+		t.Fatalf("alice's request did not reach bob: %+v", m)
+	}
+
+	// bob answers complete, and alice takes the answer
+	yes := true
+	key := testDnskey(t, string(n.zone), 257)
+	zu := &ZoneUpdate{Zone: n.zone, AgentId: AgentId(n.bob), CatchUp: &CatchUp{Request: "q-alice", Complete: &yes},
+		Operations: []core.RROperation{
+			{Operation: "replace", RRtype: "NS", Records: []string{}},
+			{Operation: "replace", RRtype: "CDS", Records: []string{}},
+			{Operation: "replace", RRtype: "DNSKEY", Records: []string{key.String()},
+				KeyStates: []core.KeyState{{KeyTag: key.KeyTag(), State: KeyStateActive, DS: &yes}}},
+		}}
+	if err := n.env.Bob.Bridge.EnqueueForSpecificAgent(n.zone, AgentId(n.alice), zu, transport.GenerateDistributionID()); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "bob's answer did not make bob speak at alice", func() bool {
+		tm := n.env.Alice.Bridge
+		tm.foreignKeyStatesMu.Lock()
+		defer tm.foreignKeyStatesMu.Unlock()
+		return len(tm.foreignKeyStates[n.zone][AgentId(n.bob)]) == 1
+	})
+	var toCombiner []string
+	waitUntil(t, "alice did not pass bob's answer on to its combiner", func() bool {
+		toCombiner = queued(n.env.Alice, "combiner.alice.example.")
+		return len(toCombiner) == 1
+	})
+	n.conf.InternalMp.MsgQs.Confirmation <- &ConfirmationDetail{DistributionID: toCombiner[0], Zone: n.zone,
+		Source: "combiner.alice.example.", Status: "ok", Timestamp: time.Now()}
+	waitUntil(t, "alice's confirmation did not close the entry in bob's queue", func() bool {
+		return len(queued(n.env.Bob, n.alice)) == 0
 	})
 }

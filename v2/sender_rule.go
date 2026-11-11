@@ -165,15 +165,16 @@ func syncSenderRefusal(zone ZoneName, sender string) string {
 // this agent by an ON record's upstream field, and not an auditor only.
 // Each asks that this agent have a standing in the zone, as admission does.
 // Every other type passes: the election's (step 1 checks those), and CONFIG
-// sig0key, which MsgHandler answers to any voting member and which a holder
-// with no role lets in for the key alone (keyHandOverGate).
+// sig0key, which MsgHandler answers to any voting member, and whose answer
+// from an agent asked that is no member is let in for the key alone
+// (keyHandOverGate).
 func (tm *MPTransportBridge) rfiSenderRefusal(zone ZoneName, sender, rfiType, subtype string) string {
 	member := func() string {
-		participants, _ := participantsOf(instructionsFor(zone))
-		if !isAmong(participants, AgentId(tm.LocalID)) {
+		members, _, _ := zoneParticipants(string(zone), instructionsFor(zone))
+		if !isAmong(members, AgentId(tm.LocalID)) {
 			return fmt.Sprintf("rfi %s refused: this agent is not a member of zone %s", rfiType, zone)
 		}
-		if !isAmong(participants, AgentId(sender)) {
+		if !isAmong(members, AgentId(sender)) {
 			return fmt.Sprintf("rfi %s refused: %s is not a member of zone %s", rfiType, sender, zone)
 		}
 		return ""

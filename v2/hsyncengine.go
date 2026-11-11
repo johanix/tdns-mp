@@ -636,8 +636,8 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				resp.ErrorMsg = "this agent has no catch-up tracker"
 				return
 			}
-			if !isVotingMember(msg.Zone, ar.LocalAgent.Identity) {
-				resp.Msg = fmt.Sprintf("zone %s: nothing is sent: this agent does not vote in the zone (it is in neither servers= nor signers=)", msg.Zone)
+			if !asksInZone(msg.Zone, AgentId(ar.LocalAgent.Identity)) {
+				resp.Msg = fmt.Sprintf("zone %s: nothing is sent: this agent asks nothing in the zone (it is an auditor, or no member)", msg.Zone)
 				return
 			}
 			asked := catchUp.AskZone(msg.Zone, catchUpManual)
