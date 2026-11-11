@@ -403,13 +403,13 @@ func TestANewerSerialDuringAgreeingIsTheOneAgreedOn(t *testing.T) {
 	}
 }
 
-// A refused newer serial does not replace the serial agreed on: a record
-// and then its role, published before the first is thawed. The first is
-// thawed, and the second is judged again against it.
+// A refused newer serial does not replace the serial agreed on: a record,
+// and then a role taken away, published before the first is thawed. The
+// first is thawed, and the second is judged again against it.
 func TestARefusedNewerSerialDoesNotReplaceTheSerialAgreedOn(t *testing.T) {
 	r := newThawRig(t, "record-then-role.thaw.example.", roleA)
 	r.agree()
-	w := freezeAt(t, 43, "v", "a,b,n", "") // n's role: refused until S18a
+	w := freezeAt(t, 43, "v", "a", "") // b's role taken: refused until S17b
 	r.store.Note(r.zone, w, nil)
 	st := status(t, r.store, r.zone)
 	if st.Agreeing == nil || st.Agreeing.Serial != 42 || st.Newest.Serial != 43 || len(st.Refused) == 0 {

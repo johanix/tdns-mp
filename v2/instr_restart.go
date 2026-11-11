@@ -343,8 +343,9 @@ func (conf *Config) knowActive(zone string) {
 // know makes sd the zone's active serial (Know), and runs what follows: the
 // catch-up's answer time runs again (activeChanged); the readers moved from
 // the newest serial to the active one (onActiveChanged), the sets handed to
-// the parts (onSetsChanged), every voting member this agent never asked is
-// asked (askUnasked), and the zone's turn asked again, for a newer serial
+// the parts (onSetsChanged), a provider put in a list it was not in asked
+// for its state (enteredLists), every voting member this agent never asked
+// is asked (askUnasked), and the zone's turn asked again, for a newer serial
 // it may agree on now. The end of the freeze
 // releases what was owed (onFreeze), and S8 what was kept.
 func (conf *Config) know(zone string, sd SerialDigest, th *Thaw, reconciling bool, by, from string) {
@@ -357,10 +358,13 @@ func (conf *Config) know(zone string, sd SerialDigest, th *Thaw, reconciling boo
 	lg.Info("the zone's active instructions are known", "zone", zone, "serial", sd.Serial, "from", from, "by", by)
 	conf.InternalMp.CatchUp.activeChanged(ZoneName(zone))
 	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil && mpzd.Ready {
-		if after := s.activeReading(zone); !sameInstructions(before, after) {
+		after := s.activeReading(zone)
+		if !sameInstructions(before, after) {
 			mpzd.onActiveChanged(conf.InternalMp.MPTransport, before, after)
 		}
 		conf.onSetsChanged(mpzd, true)
+		// a provider put in a list it was not in (plan S18a)
+		conf.enteredLists(zone, before, after)
 		// with the provider data the known serial gives: a member never
 		// asked is asked now (plan S15)
 		conf.InternalMp.CatchUp.askUnasked(ZoneName(zone))

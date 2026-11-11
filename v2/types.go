@@ -165,6 +165,10 @@ type CombinerSyncRequest struct {
 	Serial         uint32
 	DistributionID string
 	Timestamp      time.Time
+	Instr          *MsgStamp // the delivering agent's stamp at its send: replaces are ordered by it (S16)
+	// Removal: a removal in any origin's name that the combiner's own agent
+	// delivered with the withdrawal's flag (design 3.5, plan S16)
+	Removal bool
 }
 
 type CombinerSyncResponse struct {
@@ -256,6 +260,7 @@ type ZoneUpdate struct {
 	Publish    *core.PublishInstruction // KEY/CDS publication instruction for combiner
 	CatchUp    *CatchUp                 `json:"catch_up,omitempty"` // on the answer to a request for the zone's state
 	Acting     *ActingHandover          `json:"acting,omitempty"`   // a hand-over to this agent's combiner (S10)
+	Withdraw   *Withdraw                `json:"withdraw,omitempty"` // a withdrawal of AgentId's records (S16)
 }
 
 // OwnerData matches tdns.OwnerData; alias keeps *tdns.ZoneData.Data map types aligned.

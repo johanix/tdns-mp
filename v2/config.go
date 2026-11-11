@@ -159,6 +159,9 @@ func (conf *Config) RegisterCombinerOnFirstLoad() {
 	if hdb == nil {
 		return
 	}
+	// the REPLACE order guard, before the router delivers any REPLACE; at a
+	// reload each key keeps the newer of what it holds and what is stored
+	loadCombinerReplaceOrigins(hdb)
 	// the zones this parse found (#401): the combiner's reload hook runs
 	// this before RegisterMPRefreshCallbacks
 	conf.InternalMp.mpZones.refresh()
@@ -402,4 +405,7 @@ type InternalMpConf struct {
 	// reconciles: what the agent and the auditor keep of their zones'
 	// reconciliations in memory (reconcile.go).
 	reconciles reconcileBook
+	// transfers: the agent's transfer confirmations for a server role's
+	// step (server_role.go).
+	transfers transferBook
 }

@@ -637,14 +637,15 @@ func TestTheAgentShowsAndForgetsTheZonesSerials(t *testing.T) {
 
 // The status prints what each member tells of the zone's instructions (plan
 // S5a), this agent first, with the notes the rigs read: (lags), an owner
-// error with its text, and in the Hold column its signer's hold (S6).
+// error with its text, in the Hold column its signer's hold (S6), and in
+// the CaughtUp column whether it has caught up (S18a).
 func TestThePerMemberInstructionsArePrinted(t *testing.T) {
 	heard := time.Date(2026, 10, 28, 15, 4, 2, 0, time.UTC)
 	sd := func(serial uint32) *tdnsmp.SerialDigest { return &tdnsmp.SerialDigest{Serial: serial, Digest: "d"} }
 	fortyTwo := uint32(42)
 	var b bytes.Buffer
 	printParentSyncStatus(&b, tdnsmp.ParentSyncStatus{Zone: "z.example.", InstructionMembers: []tdnsmp.MemberInstructions{
-		{Identity: "agent.alpha.example.", Self: true, Active: sd(41), Newest: sd(42), Hold: true, Crypto: true},
+		{Identity: "agent.alpha.example.", Self: true, Active: sd(41), Newest: sd(42), Hold: true, CaughtUp: true, Crypto: true},
 		{Identity: "agent.bravo.example.", Active: sd(41), Newest: sd(41), Rollover: true, Lags: true, Crypto: true, Heard: heard,
 			Error: "serial 41 told with two digests (a, b)"},
 		{Identity: "agent.delta.example.", Newest: sd(43), Alone: true, OtherDigest: &fortyTwo, Heard: heard},
@@ -652,10 +653,10 @@ func TestThePerMemberInstructionsArePrinted(t *testing.T) {
 	out := b.String()
 	wantLines(t, "status", out,
 		"Instructions, per member:",
-		"  Active  Newest  Rollover  Hold  Heard     Identity",
-		"  41      42      no        yes   -         agent.alpha.example. (this agent)",
-		"  41      41      yes       no    15:04:02  agent.bravo.example. (lags) (owner error: serial 41 told with two digests (a, b))",
-		"  -       43      no        no    15:04:02  agent.delta.example. (tells 43, which no other member holds) (another digest at 42) (payload encryption off)")
+		"  Active  Newest  Rollover  Hold  CaughtUp  Heard     Identity",
+		"  41      42      no        yes   yes       -         agent.alpha.example. (this agent)",
+		"  41      41      yes       no    no        15:04:02  agent.bravo.example. (lags) (owner error: serial 41 told with two digests (a, b))",
+		"  -       43      no        no    no        15:04:02  agent.delta.example. (tells 43, which no other member holds) (another digest at 42) (payload encryption off)")
 	wantNoControls(t, "status", out)
 }
 
