@@ -151,8 +151,9 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 		return errLeadMoved
 	}
 	// The KEY is not published while the zone is frozen (plan S6), unless a
-	// rollover under way waits for the parent to trust it (S14): the
-	// take-up when the transition is done publishes it (takeUp)
+	// rollover under way waits for the parent to trust it (S14) or a step's
+	// own sync waits for it (S17b): the take-up when the transition is done
+	// publishes it (takeUp)
 	if held, why := conf.offerHeld(ctx, zone); held {
 		lgAgent.Info("the zone's KEY is published when the transition is done", "zone", zone, "phase", why)
 		return errHeldDuringTransition
@@ -215,7 +216,8 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 }
 
 // errHeldDuringTransition: the zone is frozen (plan S6); the KEY is
-// published, and polled, when the transition is done.
+// published, and polled, when a step's own sync asks for it, or when the
+// transition is done.
 var errHeldDuringTransition = errors.New("held until the zone's transition is done")
 
 // errOtherKeysActive: the zone's key is not its only active key, and could

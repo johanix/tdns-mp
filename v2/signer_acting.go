@@ -14,7 +14,8 @@
  * copy says (from S7). A signer handed nothing acts by its own copy (rule
  * 5): provisional for a copy with no reading (no serial=, #308), which
  * starts no multi-provider work; for one that reads, it waits for its
- * agent, and acts meanwhile by the sets it last acted by.
+ * agent, and acts meanwhile by the sets it last acted by: at a first load
+ * none, with the zone withheld (signer_role.go).
  */
 package tdnsmp
 
@@ -75,6 +76,10 @@ func (conf *Config) signerTakeHandover(sig *KeystateSignalMsg) {
 		refuse("the zone is not a multi-provider zone here")
 		return
 	}
+	if h.NoCopy {
+		conf.signerAgentHasNoCopy(mpzd)
+		return
+	}
 	store := actingHeld.Load()
 	if store == nil {
 		refuse("this signer keeps no hand-overs")
@@ -94,6 +99,10 @@ func (conf *Config) signerTakeHandover(sig *KeystateSignalMsg) {
 	if err == nil {
 		refusalLogged.Delete(handoverKey(zone))
 		conf.signerHold(zone, h.Sets.Hold)
+		if h.Joining {
+			conf.keysStartOver(mpzd)
+		}
+		conf.askSignerRole(zone)
 	}
 	if err == nil && h.Refresh {
 		conf.refreshFromUpstream(mpzd, lgSigner)
@@ -151,16 +160,23 @@ func (conf *Config) signerConfirmers(zone string) []string {
 // is served; and, for a zone its key machine runs, the distributions in
 // flight expecting KeyConfirmers when they changed from confirmers, and the
 // foreign rows' ds by DSSigners. Not before the zone's first load, which
-// reads what is held.
+// reads what is held; a withheld zone has been through it, and is not Ready
+// until it acts on a hand-over.
 func (mpzd *MPZoneData) actBySignerHandover(conf *Config, confirmers []string) {
-	if !mpzd.Ready {
+	if !mpzd.Ready && !mpzd.Withheld() {
 		return
 	}
-	mp := conf.MpConfig()
 	r, ok := actingHeld.Load().roles(mpzd.ZoneName)
 	if !ok {
 		return
 	}
+	mpzd.actBySets(conf, r, confirmers)
+}
+
+// actBySets has the signer act by the sets r, as actBySignerHandover says. Its
+// role's own calls come at the zone's turn (signerRoleTurn).
+func (mpzd *MPZoneData) actBySets(conf *Config, r Roles, confirmers []string) {
+	mp := conf.MpConfig()
 	// Computed on a wrapper of the zone as served, with a map of its own:
 	// the zone's options map is read without a lock. One refresh or
 	// hand-over at a time (mpDataLock), through the switch, not the re-sign
@@ -203,6 +219,7 @@ func (e *KeyLifecycleEngine) handedOver(zone string, confirmers []string) {
 	if l == nil {
 		return
 	}
+	e.startOver(zone)
 	if !slices.Equal(confirmers, e.wire.OtherSigners(zone)) {
 		if err := l.SignersChanged(); err != nil {
 			lgSigner.Error("key lifecycle: the distributions in flight could not follow the providers handed", "zone", zone, "err", err)
@@ -210,6 +227,16 @@ func (e *KeyLifecycleEngine) handedOver(zone string, confirmers []string) {
 	}
 	if err := l.ApplyForeign(); err != nil {
 		lgSigner.Error("key lifecycle: the other providers' ds could not follow the providers handed", "zone", zone, "err", err)
+	}
+}
+
+// startOver: the keys of a provider that joins start over (T20), for a zone the
+// machine runs. Also on its next tick, should this fail.
+func (e *KeyLifecycleEngine) startOver(zone string) {
+	if l := e.driver(zone); l != nil {
+		if err := l.StartOver(); err != nil {
+			lgSigner.Error("key lifecycle: a joiner's keys could not start over; next tick", "zone", zone, "err", err)
+		}
 	}
 }
 
@@ -250,30 +277,44 @@ func signerActingLine(zone string) string {
 	return "waiting for its agent's hand-over"
 }
 
+// signerStartReport is one round of the start report: reported are the zones
+// that have reported. A withheld zone reports again whatever its copy says by
+// now: only its agent's word ends the withholding, and that answers a report.
+func (conf *Config) signerStartReport(reported map[string]bool) {
+	for _, zone := range conf.mpZoneNames() {
+		mpzd, ok := Zones.Get(zone)
+		if !ok || mpzd == nil {
+			continue
+		}
+		withheld := mpzd.Withheld()
+		if !mpzd.Ready && !withheld {
+			continue
+		}
+		apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
+		if reported[mpzd.ZoneName] && !withheld && !signerWaits(mpzd.ZoneName, apex) {
+			continue
+		}
+		reported[mpzd.ZoneName] = true
+		pushSignerInventory(conf, mpzd.ZoneName)
+	}
+}
+
+// signerReportEvery is how often the signer reports again the zones that
+// wait for their agents' hand-over.
+const signerReportEvery = 15 * time.Second
+
 // reportSignerStart is the signer's start report (rule 5's request, plan
 // S11): once a zone is loaded here its inventory goes to its agent, which
-// says what the signer holds for it, nothing included; and every minute
-// after, again for each zone that waits for its agent's hand-over
-// (signerWaits), since the agent may not have been up. The agent hands a
-// zone over whenever the signer does not hold what it wants.
+// says what the signer holds for it, nothing included; and again every
+// signerReportEvery for each zone that waits for its agent's hand-over
+// (signerWaits), since the agent may not have been up. A withheld zone has
+// been loaded, and is not Ready until its agent's hand-over: it reports too.
+// The agent hands a zone over whenever the signer does not hold what it wants.
 func (conf *Config) reportSignerStart(ctx context.Context) {
 	reported := map[string]bool{}
-	report := func() {
-		for _, zone := range conf.mpZoneNames() {
-			mpzd, ok := Zones.Get(zone)
-			if !ok || mpzd == nil || !mpzd.Ready {
-				continue
-			}
-			apex, _ := mpzd.OwnerForAnalysis(mpzd.ZoneName)
-			if reported[mpzd.ZoneName] && !signerWaits(mpzd.ZoneName, apex) {
-				continue
-			}
-			reported[mpzd.ZoneName] = true
-			pushSignerInventory(conf, mpzd.ZoneName)
-		}
-	}
+	report := func() { conf.signerStartReport(reported) }
 	report()
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.NewTicker(signerReportEvery)
 	defer ticker.Stop()
 	for {
 		select {
