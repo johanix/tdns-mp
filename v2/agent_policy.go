@@ -22,25 +22,21 @@ const (
 
 // noteReplaceOrigin answers whether a remote REPLACE is older than the one
 // last applied for the same (zone, agent, rrtype), and records it as the
-// newest when it is not. Older = an earlier originating time, or the same
-// time and a lower distribution id, which the sender hands out in
-// increasing order. The time is compared whole: the wire carries it to the
-// nanosecond (RFC 3339 with a fraction). When the map is updated, the origin
-// is persisted to HsyncDB (best-effort) so a restart still rejects older
-// replaces (tdns-mp #249).
+// newest when it is not (olderThan). The leader's withdrawal of the agent's
+// records is ordered with them, in the agent's name (plan S16). When the
+// map is updated, the origin is persisted to HsyncDB (best-effort) so a
+// restart still rejects older replaces (tdns-mp #249).
 func (zdr *ZoneDataRepo) noteReplaceOrigin(u *SynchedDataUpdate, rrtype uint16) (bool, replaceOrigin) {
 	key := string(u.Zone) + "|" + string(u.AgentId) + "|" + dns.TypeToString[rrtype]
+	origin := originOf(u.OriginatingTime, u.OriginatingDistID, u.OriginatingInstr)
 	zdr.mu.Lock()
-	if cur, ok := zdr.lastReplace[key]; ok {
-		if cur.Time.After(u.OriginatingTime) || (cur.Time.Equal(u.OriginatingTime) && cur.DistID > u.OriginatingDistID) {
-			zdr.mu.Unlock()
-			return true, cur
-		}
+	if cur, ok := zdr.lastReplace[key]; ok && origin.olderThan(cur) {
+		zdr.mu.Unlock()
+		return true, cur
 	}
 	if zdr.lastReplace == nil {
 		zdr.lastReplace = make(map[string]replaceOrigin)
 	}
-	origin := replaceOrigin{Time: u.OriginatingTime, DistID: u.OriginatingDistID}
 	zdr.lastReplace[key] = origin
 	hdb := zdr.hdb
 	zdr.mu.Unlock()
@@ -52,6 +48,30 @@ func (zdr *ZoneDataRepo) noteReplaceOrigin(u *SynchedDataUpdate, rrtype uint16) 
 		}
 	}
 	return false, replaceOrigin{}
+}
+
+// originOf is the origin of a REPLACE sent at t under distID, with ms the
+// stamp at its send.
+func originOf(t time.Time, distID string, ms *MsgStamp) replaceOrigin {
+	o := replaceOrigin{Time: t, DistID: distID}
+	if made := madeUnder(ms); made != nil {
+		o.Under, o.HasUnder = made.Serial, true
+	}
+	return o
+}
+
+// olderThan: a REPLACE of origin o is older than the one of cur. When both
+// stamps tell an active serial and they differ, the lower serial is older
+// (rule 6; design 5.2): the leader's withdrawal and the provider's own
+// operations come from two clocks. Otherwise an earlier time is older, or
+// the same time and a lower distribution id, which the sender hands out in
+// increasing order. The time is compared whole: the wire carries it to the
+// nanosecond (RFC 3339 with a fraction).
+func (o replaceOrigin) olderThan(cur replaceOrigin) bool {
+	if o.HasUnder && cur.HasUnder && o.Under != cur.Under {
+		return CompareSerial(o.Under, cur.Under) < 0
+	}
+	return cur.Time.After(o.Time) || (cur.Time.Equal(o.Time) && cur.DistID > o.DistID)
 }
 
 // loadReplaceOrigins hydrates lastReplace from HsyncDB. Called once at

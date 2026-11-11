@@ -352,6 +352,7 @@ type AgentMsgPost struct {
 	Publish        *core.PublishInstruction
 	CatchUp        *CatchUp        `json:"catch_up,omitempty"` // a request for the zone's state, or its answer
 	Acting         *ActingHandover `json:"acting,omitempty"`   // a hand-over from the combiner's agent (S10)
+	Withdraw       *Withdraw       `json:"withdraw,omitempty"` // a withdrawal of another provider's records (S16)
 }
 
 type AgentMsgPostPlus struct {

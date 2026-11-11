@@ -47,6 +47,12 @@ type MPTransportBridge struct {
 	// keyAsks: the zone SIG(0) key requests out, whose answers are let in
 	// (keyHandOverAdmits)
 	keyAsks keyAskTable
+	// rollKEYs: the new KEY of each roll of a zone's SIG(0) key this agent
+	// runs, and its recipients' final words (plan S17a)
+	rollKEYs rollKEYBook
+	// keyPurges: the drops of KEYs held under another name asked of this
+	// agent's combiner, until they are made (plan S17a)
+	keyPurges keyPurgeBook
 
 	// catchUp is the agent's catch-up tracker (catchup.go), as
 	// conf.InternalMp.CatchUp; nil on every other role.
@@ -487,9 +493,15 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 					removed = append(slices.Clip(removed), rr)
 				}
 			}
+			// its word on the drop of a KEY held under another name (plan
+			// S17a), which no other peer can give; only now is it final
+			tm.keyPurges.heard(distributionID, status.String(), c.Message, notYet)
 		}
+		// a recipient's word on a roll's new KEY (plan S17a); a word the
+		// hand-over sends again has gone no further than the above
+		tm.rollKEYs.heard(distributionID, senderID, status.String(), c.Message, notYet)
 		if notYet {
-			tm.noteNotYet(ZoneName(zone), AgentId(senderID), distributionID, instr)
+			tm.noteNotYetAfter(ZoneName(zone), AgentId(senderID), distributionID, instr, notYetWait(c.Message))
 		}
 
 		// Phase 6: Check if this confirmation is for a pending DNSKEY propagation
@@ -1218,10 +1230,25 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			sentAt = t
 		}
 	}
+	// A withdrawal is the named provider's update, delivered by the leader
+	// that sent it (plan S16). An agent's update to its combiner, already
+	// in the provider's name, keeps the field as the combiner's flag. Any
+	// other message keeps its authenticated sender, and the field is
+	// dropped.
+	originator := senderID
+	if payload.Withdraw != nil {
+		switch messageType {
+		case AgentMsgNotify:
+			originator = payload.Withdraw.Provider
+		case AgentMsg("update"):
+		default:
+			payload.Withdraw = nil
+		}
+	}
 	msgPost := &AgentMsgPostPlus{
 		AgentMsgPost: AgentMsgPost{
 			MessageType:    messageType,
-			OriginatorID:   AgentId(senderID),
+			OriginatorID:   AgentId(originator),
 			DeliveredBy:    AgentId(deliveredBy),
 			Zone:           ZoneName(zone),
 			Records:        records,
@@ -1236,6 +1263,7 @@ func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 			Publish:        payload.GetPublish(),
 			CatchUp:        payload.CatchUp,
 			Acting:         payload.Acting,
+			Withdraw:       payload.Withdraw,
 		},
 		Mechanism: msg.Mechanism,
 	}
@@ -2256,6 +2284,10 @@ func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *tra
 		// the leader's KEY goes to the other agents with its publish
 		// instruction too, for their combiners (#206)
 		syncReq.Publish = update.Publish
+		// to the agents from the leader, which sends it; to the combiner
+		// in the provider's name, as the flag it takes from its own agent
+		// only (S16)
+		syncReq.Withdraw = update.Withdraw
 		if !isCombiner {
 			syncReq.CatchUp = update.CatchUp // an answer's marker is for the asker, not the combiner it is passed on to
 		}
