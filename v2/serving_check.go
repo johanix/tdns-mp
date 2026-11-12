@@ -369,6 +369,12 @@ func largestServedDnskeyTTL(mpzd *MPZoneData) (largest time.Duration, served, si
 			err = fmt.Errorf("%s: %w", ns, k.why)
 		case !k.found:
 			err = fmt.Errorf("%s serves no DNSKEY for the zone", ns)
+		case !k.serves:
+			// an address that serves none may have served an RRset before, still
+			// cached: the TTL the others serve it with counts, and the server
+			// is not served until each of its addresses serves one
+			largest = max(largest, k.ttl)
+			err = fmt.Errorf("%s serves no DNSKEY for the zone at one of its addresses", ns)
 		default:
 			largest = max(largest, k.ttl)
 			served = append(served, ns)
@@ -468,7 +474,8 @@ func lookForJoinerKeys(mpzd *MPZoneData, keys []*dns.DNSKEY) (joinerKeysServed, 
 
 // keysAtAddrs is one nameserver's answers, one per address, read for keys:
 // whether any address answered, with the zone's DNSKEY RRset or with none;
-// whether each that answered serves every one of keys; whether any serves a
+// whether each that answered serves a DNSKEY RRset holding every one of keys
+// (with no keys, whether each serves one at all); whether any serves a
 // DNSKEY RRset, and the largest TTL any serves it with; and why the first that
 // did not answer did not. An address that does not answer is not counted, as a
 // nameserver that does not answer is not.
@@ -488,10 +495,11 @@ func readKeysAtAddrs(answers []servedAnswer, keys []*dns.DNSKEY) keysAtAddrs {
 			continue
 		}
 		k.answered = true
-		if ttl, ok := dnskeyTTLOf(a.RRset); ok {
+		ttl, ok := dnskeyTTLOf(a.RRset)
+		if ok {
 			k.ttl, k.found = max(k.ttl, ttl), true
 		}
-		k.serves = k.serves && servesKeys(a.RRset, keys)
+		k.serves = k.serves && ok && servesKeys(a.RRset, keys)
 	}
 	k.serves = k.serves && k.answered
 	if !k.answered && k.why == nil {

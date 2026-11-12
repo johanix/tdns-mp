@@ -3106,4 +3106,14 @@ func TestEveryAddressOfANameserverIsAskedForTheKeys(t *testing.T) {
 	if err != nil || len(seen.with) != 1 || seen.ttl != time.Hour {
 		t.Errorf("its IPv6 address does not answer: the look saw %+v, err %v; want it with the keys, at 1h", seen, err)
 	}
+	// an address that answers with no DNSKEY RRset may have served one before,
+	// still cached: the server is not served, and the TTL the other serves counts
+	answers[0] = servedAnswer{Addr: "192.0.2.1:53", RRset: &core.RRset{RRs: []dns.RR{at(old, time.Minute), at(joiner, time.Minute)}}}
+	answers[1] = servedAnswer{Err: fmt.Errorf("no DNSKEY in the answer (NOERROR): %w", errServesNoRRset)}
+	if largest, served, silent, _ := largestServedDnskeyTTL(r.mpzd); largest != time.Minute || len(served) != 0 || len(silent) != 1 {
+		t.Errorf("its IPv6 address serves no DNSKEY RRset: largest %s, served %v, silent %v; want 1m, none served, it silent", largest, served, silent)
+	}
+	if seen, err = lookForJoinerKeys(r.mpzd, []*dns.DNSKEY{joiner}); err != nil || len(seen.without) != 1 {
+		t.Errorf("its IPv6 address serves no DNSKEY RRset: the look saw %+v, err %v; want it without the keys", seen, err)
+	}
 }
