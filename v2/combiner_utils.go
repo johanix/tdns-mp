@@ -24,6 +24,13 @@ func (zd *MPZoneData) combinerShouldApplyEdits() bool {
 	return true
 }
 
+// combinerHoldsKeysOnly: on a signed zone whose provider holds keys and does
+// not sign, the combiner applies DNSKEYs alone (canApply), and serves no
+// signature TXT either.
+func (zd *MPZoneData) combinerHoldsKeysOnly() bool {
+	return zd.MP != nil && zd.MP.MPdata != nil && zd.MP.MPdata.ZoneSigned && !zd.MP.MPdata.WeAreSigner && zd.MP.MPdata.WeHoldKeys
+}
+
 // Named presets for allowed RRtypes. Hardcoded for safety.
 // "apex-combiner": manages DNSKEY, CDS, CSYNC, NS, KEY at the zone apex.
 // "delegation-combiner": (future) manages NS, DS, GLUE at delegation points.
@@ -341,7 +348,7 @@ func (mpzd *MPZoneData) combineInput(conf *MultiProviderConf) *combineInput {
 		}
 	}
 	in.cleanups = mpzd.MP.takeCleanups()
-	if conf != nil && conf.CombinerOptions[CombinerOptAddSignature] && conf.Signature != "" {
+	if conf != nil && conf.CombinerOptions[CombinerOptAddSignature] && conf.Signature != "" && !mpzd.combinerHoldsKeysOnly() {
 		sig := strings.ReplaceAll(conf.Signature, "{identity}", conf.Identity)
 		sig = strings.ReplaceAll(sig, "{zone}", mpzd.ZoneName)
 		// At hsync-signature.{zone}, to avoid conflicts with apex TXT records.
