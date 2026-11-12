@@ -181,8 +181,8 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 	local := dns.Fqdn(mp.Identity)
 	timeout := leavingTimeoutFor(mp)
 	v := thawView{zone: in.name, from: in.active.SerialDigest, to: in.agreed.SerialDigest}
-	_, votersN := participantsOf(in.active.Reading)
-	_, votersV := participantsOf(in.agreed.Reading)
+	_, votersN, _ := participantsOf(in.active.Reading)
+	_, votersV, _ := participantsOf(in.agreed.Reading)
 	var t *stampTable
 	if tm := conf.InternalMp.MPTransport; tm != nil {
 		t = tm.stamps
@@ -201,8 +201,14 @@ func (conf *Config) thawView(zone string, now time.Time) (thawView, bool) {
 	}
 
 	// No voting member under N: each voting member under V makes V active
-	// when every voting member under V tells V (design 3.2).
+	// when every voting member under V tells V (design 3.2). With none under
+	// V either, nobody is there to tell V or to wait for: every agent makes V
+	// active at once (the project owner, 2026-11-06).
 	if len(votersN) == 0 {
+		if len(votersV) == 0 {
+			v.leads = true
+			return v, true
+		}
 		v.leads = isAmong(votersV, AgentId(local))
 		if !v.leads {
 			return v, true
@@ -595,9 +601,11 @@ func (conf *Config) thaw(v thawView) {
 
 // activate makes the thaw's target the zone's active serial, written before
 // it is told (Activate), and runs what follows from it: the zone moves to
-// its group under the new serial (onActiveChanged), and the parts are
-// handed V with the sets they hold, step 0 (onSetsChanged). The
-// reconciliation follows (reconcileTurn).
+// its group under the new serial (onActiveChanged), the parts are handed V
+// with the sets they hold, step 0 (onSetsChanged), a provider put in a
+// list it was not in is asked for its state and sends what it contributes
+// again (enteredLists), and every voting member this agent never asked is
+// asked (askUnasked). The reconciliation follows (reconcileTurn).
 func (conf *Config) activate(zone string, th Thaw, by string) error {
 	s := conf.InternalMp.Instructions
 	before := s.activeReading(zone)
@@ -611,8 +619,15 @@ func (conf *Config) activate(zone string, th Thaw, by string) error {
 	b.zone(canonicalName(zone)).thawed = &thawMark{to: th.To.Serial, by: by, at: time.Now()}
 	b.mu.Unlock()
 	if mpzd, ok := Zones.Get(zone); ok && mpzd != nil {
-		mpzd.onActiveChanged(conf.InternalMp.MPTransport, before, s.activeReading(zone))
+		after := s.activeReading(zone)
+		mpzd.onActiveChanged(conf.InternalMp.MPTransport, before, after)
 		conf.onSetsChanged(mpzd, true)
+		// a provider put in a list it was not in is asked for its state,
+		// and sends what it contributes again (plan S18a)
+		conf.enteredLists(zone, before, after)
+		// with the provider data the new serial gives: a member never
+		// asked is asked now (plan S15)
+		conf.InternalMp.CatchUp.askUnasked(ZoneName(zone))
 	}
 	conf.askThaw(zone)
 	return nil
@@ -761,16 +776,38 @@ func (conf *Config) fetchInstructions(zone string, sd SerialDigest, member, why 
 			lg.Warn("a member's answer with the zone's instructions is not taken", "zone", zone, "serial", sd.Serial, "member", member, "err", err)
 			return
 		}
-		switch err := conf.InternalMp.Instructions.Hold(zone, in); {
-		case err == nil:
-			lg.Info("a serial of the zone's instructions is held, fetched from a member", "zone", zone, "serial", sd.Serial, "member", member)
-		case errors.Is(err, errHeldAlready):
-		default:
-			lg.Warn("a serial of the zone's instructions fetched from a member is not kept", "zone", zone, "serial", sd.Serial, "member", member, "err", err)
-			return
+		if conf.holdFetched(zone, in, member) {
+			conf.askThaw(zone)
 		}
-		conf.askThaw(zone)
 	}()
+}
+
+// holdFetched keeps in, a serial of the zone's instructions fetched from
+// member (Hold), and reports whether the zone holds that serial now. With no
+// active serial known the zone reads its newest serial (design 3.4), so a
+// serial above the others moves what the zone reads, and what follows such a
+// move runs here: the refresh that brings the serial later, and the serial's
+// becoming known, find nothing changed. Without it the zone stays in its group
+// under the serial it read before, gossip for its new group is not taken, and
+// a member with no role never learns the leader (plan S15).
+func (conf *Config) holdFetched(zone string, in *Instructions, member string) bool {
+	s := conf.InternalMp.Instructions
+	before := s.reading(zone)
+	switch err := s.Hold(zone, in); {
+	case err == nil:
+		lg.Info("a serial of the zone's instructions is held, fetched from a member", "zone", zone, "serial", in.Serial, "member", member)
+	case errors.Is(err, errHeldAlready):
+		return true
+	default:
+		lg.Warn("a serial of the zone's instructions fetched from a member is not kept", "zone", zone, "serial", in.Serial, "member", member, "err", err)
+		return false
+	}
+	if after := s.reading(zone); !sameInstructions(before, after) {
+		if mpzd, ok := Zones.Get(zone); ok && mpzd != nil && mpzd.Ready {
+			mpzd.onActiveChanged(conf.InternalMp.MPTransport, before, after)
+		}
+	}
+	return true
 }
 
 // instructionsAsk is the instructions RFI's records: the serial and digest

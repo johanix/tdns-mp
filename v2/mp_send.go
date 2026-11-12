@@ -51,6 +51,7 @@ func syncAppMessage(req *PeerSyncRequest, peerID string) (*transport.AppMessage,
 		CatchUp:        req.CatchUp,
 		Acting:         req.Acting,
 		Instr:          req.Instr,
+		Withdraw:       req.Withdraw,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -92,6 +93,7 @@ type syncWirePayload struct {
 	CatchUp        *CatchUp        `json:"catch_up,omitempty"`
 	Acting         *ActingHandover `json:"acting,omitempty"`
 	Instr          *MsgStamp       `json:"instr,omitempty"` // the sender's stamp (S5b)
+	Withdraw       *Withdraw       `json:"withdraw,omitempty"`
 }
 
 // keystateWirePayload is the KEYSTATE message as it goes on the wire:

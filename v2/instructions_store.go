@@ -878,6 +878,28 @@ func (s *InstructionStore) removal(zone, label, identity string) (Removal, bool)
 	return Removal{}, false
 }
 
+// removalIdentities are the stored identities of the zone's providers whose
+// removal is under way, the zone named in any case (S12, S17b fill them),
+// each folded as a DNS name. An empty one is no name, not the root.
+func (s *InstructionStore) removalIdentities(zone string) []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, z := s.zoneLocked(dns.Fqdn(zone))
+	if z == nil {
+		return nil
+	}
+	var out []string
+	for _, r := range z.Removals {
+		if id := canonicalName(r.Identity); id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // InstructionsStatus is what the agent keeps of a zone's instructions, as
 // `agent parentsync status`, `zone mplist` and the auditor show it.
 type InstructionsStatus struct {

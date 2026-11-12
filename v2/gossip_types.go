@@ -246,15 +246,21 @@ type DsyncSchemeInfo struct {
 
 // ParentSyncStatus holds on-demand status information about parent delegation sync for a zone.
 type ParentSyncStatus struct {
-	Zone          ZoneName  `json:"zone"`
-	Leader        AgentId   `json:"leader"`
-	LeaderExpiry  time.Time `json:"leader_expiry"`
-	ElectionTerm  uint64    `json:"election_term"`
-	IsLeader      bool      `json:"is_leader"`
-	KeyAlgorithm  string    `json:"key_algorithm,omitempty"`
-	KeyID         uint16    `json:"key_id,omitempty"`
-	KeyRR         string    `json:"key_rr,omitempty"`
-	ApexPublished bool      `json:"apex_published"`
+	Zone         ZoneName  `json:"zone"`
+	Leader       AgentId   `json:"leader"`
+	LeaderExpiry time.Time `json:"leader_expiry"`
+	ElectionTerm uint64    `json:"election_term"`
+	IsLeader     bool      `json:"is_leader"`
+	// Standing is this agent's standing in the zone, as zone mplist's This
+	// column names it; NoVote: it does not vote there, and knows the
+	// leader from gossip (plan S15). Empty and false for a zone with no
+	// HSYNC3 records.
+	Standing      string `json:"standing,omitempty"`
+	NoVote        bool   `json:"no_vote,omitempty"`
+	KeyAlgorithm  string `json:"key_algorithm,omitempty"`
+	KeyID         uint16 `json:"key_id,omitempty"`
+	KeyRR         string `json:"key_rr,omitempty"`
+	ApexPublished bool   `json:"apex_published"`
 	// ApexKeys: how many KEY records the apex carries. More than one is no
 	// zone key at all (step 7b): an operator has to leave one.
 	ApexKeys        int               `json:"apex_keys,omitempty"`

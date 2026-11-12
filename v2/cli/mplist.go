@@ -47,7 +47,7 @@ func ListMPZones(resp tdnsmp.MPListResponse) {
 	}
 
 	var out, ownerErrors, refusals, acting []string
-	out = append(out, "Zone|Serial|Digest|Servers|Signers|Auditors|NSmgmt|ParentSync|Suffix|Options")
+	out = append(out, "Zone|Serial|Digest|Servers|Signers|Auditors|NoRole|This|NSmgmt|ParentSync|Suffix|Options")
 
 	var znames []string
 	for zname := range resp.MPZones {
@@ -68,6 +68,16 @@ func ListMPZones(resp tdnsmp.MPListResponse) {
 		auditors := strings.Join(info.Auditors, ",")
 		if auditors == "" {
 			auditors = "(none)"
+		}
+		// the members with no role, and the agent's own standing (plan
+		// S15); a daemon that does not fill This shows "-"
+		noRole := strings.Join(info.NoRole, ",")
+		if noRole == "" {
+			noRole = "(none)"
+		}
+		this := info.This
+		if this == "" {
+			this = "-"
 		}
 		opts := []string{}
 		for _, opt := range info.Options {
@@ -106,8 +116,8 @@ func ListMPZones(resp tdnsmp.MPListResponse) {
 		if info.Acting != "" {
 			acting = append(acting, fmt.Sprintf("  %s: %s", zname, info.Acting))
 		}
-		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
-			zname, serial, digest, servers, signers, auditors, info.NSmgmt, info.ParentSync, info.Suffix, optStr))
+		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
+			zname, serial, digest, servers, signers, auditors, noRole, this, info.NSmgmt, info.ParentSync, info.Suffix, optStr))
 	}
 
 	fmt.Println(columnize.SimpleFormat(out))

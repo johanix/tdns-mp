@@ -446,9 +446,12 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		}
 	}
 
-	if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Operations, req.Records); refusal != nil {
-		refusal.DistributionID, refusal.Timestamp = resp.DistributionID, resp.Timestamp
-		return refusal
+	// a removal is judged first: originVoteRefusal warns of what it refuses
+	if !req.Removal {
+		if refusal := originVoteRefusal(zonename, req.SenderID, localAgents[req.SenderID], req.Operations, req.Records); refusal != nil {
+			refusal.DistributionID, refusal.Timestamp = resp.DistributionID, resp.Timestamp
+			return refusal
+		}
 	}
 
 	policy := mpzd.getEditPolicy()
@@ -702,17 +705,19 @@ func (mpzd *MPZoneData) combinerResyncSignalKeys(senderID, zone string, hdb *Hsy
 // (ApplyPendingSignalKeys, CombinerReapplyContributions), and when a
 // provider zone refreshes (MPPreRefresh). The customer zone's own refresh
 // asks too, when its HSYNCPARAM has changed (PostRefresh). The agent asks
-// for at-ns only when the customer's HSYNCPARAM says pubkey
-// (publishLocations), but a stored instruction can say at-ns for a zone that
-// does not: an agent from before that rule sent it, or the customer has
-// taken the flag away since. So every use of a stored instruction asks the
-// zone first.
+// for at-ns only when the customer's HSYNCPARAM says pubkey and the zone has
+// HSYNC3 (publishLocations), but a stored instruction can say at-ns for a
+// zone that does not: an agent from before that rule sent it, or the
+// customer has taken the flag or the HSYNC3 records away since. So every
+// use of a stored instruction asks the zone first.
 
 // lacksPubkeyConsent: the customer's zone is loaded and its HSYNCPARAM does
-// not say pubkey. A zone that has not loaded yet says nothing either way,
-// and its stored instructions are left as they are until it has.
+// not say pubkey, or it has no HSYNC3, so its signal names are tdns's
+// use-hsyncparam's to publish (pubkeyHere). A zone that has not loaded yet
+// says nothing either way, and its stored instructions are left as they are
+// until it has.
 func (mpzd *MPZoneData) lacksPubkeyConsent() bool {
-	return mpzd.HasPublishedData() && !mpzd.hasPubkey()
+	return mpzd.HasPublishedData() && !mpzd.pubkeyHere()
 }
 
 // contributionsLoaded: the zone has loaded, its persisted contributions are
@@ -770,7 +775,7 @@ func withdrawSignalKeys(stored *StoredPublishInstruction, hdb *HsyncDB) {
 	kept := append(append([]string(nil), waiting...), failed...)
 	if len(kept) > 0 && len(retracted) == 0 {
 		if len(waiting) > 0 {
-			lgCombiner.Info("at-ns publication to be withdrawn when the provider zone has loaded: the zone's HSYNCPARAM does not say pubkey",
+			lgCombiner.Info("at-ns publication to be withdrawn when the provider zone has loaded: the zone's HSYNCPARAM does not say pubkey, or it has no HSYNC3",
 				"zone", stored.Zone, "sender", stored.SenderID, "waiting", waiting)
 		}
 		return
@@ -788,7 +793,7 @@ func withdrawSignalKeys(stored *StoredPublishInstruction, hdb *HsyncDB) {
 	if err := SavePublishInstruction(hdb, stored.Zone, stored.SenderID, instr, kept); err != nil {
 		lgCombiner.Error("failed to save the publish instruction after withdrawing at-ns", "zone", stored.Zone, "sender", stored.SenderID, "err", err)
 	}
-	lgCombiner.Info("at-ns publication withdrawn: the zone's HSYNCPARAM does not say pubkey",
+	lgCombiner.Info("at-ns publication withdrawn: the zone's HSYNCPARAM does not say pubkey, or it has no HSYNC3",
 		"zone", stored.Zone, "sender", stored.SenderID, "retracted", retracted, "waiting", waiting, "failed", failed, "locations", instr.Locations)
 }
 
@@ -1248,7 +1253,7 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 		// Non-signer combiners persist DNSKEYs without this check. Only
 		// what an origin adds is judged: its removal of its own keys is
 		// not (S10).
-		if rrtype == dns.TypeDNSKEY && !isProvider && policy.canApply(rrtype) && (op.Operation == "add" || (op.Operation == "replace" && len(op.Records) > 0)) {
+		if rrtype == dns.TypeDNSKEY && !isProvider && !req.Removal && policy.canApply(rrtype) && (op.Operation == "add" || (op.Operation == "replace" && len(op.Records) > 0)) {
 			reject, reason := mpzd.checkDNSKEYPolicy(req.SenderID)
 			if reject {
 				for _, rec := range op.Records {
@@ -1319,15 +1324,28 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 			// the agent forwards a peer's REPLACEs to its combiner in the
 			// order it applied them, and the queue can still deliver an
 			// older one after a newer one. The newest origin wins here too.
-			if stale, applied := staleCombinerReplace(req, zonename, rrtype); stale {
+			// A REPLACE that is not applied below gives its place back
+			// (unclaim), at each of the exits that refuse it.
+			stale, newest, unclaim, gerr := staleCombinerReplace(req, zonename, rrtype)
+			if gerr != nil {
+				// refused as a failed REPLACE is, so that the sender
+				// sends it again
+				lgCombiner.Error("REPLACE refused: its order guard could not be saved", "zone", zonename, "sender", req.SenderID, "rrtype", op.RRtype, "err", gerr)
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: fmt.Sprintf("(replace %s)", op.RRtype),
+					Reason: fmt.Sprintf("replace failed: %v", gerr),
+				})
+				continue
+			}
+			if stale {
 				lgCombiner.Warn("ignored a stale REPLACE: older than the one applied",
 					"zone", zonename, "sender", req.SenderID, "rrtype", op.RRtype,
 					"this", req.Timestamp.UTC().Format(time.RFC3339Nano), "thisDistrib", req.DistributionID,
-					"applied", applied.Time.UTC().Format(time.RFC3339Nano), "appliedDistrib", applied.DistID)
+					"applied", newest.Time.UTC().Format(time.RFC3339Nano), "appliedDistrib", newest.DistID)
 				continue
 			}
 
-			if (rrtype == dns.TypeKEY || rrtype == dns.TypeCDS) && len(parsedRRs) > 0 {
+			if (rrtype == dns.TypeKEY || rrtype == dns.TypeCDS) && len(parsedRRs) > 0 && !req.Removal {
 				senderIsLocal := localAgents[req.SenderID]
 				if existingSender, existingRRs := mpzd.findExistingContribution(zonename, rrtype, req.SenderID); existingSender != "" {
 					existingIsLocal := localAgents[existingSender]
@@ -1352,6 +1370,7 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 							if derr != nil {
 								// refused as a failed REPLACE is, so that
 								// the sender sends it again
+								unclaim()
 								lgCombiner.Error("removing the sender's own contribution failed", "zone", zonename, "sender", req.SenderID, "rrtype", op.RRtype, "err", derr)
 								rejectedItems = append(rejectedItems, RejectedItem{
 									Record: fmt.Sprintf("(replace %s)", op.RRtype),
@@ -1390,6 +1409,7 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 			if rrtype == dns.TypeCSYNC && len(parsedRRs) > 0 {
 				reason, drop := mpzd.csyncVerdict(req.SenderID, zonename, parsedRRs)
 				if reason != "" {
+					unclaim()
 					for _, rr := range parsedRRs {
 						rejectedItems = append(rejectedItems, RejectedItem{Record: rr.String(), Reason: reason})
 					}
@@ -1400,6 +1420,7 @@ func (mpzd *MPZoneData) combinerProcessOperations(req *CombinerSyncRequest, zone
 
 			applied, removed, changed, err := mpzd.ReplaceCombinerDataByRRtype(req.SenderID, zonename, rrtype, parsedRRs)
 			if err != nil {
+				unclaim()
 				lgCombiner.Error("REPLACE operation failed", "err", err)
 				rejectedItems = append(rejectedItems, RejectedItem{
 					Record: fmt.Sprintf("(replace %s)", op.RRtype),
@@ -1811,31 +1832,196 @@ func (mpzd *MPZoneData) checkDNSKEYPolicy(senderID string) (bool, string) {
 
 // combinerReplaceOrigins records, per (zone, sender, rrtype), where the
 // REPLACE last applied came from: the delivering agent's enqueue time and
-// distribution id. In memory only; a restart re-hydrates contributions and
-// the peers re-announce.
+// distribution id. Each is kept in CombinerReplaceOrigin too (hdb), and
+// loaded before the router starts, so that after a restart a queued older
+// REPLACE stays refused: else it would put back a contribution the
+// leader's withdrawal took away, from a provider that is still a signer.
 var combinerReplaceOrigins = struct {
-	mu sync.Mutex
-	m  map[string]replaceOrigin
-}{m: map[string]replaceOrigin{}}
+	mu  sync.Mutex
+	m   map[string]replaceOrigin
+	hdb *HsyncDB
+	// loaded: hdb's rows are in m. While they are not (a load failed) a
+	// REPLACE is refused, and the load is tried again at each: judged
+	// against what m holds without them, an older REPLACE queued across
+	// the restart would be applied, and its row would take the newer's
+	// place.
+	loaded bool
+	// dirty: the rows that may not hold what m holds, since putting back
+	// the origin of a REPLACE not applied failed on disk
+	// (unclaimCombinerReplace). Each is written again at the next REPLACE
+	// judged, until it holds: else after a restart the row of the one not
+	// applied would refuse an older REPLACE that is not stale.
+	dirty map[string]originRow
+}{m: map[string]replaceOrigin{}, dirty: map[string]originRow{}}
+
+// originRow names a row of the combiner's guard on disk.
+type originRow struct {
+	zone, sender string
+	rrtype       uint16
+}
 
 // staleCombinerReplace answers whether a REPLACE is older than the one last
-// applied for the same (zone, sender, rrtype) -- an earlier time, or the same
-// time and a lower distribution id -- and records it as the newest when it
-// is not. A request without a time is never stale.
-func staleCombinerReplace(req *CombinerSyncRequest, zonename string, rrtype uint16) (bool, replaceOrigin) {
+// applied for the same (zone, sender, rrtype), by the active serial its
+// agent stamped at the send, then by the time (olderThan), and records it
+// as the newest when it is not, on disk too. A request without a time is
+// never stale.
+//
+// It records before the apply, so that a REPLACE the queue delivers in the
+// meantime is judged against this one, and so the record must hold to what
+// is applied (tdns-mp #390, path 1). A REPLACE whose origin cannot be saved
+// is refused (err), with the previous origin kept: applied without it, an
+// older REPLACE queued across a restart would undo it. So is every REPLACE
+// while the rows on disk are not loaded (a load failed). And a REPLACE that
+// is then not applied gives its origin back (unclaim): else an older one,
+// a delete say, would be skipped as stale, and answered, for one that
+// never was applied.
+func staleCombinerReplace(req *CombinerSyncRequest, zonename string, rrtype uint16) (stale bool, newest replaceOrigin, unclaim func(), err error) {
+	unclaim = func() {}
 	if req.Timestamp.IsZero() {
-		return false, replaceOrigin{}
+		return false, replaceOrigin{}, unclaim, nil
 	}
 	key := zonename + "|" + req.SenderID + "|" + dns.TypeToString[rrtype]
+	origin := originOf(req.Timestamp, req.DistributionID, req.Instr)
 	combinerReplaceOrigins.mu.Lock()
 	defer combinerReplaceOrigins.mu.Unlock()
-	if cur, ok := combinerReplaceOrigins.m[key]; ok {
-		if cur.Time.After(req.Timestamp) || (cur.Time.Equal(req.Timestamp) && cur.DistID > req.DistributionID) {
-			return true, cur
+	if err := readyCombinerGuardLocked(); err != nil {
+		return false, replaceOrigin{}, unclaim, err
+	}
+	prev, hadPrev := combinerReplaceOrigins.m[key]
+	if hadPrev && origin.olderThan(prev) {
+		return true, prev, unclaim, nil
+	}
+	// under the lock, so that the rows are written in the order the map is
+	if hdb := combinerReplaceOrigins.hdb; hdb != nil {
+		if err := SaveCombinerReplaceOrigin(hdb, zonename, req.SenderID, rrtype, origin); err != nil {
+			return false, replaceOrigin{}, unclaim, fmt.Errorf("its order guard could not be saved: %w", err)
+		}
+		delete(combinerReplaceOrigins.dirty, key)
+	}
+	combinerReplaceOrigins.m[key] = origin
+	return false, replaceOrigin{}, func() {
+		unclaimCombinerReplace(key, zonename, req.SenderID, rrtype, origin, prev, hadPrev)
+	}, nil
+}
+
+// unclaimCombinerReplace puts back the origin that a REPLACE which was not
+// applied took the place of (staleCombinerReplace), in memory and on disk,
+// or none when there was none; unless a newer one has taken it since.
+func unclaimCombinerReplace(key, zone, sender string, rrtype uint16, origin, prev replaceOrigin, hadPrev bool) {
+	combinerReplaceOrigins.mu.Lock()
+	defer combinerReplaceOrigins.mu.Unlock()
+	if cur, ok := combinerReplaceOrigins.m[key]; !ok || !sameOrigin(cur, origin) {
+		return
+	}
+	hdb := combinerReplaceOrigins.hdb
+	var err error
+	if hadPrev {
+		combinerReplaceOrigins.m[key] = prev
+		if hdb != nil {
+			err = SaveCombinerReplaceOrigin(hdb, zone, sender, rrtype, prev)
+		}
+	} else {
+		delete(combinerReplaceOrigins.m, key)
+		if hdb != nil {
+			err = DeleteCombinerReplaceOrigin(hdb, zone, sender, rrtype)
 		}
 	}
-	combinerReplaceOrigins.m[key] = replaceOrigin{Time: req.Timestamp, DistID: req.DistributionID}
-	return false, replaceOrigin{}
+	if err != nil {
+		// memory holds what is applied; the row is written again at the
+		// next REPLACE judged (readyCombinerGuardLocked)
+		combinerReplaceOrigins.dirty[key] = originRow{zone: zone, sender: sender, rrtype: rrtype}
+		lgCombiner.Error("failed to put back the replace origin of a REPLACE not applied: written again at the next REPLACE; a restart before then refuses an older REPLACE",
+			"zone", zone, "sender", sender, "rrtype", dns.TypeToString[rrtype], "err", err)
+	}
+}
+
+// readyCombinerGuardLocked readies the guard to judge a REPLACE, under its
+// lock: it loads the rows on disk if their load failed, refusing (err)
+// while it fails, and writes again each row a put back left behind
+// (dirty), as far as it can. A row that still cannot be written stays
+// dirty; the REPLACE judged is not refused for it, as it saves its own row.
+func readyCombinerGuardLocked() error {
+	g := &combinerReplaceOrigins
+	if g.hdb == nil {
+		return nil
+	}
+	if !g.loaded {
+		origins, err := LoadCombinerReplaceOrigins(g.hdb)
+		if err != nil {
+			return fmt.Errorf("its order guard's rows could not be loaded: %w", err)
+		}
+		mergeCombinerOriginsLocked(origins)
+		g.loaded = true
+		lgCombiner.Info("loaded replace origins, after a load that failed", "count", len(origins))
+	}
+	rewriteDirtyOriginsLocked()
+	return nil
+}
+
+// rewriteDirtyOriginsLocked writes again each row a failed put back left
+// behind (dirty) from what memory holds, a save or a delete, under the
+// guard's lock; a row that still cannot be written stays dirty.
+func rewriteDirtyOriginsLocked() {
+	g := &combinerReplaceOrigins
+	for key, row := range g.dirty {
+		var err error
+		if o, ok := g.m[key]; ok {
+			err = SaveCombinerReplaceOrigin(g.hdb, row.zone, row.sender, row.rrtype, o)
+		} else {
+			err = DeleteCombinerReplaceOrigin(g.hdb, row.zone, row.sender, row.rrtype)
+		}
+		if err != nil {
+			lgCombiner.Warn("a replace origin left behind by a failed put back still cannot be written",
+				"zone", row.zone, "sender", row.sender, "rrtype", dns.TypeToString[row.rrtype], "err", err)
+			continue
+		}
+		delete(g.dirty, key)
+	}
+}
+
+// mergeCombinerOriginsLocked takes origins loaded from disk into the guard,
+// under its lock, keeping an origin already held when it is the newer. A
+// dirty key keeps what memory holds, origin or none: its row may hold the
+// origin of a REPLACE not applied, newer than the one applied.
+func mergeCombinerOriginsLocked(origins map[string]replaceOrigin) {
+	for k, o := range origins {
+		if _, dirty := combinerReplaceOrigins.dirty[k]; dirty {
+			continue
+		}
+		if cur, ok := combinerReplaceOrigins.m[k]; !ok || cur.olderThan(o) {
+			combinerReplaceOrigins.m[k] = o
+		}
+	}
+}
+
+// sameOrigin: a and b are the same REPLACE's origin.
+func sameOrigin(a, b replaceOrigin) bool {
+	return a.Time.Equal(b.Time) && a.DistID == b.DistID && a.Under == b.Under && a.HasUnder == b.HasUnder
+}
+
+// loadCombinerReplaceOrigins attaches hdb to combinerReplaceOrigins and
+// loads its rows, keeping an origin already held when it is the newer (a
+// reload), and what memory holds for a key whose put back failed (dirty),
+// whose row it then writes again. Called at startup before the message
+// router starts, and on reload (RegisterCombinerOnFirstLoad). A load that
+// fails leaves the guard
+// not loaded: every REPLACE is refused until a load succeeds, tried again
+// at each (readyCombinerGuardLocked).
+func loadCombinerReplaceOrigins(hdb *HsyncDB) {
+	origins, err := LoadCombinerReplaceOrigins(hdb)
+	combinerReplaceOrigins.mu.Lock()
+	defer combinerReplaceOrigins.mu.Unlock()
+	combinerReplaceOrigins.hdb = hdb
+	combinerReplaceOrigins.loaded = err == nil
+	if err != nil {
+		lgCombiner.Error("failed to load replace origins: every REPLACE is refused until a load succeeds, tried again at each", "err", err)
+		return
+	}
+	mergeCombinerOriginsLocked(origins)
+	rewriteDirtyOriginsLocked()
+	if len(origins) > 0 {
+		lgCombiner.Info("loaded replace origins", "count", len(origins))
+	}
 }
 
 // checkContentPolicy applies content-based policy checks to a parsed RR.

@@ -55,3 +55,24 @@ func TestMplistPrintsTheSerialAndTheOwnerError(t *testing.T) {
 		t.Errorf("the owner error is not listed:\n%s", out)
 	}
 }
+
+// mplist shows the members with no role by label, and the agent's own
+// standing in the This column (plan S15); a daemon that does not fill it
+// shows "-".
+func TestMplistShowsEachMembersStanding(t *testing.T) {
+	out := printed(t, func() {
+		ListMPZones(tdnsmp.MPListResponse{MPZones: map[string]tdnsmp.MPZoneInfo{
+			"a.example.": {Serial: 7, Digest: "d7", Servers: []string{"alpha"}, NoRole: []string{"delta"}, This: "member, no role", NSmgmt: "owner", ParentSync: "owner"},
+			"b.example.": {Serial: 7, Digest: "d7", Servers: []string{"alpha"}, NSmgmt: "owner", ParentSync: "owner"},
+		}})
+	})
+	header := strings.Fields(strings.Split(out, "\n")[0])
+	if len(header) < 8 || header[6] != "NoRole" || header[7] != "This" {
+		t.Fatalf("header %v", header)
+	}
+	for _, want := range []string{"a.example.  7       d7      alpha    (none)   (none)    delta   member, no role", "b.example.  7       d7      alpha    (none)   (none)    (none)  -"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("no row %q in\n%s", want, out)
+		}
+	}
+}
