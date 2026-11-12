@@ -369,26 +369,35 @@ func Next(k KeyView, ev KeyEvent, z ZoneView) (string, *Transition) {
 
 // rolloverFlags are what the machine knows of a zone beside its key rows: a
 // rollover the operator asked for (RolloverRequested), an algorithm rollover
-// in flight (AlgRollInFlight), and a DNSKEY distribution of this provider's
-// that still waits for the other agents' confirmations.
+// in flight (AlgRollInFlight), a DNSKEY distribution of this provider's that
+// still waits for the other agents' confirmations, and the keys in published
+// that only add a standby key (standbyAdditions), which the rows alone cannot
+// tell from a rollover's new key.
 type rolloverFlags struct {
 	Requested, AlgRoll, PropagationPending bool
+	Additions                              map[uint16]bool
 }
 
 // rolloverUnderWay is the one predicate for "this provider has a key
 // rollover under way in the zone" (plan decision 62), read by the stamp
 // (S5a), and by the freeze, the thaw and the signer later (S6, S7, S11): an
-// own key in mpdist, published, retired or mpremove; an active KSK whose DS
-// withdrawal has started (an algorithm rollover, T10a, until T10b retires
-// it); or one of the flags. A key with no ds column (a sender from before
-// it) says nothing of its DS. Foreign keys are other providers'.
+// own key in mpdist, published, retired or mpremove, but for a key in
+// published that only adds a standby key: "addition of a standby key is not
+// the start of a key rollover" (the project owner, 2026-11-02); an active KSK
+// whose DS withdrawal has started (an algorithm rollover, T10a, until T10b
+// retires it); or one of the flags. A key with no ds column (a sender from
+// before it) says nothing of its DS. Foreign keys are other providers'.
 func rolloverUnderWay(keys []tdns.KeyInventoryItem, f rolloverFlags) bool {
 	if f.Requested || f.AlgRoll || f.PropagationPending {
 		return true
 	}
 	for _, k := range keys {
 		switch k.State {
-		case KeyStateMpdist, KeyStatePublished, KeyStateRetired, KeyStateMpremove:
+		case KeyStatePublished:
+			if !f.Additions[k.KeyTag] {
+				return true
+			}
+		case KeyStateMpdist, KeyStateRetired, KeyStateMpremove:
 			return true
 		case KeyStateActive:
 			if k.Flags&dns.SEP != 0 && k.DS != nil && !*k.DS {

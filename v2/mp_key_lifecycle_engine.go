@@ -311,6 +311,16 @@ func (w *signerWire) KeysChanged(zone string) {
 	}
 }
 
+// MarksChanged: a fresh inventory to every agent. No key row changed, so
+// tdns's DS engine has nothing to follow.
+func (w *signerWire) MarksChanged(zone string) {
+	push := w.push
+	if push == nil {
+		push = pushKeystateInventory
+	}
+	go push(w.conf, dns.Fqdn(zone), nil)
+}
+
 // JoiningSince: the hand-over held says its keys-step, and when it was taken.
 func (w *signerWire) JoiningSince(zone string) (time.Time, bool) {
 	held, ok := actingHeld.Load().get(dns.Fqdn(zone))

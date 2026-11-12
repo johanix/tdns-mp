@@ -47,6 +47,7 @@ type fakeWire struct {
 	reports       []string
 	ttl           time.Duration
 	changes       int    // KeysChanged calls
+	marks         int    // MarksChanged calls
 	stripErr      error  // what Strip returns
 	onResign      func() // called on Resign: the driver asks for a re-sign right after it writes a key's row to active
 }
@@ -132,6 +133,7 @@ func (w *fakeWire) Resign(zone string) {
 	}
 }
 func (w *fakeWire) KeysChanged(zone string)        { w.mu.Lock(); defer w.mu.Unlock(); w.changes++ }
+func (w *fakeWire) MarksChanged(zone string)       { w.mu.Lock(); defer w.mu.Unlock(); w.marks++ }
 func (w *fakeWire) SignsAtNaming(zone string) bool { return w.signsAtNaming }
 func (w *fakeWire) JoiningSince(zone string) (time.Time, bool) {
 	return w.joiningSince, !w.joiningSince.IsZero()

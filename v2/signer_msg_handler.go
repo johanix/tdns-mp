@@ -255,8 +255,10 @@ func (conf *Config) inventoryMarksOf(zone string, items []KeyInventoryItem) inve
 	var f rolloverFlags
 	if e := conf.InternalMp.KeyLifecycle; e != nil {
 		if l := e.driver(zone); l != nil {
+			// by the hold this inventory confirms: a hand-over keeps it between
+			// the machine's ticks (standbyAdditions)
 			var err error
-			if f, err = l.RolloverFlags(); err != nil {
+			if f, err = l.RolloverFlags(m.hold); err != nil {
 				lgSigner.Error("key lifecycle: whether a rollover is under way could not be read; the inventory says one is", "zone", zone, "err", err)
 				f.PropagationPending = true
 			}

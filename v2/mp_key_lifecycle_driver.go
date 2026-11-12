@@ -89,6 +89,10 @@ type Wire interface {
 	// of pub, sign, ds): the signer pushes a fresh inventory to its
 	// agents on every change (design §4.1, arrow 2).
 	KeysChanged(zone string)
+	// MarksChanged tells the surroundings that what RolloverFlags reads changed
+	// with no key row written, so KeysChanged will not tell them: the agents'
+	// last inventory says a rollover nobody has until a fresh one comes.
+	MarksChanged(zone string)
 }
 
 // distribution is one key's distribution in flight: who must confirm, and
@@ -855,6 +859,7 @@ func (l *ZoneKeyLifecycle) confirmLocked(keyid uint16, provider, status, reason 
 	if removal != nil && *removal != d.Removal {
 		return "", "", fmt.Errorf("key %d of %s: %w", keyid, l.Zone, ErrStaleConfirmation)
 	}
+	waited := l.propagationPending()
 	var ev KeyEvent
 	switch status {
 	case "applied":
@@ -892,6 +897,11 @@ func (l *ZoneKeyLifecycle) confirmLocked(keyid uint16, provider, status, reason 
 		delete(l.dist, keyid)
 		l.saveDist(keyid)
 	}
+	// the zone's last wait for an answer ended on a key that stays as it was,
+	// a joiner's record: no row written, so nothing else says it
+	if waited && from == to && !l.propagationPending() {
+		l.Wire.MarksChanged(l.Zone)
+	}
 	return from, to, err
 }
 
@@ -916,6 +926,7 @@ func (l *ZoneKeyLifecycle) Expects(signers []string) bool {
 func (l *ZoneKeyLifecycle) SignersChanged() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	waited := l.propagationPending()
 	now := map[string]bool{}
 	for _, p := range l.Wire.OtherSigners(l.Zone) {
 		now[p] = true
@@ -1001,6 +1012,10 @@ func (l *ZoneKeyLifecycle) SignersChanged() error {
 	}
 	// known only now: Expects says the distributions follow the set
 	l.known = now
+	// a signer that left took the last wait for an answer with it
+	if waited && !l.propagationPending() {
+		l.Wire.MarksChanged(l.Zone)
+	}
 	return nil
 }
 
@@ -1043,6 +1058,9 @@ func (l *ZoneKeyLifecycle) CancelRollover(role string) bool {
 	defer l.mu.Unlock()
 	had := l.rolls[role]
 	delete(l.rolls, role)
+	if had {
+		l.Wire.MarksChanged(l.Zone)
+	}
 	return had
 }
 
@@ -1262,7 +1280,6 @@ func (l *ZoneKeyLifecycle) Tick() error {
 		// T9's wait, O7)
 		alg := l.policyAlgorithm(role)
 		pipeline, policyKeys, active, activeOfAlg, algPending, standbys := 0, 0, 0, 0, false, []tdns.DnssecKeyWithTimestamps{}
-		var oldest *tdns.DnssecKeyWithTimestamps
 		for _, keyid := range keytagsOf(all) {
 			k := all[keyid]
 			if roleOf(k.Flags) != role {
@@ -1290,21 +1307,10 @@ func (l *ZoneKeyLifecycle) Tick() error {
 				}
 				policyKeys++
 				activeOfAlg++
-				kk := k
-				// the oldest of the policy's algorithm by active_at; a key
-				// with no stamp counts as the oldest, so a missing stamp
-				// never hides a due rollover
-				if oldest == nil || oldest.ActiveAt != nil && (k.ActiveAt == nil || k.ActiveAt.Before(*oldest.ActiveAt)) {
-					oldest = &kk
-				}
 			}
 		}
-		want := l.Policy.StandbyZSK
-		lifetime := l.Policy.ZSKLifetime
-		if role == "KSK" {
-			want, lifetime = l.Policy.StandbyKSK, l.Policy.KSKLifetime
-		}
-		due := lifetime > 0 && oldest != nil && (oldest.ActiveAt == nil || !l.Clock.Now().Before(oldest.ActiveAt.Add(lifetime)))
+		want := l.standbyCount(role)
+		due := l.lifetimeDue(role, all)
 		// under a hold nothing new starts (plan S6): no lifetime rollover,
 		// no standby key, no algorithm rollover not yet begun. A standby of
 		// a role the policy keeps none of was minted for a rollover that
@@ -1514,21 +1520,97 @@ func (l *ZoneKeyLifecycle) RolloverRequests() []string {
 
 // RolloverFlags are what the driver knows of the zone beside its key rows,
 // for rolloverUnderWay (plan S11): a rollover asked for, an algorithm
-// rollover under way, and a distribution that waits for confirmations.
-func (l *ZoneKeyLifecycle) RolloverFlags() (rolloverFlags, error) {
+// rollover under way, and a distribution that waits for confirmations. The
+// keys are read by the hold the caller confirms: the machine's own is its
+// tick's to set (tickOwned), and a reader doesn't change it.
+func (l *ZoneKeyLifecycle) RolloverFlags(hold bool) (rolloverFlags, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	all, err := l.rows()
 	if err != nil {
 		return rolloverFlags{}, err
 	}
-	f := rolloverFlags{Requested: len(l.rolls) > 0, AlgRoll: len(l.algRolloversOf(all)) > 0}
+	return rolloverFlags{Requested: len(l.rolls) > 0, AlgRoll: len(l.algRolloversOf(all)) > 0, PropagationPending: l.propagationPending(), Additions: l.standbyAdditions(all, hold)}, nil
+}
+
+// propagationPending: a distribution of the zone's waits for confirmations.
+func (l *ZoneKeyLifecycle) propagationPending() bool {
 	for _, d := range l.dist {
 		if confirmationsOutstandingFor(d) {
-			f.PropagationPending = true
+			return true
 		}
 	}
-	return f, nil
+	return false
+}
+
+// standbyAdditions are the keys in published that only add a standby key of
+// their role, which is no rollover (the project owner, 2026-11-02): the policy
+// keeps standby keys of the role, a key of the role signs, and no rollover of
+// it is due that would promote the key once standby. With no key of the role
+// signing, T9 promotes the key once standby, under a hold too (Tick): it is
+// the role's first. Under a hold a due one is not promoted (Tick), so the key
+// only becomes a standby key. In a role the policy keeps no standby of, a key
+// on its way in is a rollover's. A rollover asked for and an algorithm
+// rollover are flags of their own (RolloverFlags). A key that has gone on to
+// standby stays named: a reader's rows can be older than T8 (the inventory
+// reads them first), and rolloverUnderWay looks up only a key in published.
+func (l *ZoneKeyLifecycle) standbyAdditions(all map[uint16]tdns.DnssecKeyWithTimestamps, hold bool) map[uint16]bool {
+	out := map[uint16]bool{}
+	for _, role := range []string{"KSK", "ZSK"} {
+		if l.standbyCount(role) == 0 || !hasActiveKey(role, all) || (!hold && l.lifetimeDue(role, all)) {
+			continue
+		}
+		alg := l.policyAlgorithm(role)
+		for keyid, k := range all {
+			if roleOf(k.Flags) == role && (k.State == KeyStatePublished || k.State == KeyStateStandby) && k.Algorithm == alg {
+				out[keyid] = true
+			}
+		}
+	}
+	return out
+}
+
+// hasActiveKey: a key of the role signs, of any algorithm, as Tick counts them.
+func hasActiveKey(role string, all map[uint16]tdns.DnssecKeyWithTimestamps) bool {
+	for _, k := range all {
+		if roleOf(k.Flags) == role && k.State == KeyStateActive {
+			return true
+		}
+	}
+	return false
+}
+
+// standbyCount is the policy's standby count for the role.
+func (l *ZoneKeyLifecycle) standbyCount(role string) int {
+	if role == "KSK" {
+		return l.Policy.StandbyKSK
+	}
+	return l.Policy.StandbyZSK
+}
+
+// lifetimeDue: the role's oldest active key of the policy's algorithm, by
+// active_at, is past the role's lifetime. A key with no stamp counts as the
+// oldest, so a missing stamp never hides a due rollover. A key of another
+// algorithm that still signs is waiting out T10b or T19, and its age is not
+// the lifetime's business.
+func (l *ZoneKeyLifecycle) lifetimeDue(role string, all map[uint16]tdns.DnssecKeyWithTimestamps) bool {
+	lifetime := l.Policy.ZSKLifetime
+	if role == "KSK" {
+		lifetime = l.Policy.KSKLifetime
+	}
+	alg := l.policyAlgorithm(role)
+	var oldest *tdns.DnssecKeyWithTimestamps
+	for _, keyid := range keytagsOf(all) {
+		k := all[keyid]
+		if roleOf(k.Flags) != role || k.State != KeyStateActive || k.Algorithm != alg {
+			continue
+		}
+		if oldest == nil || oldest.ActiveAt != nil && (k.ActiveAt == nil || k.ActiveAt.Before(*oldest.ActiveAt)) {
+			kk := k
+			oldest = &kk
+		}
+	}
+	return lifetime > 0 && oldest != nil && (oldest.ActiveAt == nil || !l.Clock.Now().Before(oldest.ActiveAt.Add(lifetime)))
 }
 
 // WaitsOn is, for each key in mpdist or mpremove, the other signers whose
@@ -1678,6 +1760,7 @@ func (l *ZoneKeyLifecycle) CancelAlgorithmRollover(role string) (from, to uint8,
 		return from, to, err
 	}
 	l.logf("key lifecycle: the algorithm rollover cancelled; the keys of the new algorithm are withdrawn", "zone", l.Zone, "role", role, "from", dns.AlgorithmToString[from], "to", dns.AlgorithmToString[to])
+	l.Wire.MarksChanged(l.Zone)
 	return from, to, nil
 }
 
