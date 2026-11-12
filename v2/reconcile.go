@@ -434,8 +434,10 @@ type reconcileBook struct {
 }
 
 type zoneReconcile struct {
-	owing map[string]time.Time // by member, folded: when the first step it has not confirmed was taken
-	said  map[string]bool
+	owing         map[string]time.Time // by member, folded: when the first step it has not confirmed was taken
+	said          map[string]bool
+	noLeaderSince time.Time // since when the zone has had no leader here; zero while it has one
+	noLeaderSaid  bool      // this stretch's warning is logged
 }
 
 func (b *reconcileBook) zone(zone string) *zoneReconcile {
@@ -461,6 +463,27 @@ func (b *reconcileBook) sayOnce(zone, key string) bool {
 	}
 	zr.said[key] = true
 	return true
+}
+
+// noLeader keeps since when the zone has reconciled here with no leader: none
+// says it has none now. It returns the start of the stretch, and whether its
+// warning is due: once a stretch, after after. A leader ends the stretch.
+func (b *reconcileBook) noLeader(zone string, none bool, now time.Time, after time.Duration) (time.Time, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	zr := b.zone(zone)
+	if !none {
+		zr.noLeaderSince, zr.noLeaderSaid = time.Time{}, false
+		return time.Time{}, false
+	}
+	if zr.noLeaderSince.IsZero() {
+		zr.noLeaderSince = now
+	}
+	if zr.noLeaderSaid || now.Sub(zr.noLeaderSince) < after {
+		return zr.noLeaderSince, false
+	}
+	zr.noLeaderSaid = true
+	return zr.noLeaderSince, true
 }
 
 // forget drops what the book keeps of the zone: its transition is done.
@@ -493,6 +516,10 @@ func (conf *Config) reconcileTurn(zone string, now time.Time) {
 		return
 	}
 	key := canonicalName(in.name)
+	noLeader := conf.noLeaderLine(in)
+	if since, due := conf.InternalMp.reconciles.noLeader(key, noLeader != "", now, leavingTimeoutFor(conf.MpConfig())); due {
+		lg.Warn("a reconciling zone has had no leader for the leaving time-out", "zone", in.name, "since", since.Format(time.TimeOnly), "what", noLeader)
+	}
 	if in.newer != nil && conf.InternalMp.reconciles.sayOnce(key, fmt.Sprintf("newer %d", in.newer.Serial)) {
 		lg.Info("a newer serial of the zone's instructions waits until the transition is done", "zone", in.name, "serial", in.newer.Serial)
 	}
@@ -554,6 +581,28 @@ func (conf *Config) leadsReconciliation(in reconcileInputs) bool {
 	}
 	lem := conf.InternalMp.LeaderElectionManager
 	return lem != nil && lem.IsLeader(ZoneName(in.name))
+}
+
+// noLeaderLine says that the zone has no leader here, and what keeps its
+// group from electing one: the group's election waits for mutual OPERATIONAL,
+// so the cells that are not hold the zone (design 3.8, amended 2026-11-02).
+// "" while it has a leader, or needs none.
+func (conf *Config) noLeaderLine(in reconcileInputs) string {
+	lem := conf.InternalMp.LeaderElectionManager
+	if _, voters := participantsOf(in.active.Reading); lem == nil || len(voters) < 2 {
+		return ""
+	}
+	if _, ok := lem.ZoneLeader(ZoneName(in.name)); ok {
+		return ""
+	}
+	if ar := conf.InternalMp.AgentRegistry; ar != nil && ar.ProviderGroupManager != nil && ar.GossipStateTable != nil {
+		if pg := ar.ProviderGroupManager.GetGroupForZone(ZoneName(in.name)); pg != nil {
+			if cells := ar.GossipStateTable.notOperational(pg.GroupHash, pg.VotingMembers); len(cells) > 0 {
+				return "no leader: " + strings.Join(cells, ", ")
+			}
+		}
+	}
+	return "no leader"
 }
 
 // reconcileView is what the leader's turn sees of the zone's step.
@@ -949,6 +998,8 @@ func (conf *Config) reconcileLine(zone string, now time.Time) string {
 		case v.rollover != "":
 			line += ", the next step waits for an emergency rollover at " + v.rollover
 		}
+	} else if noLeader := conf.noLeaderLine(in); noLeader != "" {
+		line += ", " + noLeader
 	} else if in.hasStep && in.step.Number == 0 {
 		line += ", waiting for the leader's first step"
 	}
