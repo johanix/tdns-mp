@@ -129,6 +129,7 @@ func (e *AuditorEngine) recordSyncMsg(msg *AgentMsgPostPlus) {
 			zs.NoteProviderRole(senderID, label, isSigner)
 			detectMsgObservations(zs, senderID, msg, rrtypes)
 		}
+		e.followDistribution(zs, msg, senderID)
 	}
 
 	// The row's other columns already say the type, the sender and the
@@ -150,6 +151,49 @@ func (e *AuditorEngine) recordSyncMsg(msg *AgentMsgPostPlus) {
 	// The event logged, the auditor's task is done: its final word to the
 	// originator (#101).
 	auditorConfirms(e.msgQs, msg, senderID, zone)
+}
+
+// followDistribution starts following a distribution that has reached the
+// auditor (tdns-mp #152): from now on the zone's state says which members
+// have confirmed it and which it still waits for. The members awaited are
+// the zone's voting members as the auditor has them now, the originator
+// apart; an auditor is not awaited, its confirmation is no member's answer.
+//
+// Not followed: a message without a distribution ID, a zone whose members
+// are not known here, and a distribution sent before this auditor started.
+// The other members may have confirmed that one already, to an auditor
+// process that is gone, and it would read as waiting for them for ever.
+func (e *AuditorEngine) followDistribution(zs *AuditZoneState, msg *AgentMsgPostPlus, originator string) {
+	if msg.DistributionID == "" {
+		return
+	}
+	// The sender's time may come in whole seconds: a second's allowance. A
+	// message that does not say when it was sent (epoch zero) is followed.
+	if started := e.stateManager.Started; msg.Time.Unix() > 0 && msg.Time.Add(time.Second).Before(started) {
+		lgAuditor.Debug("distribution sent before this auditor started, not followed",
+			"zone", msg.Zone, "originator", originator, "distrib", msg.DistributionID, "sent", msg.Time)
+		return
+	}
+	awaited := awaitedConfirmers(msg.Zone, originator, e.stateManager.LocalIdentity)
+	if len(awaited) == 0 {
+		return
+	}
+	zs.NoteDistribution(msg.DistributionID, originator, msg.Summary(), awaited)
+}
+
+// awaitedConfirmers is the members whose confirmation a distribution in zone
+// from originator waits for: the zone's voting members, without the
+// originator and without this auditor.
+func awaitedConfirmers(zone ZoneName, originator, local string) []string {
+	var out []string
+	for _, id := range VotingMembersForZone(ZoneName(dns.Fqdn(string(zone)))) {
+		member := dns.Fqdn(string(id))
+		if member == dns.Fqdn(originator) || (local != "" && member == dns.Fqdn(local)) {
+			continue
+		}
+		out = append(out, member)
+	}
+	return out
 }
 
 func (e *AuditorEngine) runAux(ctx context.Context, msgQs *MsgQs) {
