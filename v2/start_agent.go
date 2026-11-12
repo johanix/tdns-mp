@@ -406,5 +406,15 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 		conf.requestDelegationSync(ctx, string(zone), "the zone joined a provider group this agent leads")
 		return nil
 	})
+	// HSYNC3 added to a zone this agent leads, which says pubkey, adds the
+	// at-ns location: the KEY goes there too, with no new lead. While the
+	// zone is frozen the take-up when the transition is done sends it.
+	lem.SetOnKeyLocations(func(zone ZoneName) error {
+		err := conf.sendKeyToNewLocations(ctx, zone)
+		if errors.Is(err, errHeldDuringTransition) {
+			return nil
+		}
+		return err
+	})
 	return lem
 }
