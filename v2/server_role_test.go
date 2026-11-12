@@ -108,8 +108,7 @@ func serving(t *testing.T, rrset *core.RRset, asked *[]string) {
 	t.Cleanup(func() { servingLookup = saved })
 }
 
-// nodata has every nameserver answer with no RRset and no error, as
-// AuthDNSQuery does for NODATA.
+// nodata has every nameserver answer with no RRset and no error.
 func nodata(t *testing.T) {
 	t.Helper()
 	saved := servingLookup

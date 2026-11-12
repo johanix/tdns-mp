@@ -70,6 +70,7 @@ func TestTransitionTableMatchesTheDocument(t *testing.T) {
 		ev           KeyEvent
 	}{
 		{"T1", "", KeyStateCreated, EvMint},
+		{"T2a", KeyStateCreated, KeyStateActive, EvDistributed},
 		{"T2", KeyStateCreated, KeyStateMpdist, EvDistributed},
 		{"T3", KeyStateMpdist, KeyStatePublished, EvApplied},
 		{"T3'", KeyStateMpdist, KeyStatePublished, EvDistributed},
@@ -129,6 +130,10 @@ func TestTransitionTableKeepsTheProperties(t *testing.T) {
 		}
 		fromF, _ := KeyStateColumns(r.From, true, false)
 		toF, _ := KeyStateColumns(r.To, true, false)
+		// T2a is the stated exception to P1 and P2: nothing validates by that key yet
+		if r.ID == "T2a" {
+			continue
+		}
 		// P1: sign is gained only from standby
 		if toF.Sign && !fromF.Sign && r.From != KeyStateStandby {
 			t.Errorf("%s: sign gained from %s, only standby may (P1)", r.ID, r.From)

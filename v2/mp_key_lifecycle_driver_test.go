@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"testing"
@@ -30,23 +31,25 @@ func (c *fakeClock) Advance(d time.Duration) {
 }
 
 type fakeWire struct {
-	mu        sync.Mutex
-	signers   []string
-	dist      []uint16        // Distribute calls, in order, and the resends of a key
-	removals  []uint16        // DistributeRemoval calls, and the resends of a removal
-	resends   []uint16        // Resend calls, in order (#256)
-	resentRm  []uint16        // those of resends that were removals
-	parentDS  map[uint16]bool // what the parent serves; absent = not served
-	parentOff bool            // the parent cannot be asked
-	parentTTL time.Duration   // the TTL of the parent's DS RRset (zero: T9's wait ends the tick the DS is seen)
-	stripped  []uint16
-	resigns   int
-	reports   []string
-	ttl       time.Duration
-	changes   int    // KeysChanged calls
-	marks     int    // MarksChanged calls
-	stripErr  error  // what Strip returns
-	onResign  func() // called on Resign: the driver asks for a re-sign right after it writes a key's row to active
+	mu            sync.Mutex
+	signers       []string
+	dist          []uint16        // Distribute calls, in order, and the resends of a key
+	removals      []uint16        // DistributeRemoval calls, and the resends of a removal
+	resends       []uint16        // Resend calls, in order (#256)
+	resentRm      []uint16        // those of resends that were removals
+	parentDS      map[uint16]bool // what the parent serves; absent = not served
+	parentOff     bool            // the parent cannot be asked
+	joiningSince  time.Time       // JoiningSince: its keys-step began then
+	signsAtNaming bool            // SignsAtNaming: named a signer, it serves nothing
+	parentTTL     time.Duration   // the TTL of the parent's DS RRset (zero: T9's wait ends the tick the DS is seen)
+	stripped      []uint16
+	resigns       int
+	reports       []string
+	ttl           time.Duration
+	changes       int    // KeysChanged calls
+	marks         int    // MarksChanged calls
+	stripErr      error  // what Strip returns
+	onResign      func() // called on Resign: the driver asks for a re-sign right after it writes a key's row to active
 }
 
 func newFakeWire(signers ...string) *fakeWire {
@@ -129,9 +132,13 @@ func (w *fakeWire) Resign(zone string) {
 		hook()
 	}
 }
-func (w *fakeWire) KeysChanged(zone string)                   { w.mu.Lock(); defer w.mu.Unlock(); w.changes++ }
-func (w *fakeWire) MarksChanged(zone string)                  { w.mu.Lock(); defer w.mu.Unlock(); w.marks++ }
-func (w *fakeWire) ServedDnskeyTTL(zone string) time.Duration { return w.ttl }
+func (w *fakeWire) KeysChanged(zone string)        { w.mu.Lock(); defer w.mu.Unlock(); w.changes++ }
+func (w *fakeWire) MarksChanged(zone string)       { w.mu.Lock(); defer w.mu.Unlock(); w.marks++ }
+func (w *fakeWire) SignsAtNaming(zone string) bool { return w.signsAtNaming }
+func (w *fakeWire) JoiningSince(zone string) (time.Time, bool) {
+	return w.joiningSince, !w.joiningSince.IsZero()
+}
+func (w *fakeWire) ServedDnskeyTTL(zone string) (time.Duration, bool) { return w.ttl, true }
 func (w *fakeWire) Report(zone string, keyid uint16, what string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -761,5 +768,212 @@ func TestDriverExpectsTheSignersOnlyOnceTheyAreFollowed(t *testing.T) {
 	}
 	if r.l.Expects([]string{"p2", "p3"}) {
 		t.Error("a SignersChanged that failed says the distributions follow the set")
+	}
+}
+
+// A provider no NS record names has its first key of each role straight in active
+// (T2a): nothing validates by it, so there is nothing to propagate first. That holds
+// where the machine makes them, as for a zone it runs already, with the parent serving
+// another signer's DS. tdns's check finds nothing, a resend brings the key to the other
+// signers until they have applied it, and a later key of a role takes the table's way.
+// A provider that serves signs nothing before T9.
+func TestANewSignersFirstKeysGoStraightToActive(t *testing.T) {
+	resending := driverPolicy
+	resending.ResendAfter = time.Minute
+	d := newDriverRig(t, "named.adding.example.", resending)
+	d.wire.signsAtNaming = true
+	d.wire.signers = []string{"p2"}
+	d.wire.parentDS[0] = true // the parent serves a DS of another signer's
+	d.l.SetHold(true)
+	if err := d.l.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	ksks, zsks := d.keysIn(KeyStateActive, "KSK"), d.keysIn(KeyStateActive, "ZSK")
+	if len(ksks) != 1 || len(zsks) != 1 {
+		t.Fatalf("named, its active KSKs are %v and ZSKs %v; want one of each", ksks, zsks)
+	}
+	if v := tdns.CheckKeyRowInvariants(d.kdb, d.l.Zone); len(v) != 0 {
+		t.Errorf("named, tdns's check finds %v", v)
+	}
+	cols, err := d.l.columnsOf(ksks[0])
+	if err != nil || !cols.Sign || !cols.DS.Bool {
+		t.Errorf("its KSK's columns %+v (%v), want it signing with ds=1", cols, err)
+	}
+	// its record: resent until p2 has applied it, and gone after
+	d.clock.Advance(resending.ResendAfter + time.Second)
+	if err := d.l.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	d.wire.mu.Lock()
+	resent := slices.Clone(d.wire.resends)
+	d.wire.mu.Unlock()
+	if !slices.Contains(resent, ksks[0]) || !slices.Contains(resent, zsks[0]) {
+		t.Errorf("unconfirmed for its resend time, resent %v: want both keys", resent)
+	}
+	for _, id := range []uint16{ksks[0], zsks[0]} {
+		if _, _, err := d.l.Confirm(id, "p2", "applied", ""); err != nil {
+			t.Fatal(err)
+		}
+		if d.l.dist[id] != nil {
+			t.Errorf("key %d applied, and its record stays", id)
+		}
+		if s := d.state(id); s != KeyStateActive {
+			t.Errorf("key %d applied, and it is %s", id, s)
+		}
+	}
+
+	// with nobody else to confirm, no record
+	one := newDriverRig(t, "alone.adding.example.", driverPolicy)
+	one.wire.signsAtNaming = true
+	one.wire.parentDS[0] = true
+	if err := one.l.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := one.keysIn(KeyStateActive, "KSK"); len(got) != 1 || one.l.dist[got[0]] != nil {
+		t.Errorf("alone, its active KSKs are %v, with records %v", got, one.l.dist)
+	}
+
+	// a later key of a role takes the table's way
+	l := driverPolicy
+	l.StandbyZSK = 2
+	two := newDriverRig(t, "later.adding.example.", l)
+	two.wire.signsAtNaming = true
+	two.wire.parentDS[0] = true
+	if err := two.l.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if err := two.l.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if active := two.keysIn(KeyStateActive, "ZSK"); len(active) != 1 {
+		t.Errorf("its active ZSKs are %v, want one", active)
+	}
+	if len(two.keysIn(KeyStatePublished, "ZSK")) == 0 {
+		t.Errorf("a later ZSK is not on the table's way: published %v, standby %v", two.keysIn(KeyStatePublished, "ZSK"), two.keysIn(KeyStateStandby, "ZSK"))
+	}
+
+	// a provider that serves: only T9 sets sign (P1)
+	o := newDriverRig(t, "serves.adding.example.", driverPolicy)
+	o.tick("minted")
+	if got := o.keysIn(KeyStateActive, "KSK"); len(got) != 0 {
+		t.Errorf("a provider that serves has its KSKs %v active at once", got)
+	}
+}
+
+// A key left on its way, for a provider no NS record names with no active key of its
+// role, has T9 with no wait for the parent: its DS goes there at a step that waits for
+// this key. With an active KSK, or for a provider that serves, the wait stands.
+func TestALoneKSKOnItsWayDoesNotWaitForItsOwnDS(t *testing.T) {
+	ksk := KeyView{State: KeyStateStandby, SEP: true}
+	for _, c := range []struct {
+		what string
+		z    ZoneView
+		want bool
+	}{
+		{"no NS names it, and no active KSK", ZoneView{SignsAtNaming: true, NoActiveOfRole: true}, true},
+		{"no NS names it, and an active KSK", ZoneView{SignsAtNaming: true}, false},
+		{"it serves, with no active KSK", ZoneView{NoActiveOfRole: true}, false},
+	} {
+		if got := parentDSWaitMet(ksk, c.z); got != c.want {
+			t.Errorf("%s: %v, want %v", c.what, got, c.want)
+		}
+	}
+}
+
+// A joiner's keys go to the other signers once more at its keys' step, whatever their
+// states: they were made before those signers named it, so they refused them, or never
+// had them, and its agent's set does not change for them. They stay as they are. Once
+// for the step, also once applied; again for another, and a rejection from before is
+// gone. A provider that does not join sends nothing.
+func TestAJoinersKeysGoOutOnceMoreAtItsKeysStep(t *testing.T) {
+	d := newDriverRig(t, "again.adding.example.", driverPolicy, "p2")
+	d.wire.parentDS[0] = true
+	gen := func(state, role string) uint16 {
+		t.Helper()
+		pkc, _, err := d.kdb.GenerateKeypair(d.l.Zone, "tdns", state, dns.TypeDNSKEY, dns.ED25519, role, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pkc.KeyId
+	}
+	ksk, zsk, standby := gen(tdns.DnskeyStateActive, "KSK"), gen(tdns.DnskeyStateActive, "ZSK"), gen(tdns.DnskeyStateStandby, "ZSK")
+	resent := func() []uint16 {
+		d.wire.mu.Lock()
+		defer d.wire.mu.Unlock()
+		out := slices.Clone(d.wire.resends)
+		d.wire.resends = nil
+		return out
+	}
+	tick := func(what string) {
+		t.Helper()
+		if err := d.l.Tick(); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+	}
+	resent()
+	tick("not joining")
+	if got := resent(); len(got) != 0 {
+		t.Fatalf("not joining, resent %v", got)
+	}
+	since := time.Now()
+	d.wire.joiningSince = since
+	if err := d.l.DistributeAtJoining(); err != nil {
+		t.Fatal(err)
+	}
+	got := resent()
+	for _, id := range []uint16{ksk, zsk, standby} {
+		if !slices.Contains(got, id) {
+			t.Errorf("at its keys' step, resent %v: want key %d", got, id)
+		}
+		if d.l.dist[id] == nil {
+			t.Errorf("at its keys' step, key %d has no record", id)
+		}
+	}
+	if s := d.state(ksk); s != KeyStateActive {
+		t.Errorf("at its keys' step its KSK is %s, want it left active", s)
+	}
+	if s := d.state(standby); s != KeyStateStandby {
+		t.Errorf("at its keys' step its standby ZSK is %s, want it left standby", s)
+	}
+	if _, _, err := d.l.Confirm(ksk, "p2", "rejected", "not named here"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.l.Confirm(zsk, "p2", "applied", ""); err != nil {
+		t.Fatal(err)
+	}
+	tick("the same step")
+	if got := resent(); len(got) != 0 {
+		t.Errorf("the same step, resent %v, want nothing", got)
+	}
+	if d.l.dist[zsk] != nil {
+		t.Errorf("applied, and the ZSK's record came back: %+v", d.l.dist[zsk])
+	}
+	d.wire.joiningSince = since.Add(time.Hour)
+	tick("another step")
+	if got := resent(); !slices.Contains(got, ksk) || !slices.Contains(got, zsk) {
+		t.Errorf("another step, resent %v: want both keys", got)
+	}
+	if rec := d.l.dist[ksk]; rec == nil || len(rec.Rejected) != 0 {
+		t.Errorf("another step, the KSK's record is %+v: want one with no rejection", rec)
+	}
+	d.wire.joiningSince = time.Time{}
+	tick("past its keys' step")
+	if got := resent(); len(got) != 0 {
+		t.Errorf("past its keys' step, resent %v, want nothing", got)
+	}
+
+	// with nobody else to send them to, nothing
+	alone := newDriverRig(t, "again.alone.adding.example.", driverPolicy)
+	alone.wire.parentDS[0] = true
+	pkc, _, err := alone.kdb.GenerateKeypair(alone.l.Zone, "tdns", tdns.DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, "KSK", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alone.wire.joiningSince = since
+	if err := alone.l.DistributeAtJoining(); err != nil {
+		t.Fatal(err)
+	}
+	if alone.l.dist[pkc.KeyId] != nil {
+		t.Errorf("alone, it has a record: %+v", alone.l.dist[pkc.KeyId])
 	}
 }

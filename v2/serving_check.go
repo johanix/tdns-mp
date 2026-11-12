@@ -15,8 +15,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net"
+	"slices"
+	"sync"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -24,8 +25,20 @@ import (
 	"github.com/miekg/dns"
 )
 
-// servedAnswer is one address's answer to the serving check's query: the
-// zone's SOA RRset with its RRSIGs, or why there is none.
+// errIMRNotRunning: nothing can be asked of a nameserver here yet. It says nothing
+// of what the nameserver serves.
+var errIMRNotRunning = errors.New("the IMR is not running")
+
+// errNoAddress: the IMR finds no address for the nameserver, so nothing can be
+// asked of it.
+var errNoAddress = errors.New("the IMR finds no address")
+
+// errServesNoRRset: the nameserver answers for the name, with NODATA or NXDOMAIN,
+// and holds no RRset of the type.
+var errServesNoRRset = errors.New("it serves no such RRset")
+
+// servedAnswer is one address's answer to a serving query: the zone's RRset
+// of the type asked, with its RRSIGs, or why there is none.
 type servedAnswer struct {
 	Addr  string
 	RRset *core.RRset
@@ -37,19 +50,51 @@ type servedAnswer struct {
 // stands in for it.
 var servingLookup = imrServingLookup
 
-// imrServingLookup finds ns's addresses through the IMR and asks each of
-// them, without recursion and with DNSSEC OK, for the zone's SOA. Each on
-// its own: over a list of addresses AuthDNSQuery takes the first that
-// answers, and another address of the same name can serve an older or an
-// unsigned copy.
+// servingKeysLookup asks each address of the nameserver ns, found by name,
+// for the zone's DNSKEY RRset: an answer per address. A test stands in for it.
+var servingKeysLookup = func(ctx context.Context, zone, ns string) ([]servedAnswer, error) {
+	return imrServingAnswers(ctx, zone, ns, dns.TypeDNSKEY)
+}
+
+// imrServingLookup asks each of ns's addresses for the zone's SOA.
 func imrServingLookup(ctx context.Context, zone, ns string) ([]servedAnswer, error) {
+	return imrServingAnswers(ctx, zone, ns, dns.TypeSOA)
+}
+
+// imrServingAnswers asks each of ns's addresses (servingAddrs) on its own for
+// the zone's RRset of qtype (askServing): over a list of addresses the first
+// that answers is taken, and another address of the same name can serve an
+// older or an unsigned copy, or an older DNSKEY RRset. A failure's error names
+// its address already.
+func imrServingAnswers(ctx context.Context, zone, ns string, qtype uint16) ([]servedAnswer, error) {
+	addrs, err := servingAddrs(ctx, ns)
+	if err != nil {
+		return nil, err
+	}
+	answers := make([]servedAnswer, 0, len(addrs))
+	for _, addr := range addrs {
+		rrset, err := askServing(ctx, zone, qtype, []string{addr})
+		a := servedAnswer{RRset: rrset, Err: err}
+		if err == nil {
+			a.Addr = addr
+		}
+		answers = append(answers, a)
+	}
+	return answers, nil
+}
+
+// servingAskTimeout bounds one exchange with one address of a nameserver.
+const servingAskTimeout = 2 * time.Second
+
+// servingAddrs are ns's addresses, found through the IMR, each with its port.
+func servingAddrs(ctx context.Context, ns string) ([]string, error) {
 	imr := tdns.Globals.ImrEngine
 	if imr == nil {
-		return nil, errors.New("the IMR is not running")
+		return nil, errIMRNotRunning
 	}
 	var addrs []string
-	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		resp, err := imr.ImrQuery(ctx, ns, qtype, dns.ClassINET, nil)
+	for _, addrType := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		resp, err := imr.ImrQuery(ctx, ns, addrType, dns.ClassINET, nil)
 		if err != nil || resp == nil || resp.RRset == nil {
 			continue
 		}
@@ -65,24 +110,116 @@ func imrServingLookup(ctx context.Context, zone, ns string) ([]servedAnswer, err
 		}
 	}
 	if len(addrs) == 0 {
-		return nil, fmt.Errorf("the IMR finds no address for %s", ns)
+		return nil, fmt.Errorf("%w for %s", errNoAddress, ns)
 	}
-	answers := make([]servedAnswer, 0, len(addrs))
+	return addrs, nil
+}
+
+// askServing asks addrs in turn, each a host and port, without recursion and with
+// DNSSEC OK, for the zone's RRset of qtype, until one answers for the name. It asks
+// them itself: tdns's AuthDNSQuery stores what it reads in the IMR's cache, unvalidated
+// and over what the cache holds. A nameserver answering NODATA had the resolver deny
+// the zone's DNSKEY RRset, so it could validate nothing of the zone's, and one answering
+// with a referral gave it that referral's NS RRset for the zone.
+func askServing(ctx context.Context, zone string, qtype uint16, addrs []string) (*core.RRset, error) {
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(zone), qtype)
+	m.RecursionDesired = false
+	m.SetEdns0(4096, true)
+	var last error
 	for _, addr := range addrs {
-		a := servedAnswer{Addr: addr}
-		rrset, rcode, _, err := imr.AuthDNSQuery(ctx, zone, dns.TypeSOA, []string{addr}, log.Default(), false)
-		switch {
-		case err != nil:
-			a.Err = err
-		case rrset == nil:
-			// NODATA, NXDOMAIN or a referral: no error, and no RRset
-			a.Err = fmt.Errorf("no SOA in the answer (%s)", dns.RcodeToString[rcode])
-		default:
-			a.RRset = rrset
+		r, err := exchangeServing(ctx, m, addr)
+		if err != nil {
+			last = fmt.Errorf("%s: %w", addr, err)
+			continue
 		}
-		answers = append(answers, a)
+		rrset, answered, err := readServed(r, m, qtype)
+		if answered {
+			return rrset, err
+		}
+		last = fmt.Errorf("%s: %w", addr, err)
 	}
-	return answers, nil
+	if last == nil {
+		last = errors.New("no address to ask")
+	}
+	return nil, last
+}
+
+// exchangeServing asks addr over UDP and, when the reply is truncated, over TCP: what
+// a truncated reply leaves out says nothing of what the server serves, and post-quantum
+// keys take a DNSKEY RRset past the buffer. No reply over TCP, or one truncated there
+// as well, is an error: the server has not answered.
+func exchangeServing(ctx context.Context, m *dns.Msg, addr string) (*dns.Msg, error) {
+	r, _, err := (&dns.Client{Net: "udp", Timeout: servingAskTimeout}).ExchangeContext(ctx, m, addr)
+	if err != nil {
+		return nil, err
+	}
+	if !r.Truncated {
+		return r, nil
+	}
+	r, _, err = (&dns.Client{Net: "tcp", Timeout: servingAskTimeout}).ExchangeContext(ctx, m, addr)
+	switch {
+	case err != nil:
+		return nil, fmt.Errorf("a truncated reply, and over TCP: %w", err)
+	case r.Truncated:
+		return nil, errors.New("a truncated reply, over TCP as well")
+	}
+	return r, nil
+}
+
+// enclosingSOA: r's authority section holds the SOA of a zone at or above
+// name, as an authoritative NODATA or NXDOMAIN does and a referral does not.
+func enclosingSOA(r *dns.Msg, name string) bool {
+	return slices.ContainsFunc(r.Ns, func(rr dns.RR) bool {
+		_, ok := rr.(*dns.SOA)
+		return ok && dns.IsSubDomain(rr.Header().Name, name)
+	})
+}
+
+// readServed reads a whole reply to query. It has answered when it says what the
+// server does with the name: the RRset, errServesNoRRset when it serves the name
+// without one, or a referral, which is an error of its own as the server does not
+// serve the zone. Otherwise the error says why not, and another address may be asked.
+// The RRset is the name's, and its RRSIGs those over it: another owner's records, or
+// a signature over another type, are no part of it.
+func readServed(r, query *dns.Msg, qtype uint16) (rrset *core.RRset, answered bool, err error) {
+	q := query.Question[0]
+	if len(r.Question) != 1 || !sameName(r.Question[0].Name, q.Name) || r.Question[0].Qtype != q.Qtype || r.Question[0].Qclass != q.Qclass {
+		return nil, false, errors.New("a reply to another question")
+	}
+	noRRset := fmt.Errorf("no %s in the answer (%s): %w", dns.TypeToString[qtype], dns.RcodeToString[r.Rcode], errServesNoRRset)
+	soa := enclosingSOA(r, q.Name)
+	switch r.Rcode {
+	case dns.RcodeSuccess:
+		served := &core.RRset{}
+		for _, rr := range r.Answer {
+			if !sameName(rr.Header().Name, q.Name) {
+				continue
+			}
+			switch rr.Header().Rrtype {
+			case qtype:
+				served.RRs = append(served.RRs, rr)
+			case dns.TypeRRSIG:
+				if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == qtype {
+					served.RRSIGs = append(served.RRSIGs, rr)
+				}
+			}
+		}
+		switch {
+		case len(served.RRs) > 0:
+			return served, true, nil
+		case len(r.Answer) == 0 && len(r.Ns) > 0 && !soa:
+			// it does not serve the zone: a resolver goes on to another
+			return nil, true, fmt.Errorf("a referral, not an answer, for %s", dns.TypeToString[qtype])
+		}
+		return nil, true, noRRset
+	case dns.RcodeNameError:
+		if soa {
+			return nil, true, noRRset
+		}
+		return nil, false, errors.New("NXDOMAIN with no SOA")
+	}
+	return nil, false, fmt.Errorf("rcode %s", dns.RcodeToString[r.Rcode])
 }
 
 // servingChainOK: each of the nameservers serves the zone, at each of its
@@ -195,4 +332,274 @@ func signedByOneOf(rrset *core.RRset, keys []dns.RR, now time.Time) error {
 		}
 	}
 	return nil
+}
+
+// dnskeyTTLOf is the largest TTL among rrset's DNSKEYs, and whether it holds one.
+func dnskeyTTLOf(rrset *core.RRset) (time.Duration, bool) {
+	var largest time.Duration
+	found := false
+	if rrset != nil {
+		for _, rr := range rrset.RRs {
+			if _, ok := rr.(*dns.DNSKEY); ok {
+				largest, found = max(largest, time.Duration(rr.Header().Ttl)*time.Second), true
+			}
+		}
+	}
+	return largest, found
+}
+
+// largestServedDnskeyTTL is the largest TTL any of the zone's nameservers, by the
+// NS RRset of its copy, serves its DNSKEY RRset with, the servers that served it and
+// those that did not, and why the last of those did not. Each is asked under a bound
+// of its own.
+func largestServedDnskeyTTL(mpzd *MPZoneData) (largest time.Duration, served, silent []string, err error) {
+	names, err := copyNameservers(mpzd)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	for _, ns := range names {
+		ctx, cancel := lookCtx()
+		answers, lookErr := servingKeysLookup(ctx, mpzd.ZoneName, ns)
+		cancel()
+		k := readKeysAtAddrs(answers, nil)
+		switch {
+		case lookErr != nil:
+			err = fmt.Errorf("%s: %w", ns, lookErr)
+		case !k.answered:
+			err = fmt.Errorf("%s: %w", ns, k.why)
+		case !k.found:
+			err = fmt.Errorf("%s serves no DNSKEY for the zone", ns)
+		default:
+			largest = max(largest, k.ttl)
+			served = append(served, ns)
+			continue
+		}
+		silent = append(silent, ns)
+	}
+	if len(served) == 0 && err == nil {
+		err = errors.New("the zone's copy names no nameserver")
+	}
+	return largest, served, silent, err
+}
+
+// copyNameservers are the nameservers the NS RRset of the zone's copy names.
+func copyNameservers(mpzd *MPZoneData) ([]string, error) {
+	rrset, err := mpzd.GetRRset(mpzd.ZoneName, dns.TypeNS)
+	if err != nil || rrset == nil {
+		return nil, err
+	}
+	var names []string
+	for _, rr := range rrset.RRs {
+		if ns, ok := rr.(*dns.NS); ok {
+			names = append(names, ns.Ns)
+		}
+	}
+	return names, nil
+}
+
+// copyDnskeyTTL is the TTL of the DNSKEY RRset of the zone's copy; with none,
+// tdns's default.
+func copyDnskeyTTL(mpzd *MPZoneData) time.Duration {
+	if rrset, err := mpzd.GetRRset(mpzd.ZoneName, dns.TypeDNSKEY); err == nil {
+		if ttl, ok := dnskeyTTLOf(rrset); ok {
+			return ttl
+		}
+	}
+	return tdns.DefaultDnskeyTTL
+}
+
+// joinerKeysServed is what one look found of a joiner's keys at the zone's
+// nameservers: those that answer with them all, those that answer without, and those
+// that do not answer, with why the last of those did not; the largest TTL any serves
+// the zone's DNSKEY RRset with; and the TTL of the RRset of the zone's copy.
+type joinerKeysServed struct {
+	with, without, silent []string
+	why                   error
+	ttl, copyTTL          time.Duration
+}
+
+// lookForJoinerKeys asks each of the zone's nameservers, by the NS RRset of its
+// copy, for its DNSKEY RRset at each of its addresses, under a bound of its own,
+// and looks for keys in it: a nameserver serves them when each of its addresses
+// that answers does.
+// An error says the look says nothing of them: the copy names none, or nothing can
+// be asked, as when no nameserver it names has an address the IMR finds. One
+// nameserver with no address is silent, as one that does not answer.
+func lookForJoinerKeys(mpzd *MPZoneData, keys []*dns.DNSKEY) (joinerKeysServed, error) {
+	names, err := copyNameservers(mpzd)
+	if err != nil {
+		return joinerKeysServed{}, err
+	}
+	if len(names) == 0 {
+		return joinerKeysServed{}, errors.New("the zone's copy names no nameserver")
+	}
+	seen := joinerKeysServed{copyTTL: copyDnskeyTTL(mpzd)}
+	unresolved := 0
+	for _, ns := range names {
+		ctx, cancel := lookCtx()
+		answers, err := servingKeysLookup(ctx, mpzd.ZoneName, ns)
+		cancel()
+		if errors.Is(err, errIMRNotRunning) {
+			return joinerKeysServed{}, err
+		}
+		k := readKeysAtAddrs(answers, keys)
+		if err == nil && !k.answered {
+			err = k.why
+		}
+		if err != nil {
+			if errors.Is(err, errNoAddress) {
+				unresolved++
+			}
+			seen.silent, seen.why = append(seen.silent, ns), fmt.Errorf("%s: %w", ns, err)
+			continue
+		}
+		seen.ttl = max(seen.ttl, k.ttl)
+		if k.serves {
+			seen.with = append(seen.with, ns)
+		} else {
+			seen.without = append(seen.without, ns)
+		}
+	}
+	if unresolved == len(names) {
+		return joinerKeysServed{}, fmt.Errorf("no nameserver of the zone's copy has an address: %w", seen.why)
+	}
+	return seen, nil
+}
+
+// keysAtAddrs is one nameserver's answers, one per address, read for keys:
+// whether any address answered, with the zone's DNSKEY RRset or with none;
+// whether each that answered serves every one of keys; whether any serves a
+// DNSKEY RRset, and the largest TTL any serves it with; and why the first that
+// did not answer did not. An address that does not answer is not counted, as a
+// nameserver that does not answer is not.
+type keysAtAddrs struct {
+	answered, serves, found bool
+	ttl                     time.Duration
+	why                     error
+}
+
+func readKeysAtAddrs(answers []servedAnswer, keys []*dns.DNSKEY) keysAtAddrs {
+	k := keysAtAddrs{serves: true}
+	for _, a := range answers {
+		if a.Err != nil && !errors.Is(a.Err, errServesNoRRset) {
+			if k.why == nil {
+				k.why = a.Err
+			}
+			continue
+		}
+		k.answered = true
+		if ttl, ok := dnskeyTTLOf(a.RRset); ok {
+			k.ttl, k.found = max(k.ttl, ttl), true
+		}
+		k.serves = k.serves && servesKeys(a.RRset, keys)
+	}
+	k.serves = k.serves && k.answered
+	if !k.answered && k.why == nil {
+		k.why = errors.New("no address answers")
+	}
+	return k
+}
+
+// servesKeys: rrset holds each of keys, the key and not just its tag. A signer
+// can't record another's key under a tag of its own (syncForeignDNSKEYs), so it
+// goes on serving its own there, and that isn't the joiner's. A nil key, one whose
+// record can't be read, is held by no RRset.
+func servesKeys(rrset *core.RRset, keys []*dns.DNSKEY) bool {
+	if rrset == nil {
+		return false
+	}
+	for _, key := range keys {
+		if key == nil || !slices.ContainsFunc(rrset.RRs, func(rr dns.RR) bool { return dns.IsDuplicate(key, rr) }) {
+			return false
+		}
+	}
+	return true
+}
+
+// servedKeysEvery is how often a signer asks a zone it does not sign yet's
+// nameservers what they serve its DNSKEY RRset with.
+const servedKeysEvery = time.Minute
+
+// servedKeysBook is what a signer has seen the nameservers of the zones it does
+// not sign yet serve their DNSKEY RRsets with, by zone. In memory: after a restart
+// it looks again.
+type servedKeysBook struct {
+	mu    sync.Mutex
+	zones map[string]*servedKeysLook
+	// start runs a look; nil: in a goroutine of its own. A test runs it in place.
+	start func(look func())
+}
+
+type servedKeysLook struct {
+	ttl     time.Duration   // the largest seen: a cache may hold what was served before
+	served  map[string]bool // the servers seen serving it: one gone quiet has served what it served
+	whole   bool            // every server the copy names has been seen serving it
+	looked  bool            // a look has finished since the start
+	said    bool            // that it is not whole, once
+	at      time.Time
+	running bool
+}
+
+// largest is the largest TTL seen for the zone, whether every nameserver its copy
+// names has been seen serving the RRset, and whether a look has finished since the
+// start. It never waits for a look: it runs under the key machine's lock.
+func (b *servedKeysBook) largest(mpzd *MPZoneData) (ttl time.Duration, whole, looked bool) {
+	zone := mpzd.ZoneName
+	key := canonicalName(zone)
+	b.mu.Lock()
+	if b.zones == nil {
+		b.zones = map[string]*servedKeysLook{}
+	}
+	l := b.zones[key]
+	if l == nil {
+		l = &servedKeysLook{}
+		b.zones[key] = l
+	}
+	due := !l.running && time.Since(l.at) >= servedKeysEvery
+	if due {
+		l.running = true
+	}
+	start := b.start
+	b.mu.Unlock()
+	if due {
+		look := func() {
+			seen, served, silent, err := largestServedDnskeyTTL(mpzd)
+			b.mu.Lock()
+			l.running, l.at, l.looked = false, time.Now(), true
+			before, wasWhole := l.ttl, l.whole
+			l.ttl = max(l.ttl, seen)
+			if l.served == nil {
+				l.served = map[string]bool{}
+			}
+			for _, ns := range served {
+				l.served[canonicalName(ns)] = true
+			}
+			missing := slices.DeleteFunc(silent, func(ns string) bool { return l.served[canonicalName(ns)] })
+			// a look that could list no server says nothing of them all
+			l.whole = len(served)+len(silent) > 0 && len(l.served) > 0 && len(missing) == 0
+			grew, warn := l.whole && (!wasWhole || l.ttl > before), !l.whole && !l.said
+			l.said = l.said || warn
+			now := l.ttl
+			b.mu.Unlock()
+			switch {
+			case grew:
+				lgSigner.Info("the zone's new keys wait the TTL its servers serve its DNSKEY RRset with", "zone", zone, "ttl", now)
+			case warn:
+				lgSigner.Warn("not every server of the zone has served its DNSKEY RRset; its new keys wait at least its copy's TTL", "zone", zone, "silent", missing, "err", err)
+			}
+		}
+		if start != nil {
+			start(look)
+		} else {
+			go look()
+		}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return l.ttl, l.whole, l.looked
+}
+
+// lookCtx is one look's context, with its bound.
+func lookCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), transferCheckTimeout)
 }

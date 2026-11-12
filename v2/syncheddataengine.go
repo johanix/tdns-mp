@@ -116,7 +116,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				conf.RequestAndWaitForEdits(zd.ZoneData, ctx, conf.InternalMp.MPTransport, conf.InternalMp.MsgQs, conf.InternalMp.ZoneDataRepo, AgentId(conf.MpConfig().Identity))
 			}
 			weAreSigner := zd.MP != nil && zd.MP.MPdata != nil && zd.MP.MPdata.WeAreSigner
-			notASigner := zd.MP != nil && zd.MP.MPdata != nil && !zd.MP.MPdata.WeAreSigner
+			notASigner := zd.MP != nil && zd.MP.MPdata != nil && !zd.MP.MPdata.WeAreSigner && !zd.MP.MPdata.WeHoldKeys
 			if hasSigner && !notASigner {
 				lgEngine.Info("startup hydration: requesting key inventory from signer", "zone", zname, "weAreSigner", weAreSigner)
 				zd.RequestAndWaitForKeyInventory(ctx, conf.InternalMp.MPTransport)

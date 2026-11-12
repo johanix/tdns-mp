@@ -72,8 +72,17 @@ type Wire interface {
 	Strip(zone string, keyid uint16) error
 	// Resign asks tdns to re-sign the zone.
 	Resign(zone string)
-	// ServedDnskeyTTL is the TTL the DNSKEY RRset is served with.
-	ServedDnskeyTTL(zone string) time.Duration
+	// JoiningSince: this provider's keys-step of its joining is held, and since
+	// when (plan S18b, reading 20): its keys go to the other signers once more.
+	JoiningSince(zone string) (time.Time, bool)
+	// SignsAtNaming: this provider signs the zone and serves nothing of it: no
+	// NS record is to name it, so no validator sees its signatures, and its
+	// first keys go straight to active (T2a).
+	SignsAtNaming(zone string) bool
+	// ServedDnskeyTTL is the TTL the zone's DNSKEY RRset is served with: how
+	// long a cache may hold the set from before a new key was in it (E5), and
+	// whether anything is known of it yet: until it is, the key waits.
+	ServedDnskeyTTL(zone string) (time.Duration, bool)
 	// Report surfaces something an operator must see: a rejected key.
 	Report(zone string, keyid uint16, what string)
 	// KeysChanged tells the surroundings a key row changed (state or any
@@ -175,6 +184,9 @@ type ZoneKeyLifecycle struct {
 	// hold: the signer's agent holds the zone (the hand-over's hold, plan S6):
 	// the tick starts nothing new (Tick)
 	hold bool
+	// joinSent, by key: the keys-step of this provider's joining the key was last
+	// distributed under (JoiningSince), so that it goes once for that step.
+	joinSent map[uint16]time.Time
 }
 
 // NewZoneKeyLifecycle is a driver with nothing in flight; Reload picks up
@@ -190,7 +202,7 @@ func NewZoneKeyLifecycle(zone string, kdb *tdns.KeyDB, clock Clock, pol Lifecycl
 	l := &ZoneKeyLifecycle{Zone: dns.Fqdn(zone), KDB: kdb, Clock: clock, Policy: pol, Wire: wire,
 		dist: map[uint16]*distribution{}, dsGone: map[uint16]bool{}, rolls: map[string]bool{}, reported: map[uint16]bool{}, known: known,
 		dsPresent: map[uint16]dsPresence{}, promoteWait: map[uint16]time.Time{}, promoteTold: map[uint16]bool{}, algorithms: map[string]uint8{},
-		dsGoneAt: map[uint16]dsPresence{}, lastDSTTL: map[uint16]time.Duration{}, kskLeft: map[uint8]bool{}}
+		dsGoneAt: map[uint16]dsPresence{}, lastDSTTL: map[uint16]time.Duration{}, kskLeft: map[uint8]bool{}, joinSent: map[uint16]time.Time{}}
 	if kdb != nil {
 		if _, err := kdb.DB.Exec(HsyncTables["MPKeyDistribution"]); err != nil {
 			// without the table nothing in flight would survive a restart:
@@ -299,12 +311,14 @@ func (l *ZoneKeyLifecycle) zoneView(k tdns.DnssecKeyWithTimestamps, all map[uint
 		Pending:          map[string]bool{},
 		Rejected:         map[string]bool{},
 		PropagationDelay: l.Policy.PropagationDelay,
-		ServedDnskeyTTL:  l.Wire.ServedDnskeyTTL(l.Zone),
 		Margin:           l.Policy.Margin,
 		ParentKnown:      l.parentKnown,
 		ParentServesNoDS: l.parentEmpty,
+		SignsAtNaming:    l.Wire.SignsAtNaming(l.Zone),
 		Now:              l.Clock.Now(),
 	}
+	ttl, known := l.Wire.ServedDnskeyTTL(l.Zone)
+	z.ServedDnskeyTTL, z.ServedTTLUnknown = ttl, !known
 	if d := l.dist[k.KeyTag]; d != nil {
 		z.Applied, z.Pending, z.Rejected = d.Applied, d.Pending, d.Rejected
 		// the expected set is the set at distribution time, minus a signer
@@ -572,6 +586,13 @@ func (l *ZoneKeyLifecycle) applyLocked(keyid uint16, ev KeyEvent) (from, to stri
 			l.saveDist(keyid)
 		}
 	case KeyStateActive:
+		if row.ID == "T2a" {
+			l.startDistribution(keyid, false, false)
+			if len(l.dist[keyid].Expected) == 0 {
+				delete(l.dist, keyid)
+				l.saveDist(keyid)
+			}
+		}
 		l.Wire.Resign(l.Zone)
 		// the previous active key of the role retires (T10); during an
 		// algorithm rollover the old KSK goes on signing with its DS
@@ -635,6 +656,42 @@ func (l *ZoneKeyLifecycle) write(k tdns.DnssecKeyWithTimestamps, state string, s
 	return nil
 }
 
+// DistributeAtJoining sends this provider's keys to the other signers once for its
+// keys-step (distributeAtJoiningLocked), at once.
+func (l *ZoneKeyLifecycle) DistributeAtJoining() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	all, err := l.rows()
+	if err != nil {
+		return err
+	}
+	return l.distributeAtJoiningLocked(all)
+}
+
+// distributeAtJoiningLocked is T6 for each key this provider holds, once for each
+// keys-step of its joining. A key it made before the other signers named it, as it
+// acted by its own copy or at an earlier time, was refused or never sent, and the
+// agent's set does not change for it, so nothing else sends it. The record brings a
+// resend until they have applied it (E12), and a rejection from before is gone.
+func (l *ZoneKeyLifecycle) distributeAtJoiningLocked(all map[uint16]tdns.DnssecKeyWithTimestamps) error {
+	since, joining := l.Wire.JoiningSince(l.Zone)
+	if !joining || len(l.Wire.OtherSigners(l.Zone)) == 0 {
+		return nil
+	}
+	for _, keyid := range keytagsOf(all) {
+		switch all[keyid].State {
+		case KeyStateMpdist, KeyStatePublished, KeyStateStandby, KeyStateActive, KeyStateRetired:
+			if l.joinSent[keyid].Equal(since) {
+				continue
+			}
+			if _, _, err := l.applyLocked(keyid, CmdRetry); err != nil {
+				return fmt.Errorf("distribute key %d of %s to the other signers: %w", keyid, l.Zone, err)
+			}
+		}
+	}
+	return nil
+}
+
 // SetForeignDS writes another provider's key's ds column (design §1 P3:
 // its DS belongs at the parent while its provider signs the zone and holds
 // it standby, active or retired-not-withdrawn), the row's state and other
@@ -688,6 +745,9 @@ func (l *ZoneKeyLifecycle) startDistribution(keyid uint16, removal, resend bool)
 	}
 	l.dist[keyid] = d
 	l.saveDist(keyid)
+	if since, joining := l.Wire.JoiningSince(l.Zone); joining {
+		l.joinSent[keyid] = since
+	}
 	switch {
 	case resend:
 		l.Wire.Resend(l.Zone, keyid, removal)
@@ -1072,6 +1132,10 @@ func (l *ZoneKeyLifecycle) Tick() error {
 	var errs []error
 	fail := func(keyid uint16, what string, err error) {
 		l.logf("key lifecycle: a tick step failed; the key waits for the next tick", "zone", l.Zone, "keyid", keyid, "step", what, "err", err)
+		errs = append(errs, err)
+	}
+	if err := l.distributeAtJoiningLocked(all); err != nil {
+		l.logf("key lifecycle: a joiner's keys could not be distributed; next tick", "zone", l.Zone, "err", err)
 		errs = append(errs, err)
 	}
 	// another provider's key whose row appeared since its provider's word

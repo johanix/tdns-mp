@@ -215,6 +215,11 @@ func (s *actingStore) take(h *ActingHandover, by string) (prev *ActingHandover, 
 		return prev, true, nil
 	}
 	now := time.Now()
+	// a joiner's keys' step handed again, as it is every signerHandoverResend: its
+	// keys have gone to the other signers for this step (JoiningSince)
+	if cur := s.zones[key]; cur != nil && h.Joining && cur.handover.Joining && cur.handover.Serial == h.Serial && cur.handover.Digest == h.Digest && cur.handover.Step == h.Step {
+		now = cur.since
+	}
 	if s.hdb != nil {
 		js, err := json.Marshal(&stored)
 		if err != nil {
