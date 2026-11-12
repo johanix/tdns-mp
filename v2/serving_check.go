@@ -349,13 +349,14 @@ func dnskeyTTLOf(rrset *core.RRset) (time.Duration, bool) {
 }
 
 // largestServedDnskeyTTL is the largest TTL any of the zone's nameservers, by the
-// NS RRset of its copy, serves its DNSKEY RRset with, the servers that served it and
-// those that did not, and why the last of those did not. Each is asked under a bound
-// of its own.
-func largestServedDnskeyTTL(mpzd *MPZoneData) (largest time.Duration, served, silent []string, err error) {
+// NS RRset of its copy, serves its DNSKEY RRset with; the servers that served it at
+// each address that answered; those that answered with none at an address; those
+// that did not answer; and why the last of those that did not serve it did not. Each
+// is asked under a bound of its own.
+func largestServedDnskeyTTL(mpzd *MPZoneData) (largest time.Duration, served, without, silent []string, err error) {
 	names, err := copyNameservers(mpzd)
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, nil, nil, err
 	}
 	for _, ns := range names {
 		ctx, cancel := lookCtx()
@@ -367,14 +368,18 @@ func largestServedDnskeyTTL(mpzd *MPZoneData) (largest time.Duration, served, si
 			err = fmt.Errorf("%s: %w", ns, lookErr)
 		case !k.answered:
 			err = fmt.Errorf("%s: %w", ns, k.why)
-		case !k.found:
-			err = fmt.Errorf("%s serves no DNSKEY for the zone", ns)
 		case !k.serves:
 			// an address that serves none may have served an RRset before, still
 			// cached: the TTL the others serve it with counts, and the server
 			// is not served until each of its addresses serves one
 			largest = max(largest, k.ttl)
-			err = fmt.Errorf("%s serves no DNSKEY for the zone at one of its addresses", ns)
+			if k.found {
+				err = fmt.Errorf("%s serves no DNSKEY for the zone at one of its addresses", ns)
+			} else {
+				err = fmt.Errorf("%s serves no DNSKEY for the zone", ns)
+			}
+			without = append(without, ns)
+			continue
 		default:
 			largest = max(largest, k.ttl)
 			served = append(served, ns)
@@ -385,7 +390,7 @@ func largestServedDnskeyTTL(mpzd *MPZoneData) (largest time.Duration, served, si
 	if len(served) == 0 && err == nil {
 		err = errors.New("the zone's copy names no nameserver")
 	}
-	return largest, served, silent, err
+	return largest, served, without, silent, err
 }
 
 // copyNameservers are the nameservers the NS RRset of the zone's copy names.
@@ -571,7 +576,7 @@ func (b *servedKeysBook) largest(mpzd *MPZoneData) (ttl time.Duration, whole, lo
 	b.mu.Unlock()
 	if due {
 		look := func() {
-			seen, served, silent, err := largestServedDnskeyTTL(mpzd)
+			seen, served, without, silent, err := largestServedDnskeyTTL(mpzd)
 			b.mu.Lock()
 			l.running, l.at, l.looked = false, time.Now(), true
 			before, wasWhole := l.ttl, l.whole
@@ -582,9 +587,16 @@ func (b *servedKeysBook) largest(mpzd *MPZoneData) (ttl time.Duration, whole, lo
 			for _, ns := range served {
 				l.served[canonicalName(ns)] = true
 			}
+			// one that answers with none at an address may have served an RRset
+			// there that no look saw, still cached: what it served before does not
+			// count until each of its addresses serves one again
+			for _, ns := range without {
+				delete(l.served, canonicalName(ns))
+			}
 			missing := slices.DeleteFunc(silent, func(ns string) bool { return l.served[canonicalName(ns)] })
+			missing = append(missing, without...)
 			// a look that could list no server says nothing of them all
-			l.whole = len(served)+len(silent) > 0 && len(l.served) > 0 && len(missing) == 0
+			l.whole = len(served)+len(without)+len(silent) > 0 && len(l.served) > 0 && len(missing) == 0
 			grew, warn := l.whole && (!wasWhole || l.ttl > before), !l.whole && !l.said
 			l.said = l.said || warn
 			now := l.ttl

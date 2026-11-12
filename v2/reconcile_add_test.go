@@ -3098,7 +3098,7 @@ func TestEveryAddressOfANameserverIsAskedForTheKeys(t *testing.T) {
 	if err != nil || len(seen.with) != 0 || len(seen.without) != 1 || seen.ttl != 2*time.Hour {
 		t.Errorf("its IPv6 address serves an older RRset: the look saw %+v, err %v; want it without the keys, at 2h", seen, err)
 	}
-	if largest, served, _, err := largestServedDnskeyTTL(r.mpzd); err != nil || largest != 2*time.Hour || len(served) != 1 {
+	if largest, served, _, _, err := largestServedDnskeyTTL(r.mpzd); err != nil || largest != 2*time.Hour || len(served) != 1 {
 		t.Errorf("the largest TTL served is %s (served %v, err %v), want 2h", largest, served, err)
 	}
 	answers[1] = servedAnswer{Err: errors.New("[2001:db8::1]:53: i/o timeout")}
@@ -3110,10 +3110,62 @@ func TestEveryAddressOfANameserverIsAskedForTheKeys(t *testing.T) {
 	// still cached: the server is not served, and the TTL the other serves counts
 	answers[0] = servedAnswer{Addr: "192.0.2.1:53", RRset: &core.RRset{RRs: []dns.RR{at(old, time.Minute), at(joiner, time.Minute)}}}
 	answers[1] = servedAnswer{Err: fmt.Errorf("no DNSKEY in the answer (NOERROR): %w", errServesNoRRset)}
-	if largest, served, silent, _ := largestServedDnskeyTTL(r.mpzd); largest != time.Minute || len(served) != 0 || len(silent) != 1 {
-		t.Errorf("its IPv6 address serves no DNSKEY RRset: largest %s, served %v, silent %v; want 1m, none served, it silent", largest, served, silent)
+	if largest, served, without, silent, _ := largestServedDnskeyTTL(r.mpzd); largest != time.Minute || len(served) != 0 || len(without) != 1 || len(silent) != 0 {
+		t.Errorf("its IPv6 address serves no DNSKEY RRset: largest %s, served %v, without %v, silent %v; want 1m, it without", largest, served, without, silent)
 	}
 	if seen, err = lookForJoinerKeys(r.mpzd, []*dns.DNSKEY{joiner}); err != nil || len(seen.without) != 1 {
 		t.Errorf("its IPv6 address serves no DNSKEY RRset: the look saw %+v, err %v; want it without the keys", seen, err)
+	}
+}
+
+// A nameserver an earlier look saw serving the DNSKEY RRset, while one of its
+// addresses did not answer, that later answers with none at that address may have
+// served one there that no look saw, still cached: the book does not count it as
+// served until each of its addresses serves one again (CodeRabbit on #374).
+func TestANameserverThatServesNoDNSKEYAtAnAddressIsNotServedByAnEarlierLook(t *testing.T) {
+	const zone = "nodata.adding.signer.example."
+	k := testDnskey(t, zone, 256)
+	keys := func(addr string) servedAnswer {
+		c := *k
+		c.Hdr.Ttl = uint32(time.Hour / time.Second)
+		return servedAnswer{Addr: addr, RRset: &core.RRset{RRs: []dns.RR{&c}}}
+	}
+	const v4, v6 = "192.0.2.1:53", "[2001:db8::1]:53"
+	quiet := servedAnswer{Addr: v6, Err: errors.New(v6 + ": i/o timeout")}
+	nodata := servedAnswer{Addr: v6, Err: fmt.Errorf("no DNSKEY in the answer (NOERROR): %w", errServesNoRRset)}
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="p2"`)...)
+	answers := []servedAnswer{keys(v4), quiet}
+	prev := servingKeysLookup
+	servingKeysLookup = func(context.Context, string, string) ([]servedAnswer, error) { return answers, nil }
+	t.Cleanup(func() { servingKeysLookup = prev })
+	b := &servedKeysBook{start: func(look func()) { look() }}
+	whole := func() bool {
+		t.Helper()
+		b.mu.Lock()
+		if l := b.zones[canonicalName(zone)]; l != nil {
+			l.at = time.Time{}
+		}
+		b.mu.Unlock()
+		_, whole, looked := b.largest(r.mpzd)
+		if !looked {
+			t.Error("a look has finished and none is said to have")
+		}
+		return whole
+	}
+
+	if !whole() {
+		t.Fatal("its IPv6 address does not answer: not whole, want whole, since an address that does not answer is not counted")
+	}
+	answers = []servedAnswer{keys(v4), nodata}
+	if whole() {
+		t.Error("its IPv6 address now serves no DNSKEY RRset: whole, want not whole")
+	}
+	answers = []servedAnswer{quiet}
+	if whole() {
+		t.Error("gone quiet after it served none at an address: whole, want not whole")
+	}
+	answers = []servedAnswer{keys(v4), keys(v6)}
+	if !whole() {
+		t.Error("each of its addresses serves the RRset again: not whole, want whole")
 	}
 }
