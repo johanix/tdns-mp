@@ -1316,6 +1316,27 @@ func TestAnAgentWithNoCopySaysSoAndItsSignerActsByItsOwnCopy(t *testing.T) {
 		t.Errorf("no role by its copy: withheld %v, Ready %v, started %v", rr.mpzd.Withheld(), rr.mpzd.Ready, rr.started)
 	}
 
+	// a hand-over that names it a signer, taken as the turn is about to release
+	// the zone, keeps it withheld until it signs (CodeRabbit on #374)
+	const late = "late.nocopy.signer.adding.example."
+	rl := newSignerRig(t, late, noRole...)
+	rl.firstLoad(t, noRole...)
+	rl.hand(&ActingHandover{Zone: late, Phase: PhaseSteady, NoCopy: true, Made: time.Now()}, sigUs)
+	prevReleasing := releasing
+	releasing = func(string) {
+		releasing = func(string) {}
+		rl.hand(handoverFor(t, late, sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)...), sigUs)
+	}
+	t.Cleanup(func() { releasing = prevReleasing })
+	rl.roleTurn()
+	if !rl.mpzd.Withheld() {
+		t.Error("a hand-over naming it a signer came as the turn released the zone, and the zone is released")
+	}
+	rl.roleTurn()
+	if len(rl.started) != 1 || rl.mpzd.Withheld() {
+		t.Errorf("at the hand-over's turn: started %v, withheld %v; want it signing", rl.started, rl.mpzd.Withheld())
+	}
+
 	// its agent's word was of the zone as loaded then: replaced, the zone is
 	// another, whose copy may be one its agent refused (CodeRabbit on #374)
 	if !rr.conf.agentHasNoCopy(relay) {

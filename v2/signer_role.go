@@ -43,6 +43,9 @@ const signerRoleEvery = 30 * time.Second
 var (
 	startSigning       = func(ctx context.Context, zd *tdns.ZoneData) error { return zd.StartSigning(ctx, 0) }
 	bindWithoutSigning = func(zd *tdns.ZoneData) error { return zd.BindPolicyWithoutSigning() }
+	// releasing is called as a turn is about to release the zone: a test hands
+	// a hand-over there
+	releasing = func(zone string) {}
 )
 
 // signerRoleBook is the signer's turns of its zones' roles: the zones asked, the
@@ -118,12 +121,14 @@ func (conf *Config) signerRoleTurn(ctx context.Context, zone string) {
 	if !ok || mpzd == nil || mp == nil || !mpzd.HasPublishedData() {
 		return
 	}
+	held, handed := actingHeld.Load().get(zone)
 	var r Roles
-	if handed, ok := actingHeld.Load().roles(zone); ok {
-		r = handed
-	} else if conf.agentHasNoCopy(zone) {
+	switch {
+	case handed:
+		r = held.handover.Sets
+	case conf.agentHasNoCopy(zone):
 		_, r = signerSets(mpzd, mp)
-	} else {
+	default:
 		return
 	}
 	self := labelOfIdentity(r, ourHsyncIdentities(mp))
@@ -162,7 +167,21 @@ func (conf *Config) signerRoleTurn(ctx context.Context, zone string) {
 		}
 		return
 	}
+	// A hand-over taken since this turn read what it acts by is acted by at its
+	// own turn, asked as it was taken: one that names this provider a signer
+	// takes the zone from withheld straight to signing. A hand-over is taken
+	// before it is acted by under the zone's MP lock, so one this check misses
+	// comes after the release, as any hand-over after a release does.
+	releasing(zone)
+	mpMu := mpDataLock(mpzd.ZoneName)
+	mpMu.Lock()
+	now, handedNow := actingHeld.Load().get(zone)
+	if handedNow != handed || (handed && now.handover != held.handover) {
+		mpMu.Unlock()
+		return
+	}
 	mpzd.ReleaseWithheld()
+	mpMu.Unlock()
 	if withheld {
 		pushSignerInventory(conf, zone)
 	}
