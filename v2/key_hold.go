@@ -6,6 +6,7 @@ package tdnsmp
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -30,10 +31,13 @@ import (
 //     (ParentSyncAfterKeyPublication): it bootstraps the key once the key
 //     is served, and the sync signed with it waits for that; or
 //   - a key this agent made or took was not published; or
-//   - the parent does not trust the zone's key yet, by what tdns last
-//     recorded of it (keyPending, plan S14): every sync the leader asks for,
-//     the election's included, waits until the key is usable, and tdns asks
-//     for one when the parent trusts it (ParentSyncAfterKeyPublication).
+//   - the parent's last verdict on the zone's key, as tdns recorded it, is
+//     that it does not trust the key yet (keyPending, plan S14): every sync
+//     the leader asks for, the election's included, waits until the key is
+//     usable, and tdns asks for one when the parent trusts it
+//     (ParentSyncAfterKeyPublication). A key the parent never gave a verdict
+//     on waits only until a poll of it has run to its end in this lead
+//     (parentHoldsKey).
 //
 // The held sync is owed, and asked for when the hold ends: when the last
 // poll of the zone's key ends (keyPollEnded), when the key is retired to one,
@@ -51,7 +55,9 @@ type keyPollBook struct {
 	unpublished map[ZoneName]bool
 	// ended: the zone's key whose poll last ended in this process, and the
 	// lead it ran in (LeaderElectionManager.LeadStart). A renewal of that
-	// lead neither publishes the key again nor starts another poll.
+	// lead neither publishes the key again nor starts another poll, and a
+	// key the parent gave no verdict on holds no sync after it
+	// (parentHoldsKey).
 	ended map[ZoneName]keyPollEnd
 	// owed: zones held with no catch-up tracker to keep the owed mark.
 	owed map[ZoneName]bool
@@ -63,6 +69,10 @@ type keyPollBook struct {
 	lost map[ZoneName]uint16
 	// logged: when the hold was last logged for the zone (once an hour).
 	logged map[ZoneName]time.Time
+	// sent: where the zone's KEY last went with its publish instruction,
+	// and the lead it went in (sendZoneKey). A location the zone has now that
+	// it did not name sends the KEY again (sendKeyToNewLocations).
+	sent map[ZoneName]keySent
 	// retesting: a backstop pass runs (retestKeyHoldsInBackground).
 	retesting atomic.Bool
 	// goroutines: the polls and the backstop passes, each to its end, the
@@ -79,6 +89,12 @@ type keyPollEnd struct {
 	leadStart uint64
 }
 
+type keySent struct {
+	keyid     uint16
+	leadStart uint64
+	locations []string
+}
+
 func (b *keyPollBook) init() {
 	if b.running == nil {
 		b.running = map[ZoneName]int{}
@@ -88,6 +104,7 @@ func (b *keyPollBook) init() {
 		b.logged = map[ZoneName]time.Time{}
 		b.offered = map[ZoneName]time.Time{}
 		b.lost = map[ZoneName]uint16{}
+		b.sent = map[ZoneName]keySent{}
 	}
 }
 
@@ -163,6 +180,22 @@ func (b *keyPollBook) pollEnded(zone ZoneName, keyid uint16, leadStart uint64, f
 		b.ended[zone] = keyPollEnd{keyid: keyid, leadStart: leadStart}
 	}
 	return b.running[zone]
+}
+
+// sentTo notes where the zone's KEY keyid went, in the lead leadStart.
+func (b *keyPollBook) sentTo(zone ZoneName, keyid uint16, leadStart uint64, locations []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.init()
+	b.sent[canonZone(zone)] = keySent{keyid: keyid, leadStart: leadStart, locations: slices.Clone(locations)}
+}
+
+// lastSent is where the zone's KEY last went, and in which lead.
+func (b *keyPollBook) lastSent(zone ZoneName) keySent {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.init()
+	return b.sent[canonZone(zone)]
 }
 
 // lastOffer is when the zone's key was last offered to the parent.
@@ -286,25 +319,67 @@ func (conf *Config) keyHold(ctx context.Context, zone ZoneName) (uses bool, why 
 	if len(zk.active) != 1 {
 		return true, "signing key differs"
 	}
-	running, unpublished, _ := conf.InternalMp.keyPolls.state(zone)
+	running, unpublished, ended := conf.InternalMp.keyPolls.state(zone)
 	if running > 0 {
 		return true, "poll running"
 	}
 	if unpublished {
 		return true, "not published"
 	}
-	if zk.held.parentState != edns0.KeyStateTrusted {
+	if parentHoldsKey(zk.held.parentState, conf.keyPolledInLead(zone, zk.held.keyid, ended)) {
 		return true, "the parent has not taken the key"
 	}
 	return true, ""
 }
 
+// parentHoldsKey: tdns's record of the zone's key (parent_state) holds the
+// leader's sync. The parent trusts the key: no hold. Any verdict the parent
+// gave that is not trusted holds, as it did.
+//
+// The parent never gave a verdict on the key (0, or tdns's uninitialised
+// sentinel): it holds until a poll of the key has run to its end in this
+// lead (polledInLead), and then no longer. A parent that does not answer
+// KeyState never gives a verdict, so after that poll the next sync tests the
+// key (tdns-mp #404, ruling (a)): tdns records the key trusted when the
+// parent answers that UPDATE with NOERROR, and a BADKEY starts tdns's
+// re-bootstrap, which waits for the key to be served. The cost: that one
+// sync may be signed with a key the parent has not verified yet, and only
+// where the parent never says.
+//
+// Until that poll ends, a key with no verdict is one the parent has not been
+// asked about yet: a key just made or taken up and published before its poll
+// starts, or one whose poll a freeze held. A sync signed with it gets BADKEY
+// (keys-k3).
+func parentHoldsKey(state uint8, polledInLead bool) bool {
+	switch state {
+	case edns0.KeyStateTrusted:
+		return false
+	case 0, edns0.KeyStateUninitialized:
+		return !polledInLead
+	}
+	return true
+}
+
+// keyPolledInLead: a poll of the zone's key keyid ran to its end in this
+// process, in the lead this agent holds now (keyPolls' ended, as pollEnded
+// notes it). A new lead, a restart, a poll the freeze held and a poll of
+// another key do not count.
+func (conf *Config) keyPolledInLead(zone ZoneName, keyid uint16, ended keyPollEnd) bool {
+	lem := conf.InternalMp.LeaderElectionManager
+	if lem == nil {
+		return false
+	}
+	leadStart := lem.LeadStart(zone)
+	return leadStart != 0 && ended.leadStart == leadStart && ended.keyid == keyid
+}
+
 // keyPending: this agent leads the zone, the zone uses a key, and this agent
-// holds no key, or holds one the parent does not trust yet by what tdns last
-// recorded of it (parent_state). While it is true every sync the leader asks
-// for is held (keyHold), and the key rounds offer the key again
-// (reofferZoneKey). Nothing is pending for a parent known to take no UPDATE
-// (plan S14).
+// holds no key, or holds one whose last verdict from the parent, as tdns
+// recorded it (parent_state), holds the sync (parentHoldsKey). While it is
+// true every sync the leader asks for is held (keyHold), and the key rounds
+// offer the key again (reofferZoneKey). Nothing is pending for a parent known
+// to take no UPDATE (plan S14), or for a key the parent never gave a verdict
+// on once a poll of it has run to its end in this lead (#404).
 func (conf *Config) keyPending(ctx context.Context, zone ZoneName) bool {
 	if lem := conf.InternalMp.LeaderElectionManager; lem == nil || !lem.IsLeader(zone) {
 		return false
@@ -317,7 +392,11 @@ func (conf *Config) keyPending(ctx context.Context, zone ZoneName) bool {
 		return true
 	}
 	zk, err := readZoneKey(kdb, zone)
-	return err != nil || zk.held == nil || zk.held.parentState != edns0.KeyStateTrusted
+	if err != nil || zk.held == nil {
+		return true
+	}
+	_, _, ended := conf.InternalMp.keyPolls.state(zone)
+	return parentHoldsKey(zk.held.parentState, conf.keyPolledInLead(zone, zk.held.keyid, ended))
 }
 
 // rolloverInZone: a key rollover is under way in the zone, at this provider

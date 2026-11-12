@@ -114,17 +114,11 @@ func (conf *Config) SetupAgentAutoZone(ctx context.Context, zonename string) (*t
 
 	// Renewal. tdns registers a zone for periodic re-signing when its config
 	// carries a signing option; this zone has none (it is built here), so it
-	// is put on the resigner's watchlist explicitly. The engine that reads
-	// this queue is started in StartMPAgent and in StartMPAuditor, the two
-	// starts that set an identity up; without it the zone was signed once and
-	// never renewed.
-	if q := conf.Config.Internal.ResignQ; q != nil {
-		select {
-		case q <- tdns.ResignRequest{Zd: zd, Reason: tdns.ResignPeriodic}:
-		case <-time.After(5 * time.Second):
-			return nil, "", fmt.Errorf("SetupAgentAutoZone: timeout registering zone %q for periodic re-signing", zd.ZoneName)
-		}
-	}
+	// is put on the resigner's watchlist explicitly. The engine that renews it
+	// is started in StartMPAgent and in StartMPAuditor, the two starts that
+	// set an identity up; without it the zone was signed once and never
+	// renewed.
+	zd.KeepRenewed()
 
 	return zd, txid, nil
 }

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -164,12 +165,37 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 					resp.ErrorMsg = fmt.Sprintf("RR type %s is not allowed", dns.TypeToString[rr.Header().Rrtype])
 					return
 				}
+				// A delete stays: it is how an operator leaves one KEY.
+				if isAdd && rr.Header().Rrtype == dns.TypeKEY {
+					resp.Error = true
+					resp.ErrorMsg = addedKEYRefusal(amp.Zone)
+					return
+				}
 				if isAdd {
 					rr.Header().Class = dns.ClassINET
 				} else {
 					rr.Header().Class = dns.ClassNONE
 				}
 				parsedRRs = append(parsedRRs, rr)
+			}
+
+			// A KEY delete at the leader does not take away the KEY it
+			// publishes: the operator's delete of that KEY is refused, and
+			// the replace below keeps it (#340).
+			var publishedKEY *dns.KEY
+			if !isAdd && slices.ContainsFunc(parsedRRs, func(rr dns.RR) bool { return rr.Header().Rrtype == dns.TypeKEY }) {
+				key, err := conf.keyLeaderPublishes(amp.Zone)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("zone %s: the zone's SIG(0) keys could not be read: %v", amp.Zone, err)
+					return
+				}
+				if key != nil && slices.ContainsFunc(parsedRRs, func(rr dns.RR) bool { return isThisKey(rr, key) }) {
+					resp.Error = true
+					resp.ErrorMsg = publishedKEYRefusal(amp.Zone)
+					return
+				}
+				publishedKEY = key
 			}
 
 			zu := &ZoneUpdate{
@@ -274,6 +300,9 @@ func (conf *Config) APIagent(ctx context.Context, refreshZoneCh chan<- tdns.Zone
 						}
 						newSet = filtered
 					}
+				}
+				if rrtype == dns.TypeKEY && publishedKEY != nil && !slices.ContainsFunc(newSet, func(rr dns.RR) bool { return isThisKey(rr, publishedKEY) }) {
+					newSet = append(newSet, publishedKEY)
 				}
 				records := make([]string, 0, len(newSet))
 				for _, rr := range newSet {

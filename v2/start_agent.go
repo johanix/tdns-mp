@@ -144,9 +144,8 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker", func() error {
 		return tdns.KeyStateWorker(ctx, conf.Config)
 	})
-	// The reader of ResignQ. SetupAgentAutoZone registers the agent's own
-	// zone for periodic re-signing on that queue; without an engine reading
-	// it the registration sat in the buffer and the zone was never renewed.
+	// The resigner. SetupAgentAutoZone puts the agent's own zone on its
+	// watchlist; without the engine running, the zone was never renewed.
 	tdns.StartEngineNoError(&tdns.Globals.App, "ResignerEngine", func() {
 		tdns.ResignerEngine(ctx, conf.Config.Internal.ResignQ)
 	})
@@ -405,6 +404,16 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 		}
 		conf.requestDelegationSync(ctx, string(zone), "the zone joined a provider group this agent leads")
 		return nil
+	})
+	// HSYNC3 added to a zone this agent leads, which says pubkey, adds the
+	// at-ns location: the KEY goes there too, with no new lead. While the
+	// zone is frozen the take-up when the transition is done sends it.
+	lem.SetOnKeyLocations(func(zone ZoneName) error {
+		err := conf.sendKeyToNewLocations(ctx, zone)
+		if errors.Is(err, errHeldDuringTransition) {
+			return nil
+		}
+		return err
 	})
 	return lem
 }
