@@ -54,6 +54,13 @@ func trustKey(kdb *tdns.KeyDB, zone string, keyid uint16) {
 	tdns.UpdateParentState(kdb, zone, keyid, edns0.KeyStateTrusted)
 }
 
+// parentDoesNotKnowKey records that the parent answered it does not know the
+// zone's key keyid, as tdns's poll does: a verdict that holds the leader's
+// sync (parentHoldsKey), whether or not a poll of the key has ended.
+func parentDoesNotKnowKey(kdb *tdns.KeyDB, zone string, keyid uint16) {
+	tdns.UpdateParentState(kdb, zone, keyid, edns0.KeyStateUnknown)
+}
+
 // trustActiveKeys is trustKey for every active key of the zone: a rig whose
 // leader holds a key the parent trusts already, and syncs at once.
 func trustActiveKeys(t *testing.T, kdb *tdns.KeyDB, zone string) {
@@ -121,7 +128,8 @@ func TestTheKeyOffersAreHeldDuringATransition(t *testing.T) {
 	r := newNotifyRig(t, "offers.held.example.", "UPDATE")
 	var polled atomic.Int32
 	r.conf.InternalMp.keyPoll = func(context.Context, ZoneName, string, uint16, uint8) { polled.Add(1) }
-	testSig0Key(t, r.mpzd.KeyDB, r.mpzd.ZoneName) // not trusted by the parent yet
+	k := testSig0Key(t, r.mpzd.KeyDB, r.mpzd.ZoneName)
+	parentDoesNotKnowKey(r.mpzd.KeyDB, r.mpzd.ZoneName, k.keyid) // not trusted by the parent yet
 	freezeServed(t, r.conf, r.mpzd)
 	z := ZoneName(r.mpzd.ZoneName)
 	if held := r.conf.ParentSyncAfterKeyPublication(r.ctx, z, r.mpzd.ZoneName, 4711, dns.ED25519); !held || polled.Load() != 0 {
@@ -141,6 +149,7 @@ func TestTheKeyOffersPassWhileARolloverWaitsOnKeyPending(t *testing.T) {
 	var polled atomic.Int32
 	r.conf.InternalMp.keyPoll = func(context.Context, ZoneName, string, uint16, uint8) { polled.Add(1) }
 	k := testSig0Key(t, r.mpzd.KeyDB, r.mpzd.ZoneName)
+	parentDoesNotKnowKey(r.mpzd.KeyDB, r.mpzd.ZoneName, k.keyid)
 	freezeServed(t, r.conf, r.mpzd)
 	z := ZoneName(r.mpzd.ZoneName)
 	r.mpzd.SetLastKeyInventory(&KeyInventorySnapshot{Zone: r.mpzd.ZoneName, Rollover: true, Received: time.Now()})
@@ -196,6 +205,7 @@ func TestAKeyThatTheParentHasNotTakenIsOfferedAgain(t *testing.T) {
 	r := newKeyRoundRig(t, "offered.again.example.", "UPDATE")
 	r.conf.InternalMp.keyPoll = func(_ context.Context, _ ZoneName, _ string, keyid uint16, _ uint8) { r.polls <- keyid }
 	k := testSig0Key(t, r.mpzd.KeyDB, string(r.zone))
+	parentDoesNotKnowKey(r.mpzd.KeyDB, string(r.zone), k.keyid)
 	r.publish(t, k)
 	r.caughtUp()
 	if !r.conf.wantsZoneKey(r.ctx, r.zone) {
@@ -599,6 +609,7 @@ func TestAnOfferTheFreezeHoldsIsNotCountedAsMade(t *testing.T) {
 	r := newKeyRoundRig(t, "offer.held.example.", "UPDATE")
 	r.conf.InternalMp.keyPoll = func(_ context.Context, _ ZoneName, _ string, keyid uint16, _ uint8) { r.polls <- keyid }
 	k := testSig0Key(t, r.mpzd.KeyDB, string(r.zone))
+	parentDoesNotKnowKey(r.mpzd.KeyDB, string(r.zone), k.keyid)
 	r.publish(t, k)
 	r.caughtUp()
 	freezeServed(t, r.conf, r.mpzd)
