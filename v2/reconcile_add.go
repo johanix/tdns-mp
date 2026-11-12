@@ -375,22 +375,36 @@ var parentDSLook = func(conf *Config, zone string) (parentDSSeen, error) {
 }
 
 // askParentDS asks one parent server for the zone's DS RRset. NODATA and NXDOMAIN
-// are answers that hold none; any other rcode is no answer. tdns.AuthQuery makes
-// an error of NXDOMAIN.
+// with the parent's SOA are answers that hold none; a referral, a reply with no
+// SOA and any other rcode are no answer (parentDSIn). tdns.AuthQuery makes an
+// error of NXDOMAIN.
 func askParentDS(zone, server string) ([]dns.RR, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(zone, dns.TypeDS)
 	m.SetEdns0(dns.DefaultMsgSize, false)
 	res, err := dns.Exchange(m, server)
-	switch {
-	case err != nil:
+	if err != nil {
 		return nil, err
-	case res.Rcode == dns.RcodeNameError:
-		return nil, nil
-	case res.Rcode != dns.RcodeSuccess:
-		return nil, fmt.Errorf("%s answers %s", server, dns.RcodeToString[res.Rcode])
 	}
-	return res.Answer, nil
+	return parentDSIn(res, m, server)
+}
+
+// parentDSIn is the zone's DS records in a parent server's reply r to query, by
+// readServed's rules: only DS records the zone owns count, and a referral or an
+// NXDOMAIN with no SOA is no answer, not "no DS". So is a NOERROR with no DS and
+// no SOA: the parent's SOA comes with each of its authoritative replies, and a
+// server that does not serve the parent zone says nothing of the zone's DS.
+func parentDSIn(r, query *dns.Msg, server string) ([]dns.RR, error) {
+	rrset, _, err := readServed(r, query, dns.TypeDS)
+	switch {
+	case err == nil:
+		return rrset.RRs, nil
+	case !errors.Is(err, errServesNoRRset):
+		return nil, fmt.Errorf("%s: %w", server, err)
+	case !enclosingSOA(r, query.Question[0].Name):
+		return nil, fmt.Errorf("%s: no DS and no SOA in its reply (%s)", server, dns.RcodeToString[r.Rcode])
+	}
+	return nil, nil
 }
 
 // dsAtEveryServer is parentDSSeen from asking each of servers. A validator may

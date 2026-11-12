@@ -167,6 +167,15 @@ func exchangeServing(ctx context.Context, m *dns.Msg, addr string) (*dns.Msg, er
 	return r, nil
 }
 
+// enclosingSOA: r's authority section holds the SOA of a zone at or above
+// name, as an authoritative NODATA or NXDOMAIN does and a referral does not.
+func enclosingSOA(r *dns.Msg, name string) bool {
+	return slices.ContainsFunc(r.Ns, func(rr dns.RR) bool {
+		_, ok := rr.(*dns.SOA)
+		return ok && dns.IsSubDomain(rr.Header().Name, name)
+	})
+}
+
 // readServed reads a whole reply to query. It has answered when it says what the
 // server does with the name: the RRset, errServesNoRRset when it serves the name
 // without one, or a referral, which is an error of its own as the server does not
@@ -179,10 +188,7 @@ func readServed(r, query *dns.Msg, qtype uint16) (rrset *core.RRset, answered bo
 		return nil, false, errors.New("a reply to another question")
 	}
 	noRRset := fmt.Errorf("no %s in the answer (%s): %w", dns.TypeToString[qtype], dns.RcodeToString[r.Rcode], errServesNoRRset)
-	soa := slices.ContainsFunc(r.Ns, func(rr dns.RR) bool {
-		_, ok := rr.(*dns.SOA)
-		return ok && dns.IsSubDomain(rr.Header().Name, q.Name)
-	})
+	soa := enclosingSOA(r, q.Name)
 	switch r.Rcode {
 	case dns.RcodeSuccess:
 		served := &core.RRset{}

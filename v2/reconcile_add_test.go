@@ -2900,3 +2900,54 @@ func TestTheCachesTimeWaitsForItsOwnLookAtTheParent(t *testing.T) {
 		t.Errorf("the DS TTL passed, it waits for %q", got)
 	}
 }
+
+// A parent server's reply is read by readServed's rules: a referral or a reply
+// with no SOA says nothing of the zone's DS, and is no answer, not "no DS"; a DS
+// another name owns is not the zone's (CodeRabbit on #374).
+func TestAParentReferralIsNoAnswerForTheDS(t *testing.T) {
+	const zone, parent = "child.parent.example.", "parent.example."
+	rr := func(s string) dns.RR {
+		r, err := dns.NewRR(s)
+		if err != nil {
+			t.Fatalf("NewRR %q: %v", s, err)
+		}
+		return r
+	}
+	ds := rr(zone + " 3600 IN DS 12345 15 2 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	otherDS := rr("other." + parent + " 3600 IN DS 54321 15 2 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	soa := rr(parent + " 3600 IN SOA ns1." + parent + " hostmaster." + parent + " 1 7200 1800 604800 300")
+	ns := rr(zone + " 3600 IN NS ns1." + zone)
+	query := new(dns.Msg)
+	query.SetQuestion(zone, dns.TypeDS)
+	reply := func(rcode int, answer, authority []dns.RR) *dns.Msg {
+		r := new(dns.Msg)
+		r.SetRcode(query, rcode)
+		r.Answer, r.Ns = answer, authority
+		return r
+	}
+	for _, c := range []struct {
+		name    string
+		r       *dns.Msg
+		records int
+		noReply bool
+	}{
+		{"the DS", reply(dns.RcodeSuccess, []dns.RR{ds, otherDS}, nil), 1, false},
+		{"NODATA with the parent's SOA", reply(dns.RcodeSuccess, nil, []dns.RR{soa}), 0, false},
+		{"NXDOMAIN with the parent's SOA", reply(dns.RcodeNameError, nil, []dns.RR{soa}), 0, false},
+		{"a referral", reply(dns.RcodeSuccess, nil, []dns.RR{ns}), 0, true},
+		{"NOERROR with no SOA", reply(dns.RcodeSuccess, nil, nil), 0, true},
+		{"NXDOMAIN with no SOA", reply(dns.RcodeNameError, nil, nil), 0, true},
+		{"another name's DS alone", reply(dns.RcodeSuccess, []dns.RR{otherDS}, nil), 0, true},
+		{"SERVFAIL", reply(dns.RcodeServerFailure, nil, nil), 0, true},
+	} {
+		got, err := parentDSIn(c.r, query, "192.0.2.53:53")
+		if (err != nil) != c.noReply || len(got) != c.records {
+			t.Errorf("%s: %d records, err %v; want %d records, no answer %v", c.name, len(got), err, c.records, c.noReply)
+		}
+	}
+	// every parent server refers: nothing is known, the zone is not unsigned
+	refer := func(string) ([]dns.RR, error) { return parentDSIn(reply(dns.RcodeSuccess, nil, []dns.RR{ns}), query, "x") }
+	if seen, err := dsAtEveryServer([]string{"a", "b"}, refer); err == nil || seen.unsigned {
+		t.Errorf("every parent server refers: seen %+v, err %v; want no answer", seen, err)
+	}
+}
