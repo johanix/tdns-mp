@@ -1393,16 +1393,18 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 		// step's (S12, S13). A signer that waits for its agent's hand-over
 		// signs by the signer sets it last acted by, unchanged by its copy
 		// (rule 5), and keeps its data whole when the copy drops this
-		// provider. At its first load here it has acted by none: what the
-		// config parse leaves is no data (computed), and the first load
-		// takes its copy's, so that inline-signing is on before the first
-		// publish (main_init.go).
+		// provider; those sets are kept on disk, so a restart keeps them
+		// (signer_acted.go, until P5). At its first load here it has acted by
+		// none: what the config parse leaves is no data (computed), and the
+		// first load takes its copy's, so that inline-signing is on before
+		// the first publish (main_init.go).
 		r := newMpzd.roles()
 		_, handed := actingHeld.Load().roles(mpzd.ZoneName)
-		kept := mpzd.MP.MPdata
-		waits := !handed && tdns.Globals.App.Type == AppTypeMPSigner && signerWaits(mpzd.ZoneName, newApex) && kept.computed()
+		unhanded := !handed && tdns.Globals.App.Type == AppTypeMPSigner && signerWaits(mpzd.ZoneName, newApex)
+		last, acted := signerLastActed(mpzd.ZoneName, mpzd.MP.MPdata)
+		waits := unhanded && acted
 		if waits {
-			r.KeySigners, r.DSSigners, r.KeyConfirmers, r.Signing = kept.Sets.KeySigners, kept.Sets.DSSigners, kept.Sets.KeyConfirmers, kept.Sets.Signing
+			r.KeySigners, r.DSSigners, r.KeyConfirmers, r.Signing = last.KeySigners, last.DSSigners, last.KeyConfirmers, last.Signing
 		}
 		newMpzd.populateMPdata(mp, r)
 		if !waits || newMpzd.MP.MPdata != nil {
@@ -1411,6 +1413,11 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			mpzd.MP.MPdata = newMpzd.MP.MPdata
 			mpzd.MPOptions = newMpzd.MPOptions
 			mpzd.Unlock()
+		}
+		if unhanded {
+			if err := signerActed.Load().keep(mpzd.ZoneName, r); err != nil {
+				lg.Error("the sets the signer acts by are not kept: a restart takes its copy's", "zone", mpzd.ZoneName, "err", err)
+			}
 		}
 	}
 
