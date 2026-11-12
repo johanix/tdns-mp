@@ -3012,3 +3012,50 @@ func TestALookWithNoNameserverAddressIsBlind(t *testing.T) {
 		t.Errorf("one nameserver has an address: the look saw %+v, err %v; want one silent, one with the keys", seen, err)
 	}
 }
+
+// A parent server whose DS reply over UDP is truncated is asked again over TCP:
+// the dns fork's Exchange does not, and the truncated reply holds no DS
+// (CodeRabbit on #374).
+func TestATruncatedParentDSReplyIsAskedAgainOverTCP(t *testing.T) {
+	const zone = "child.parent.example."
+	ds, err := dns.NewRR(zone + " 3600 IN DS 12345 15 2 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	pc, err := net.ListenPacket("udp", net.JoinHostPort("127.0.0.1", port))
+	if err != nil {
+		ln.Close()
+		t.Fatalf("listen udp on the tcp port: %v", err)
+	}
+	serve := func(truncate bool) dns.HandlerFunc {
+		return func(w dns.ResponseWriter, q *dns.Msg) {
+			r := new(dns.Msg)
+			r.SetReply(q)
+			r.Authoritative = true
+			if truncate {
+				r.Truncated = true
+			} else {
+				r.Answer = []dns.RR{ds}
+			}
+			_ = w.WriteMsg(r)
+		}
+	}
+	var started sync.WaitGroup
+	started.Add(2)
+	tcpSrv := &dns.Server{Listener: ln, Handler: serve(false), NotifyStartedFunc: started.Done}
+	udpSrv := &dns.Server{PacketConn: pc, Handler: serve(true), NotifyStartedFunc: started.Done}
+	go func() { _ = tcpSrv.ActivateAndServe() }()
+	go func() { _ = udpSrv.ActivateAndServe() }()
+	started.Wait()
+	t.Cleanup(func() { _ = tcpSrv.Shutdown(); _ = udpSrv.Shutdown() })
+
+	got, err := askParentDS(zone, ln.Addr().String())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("the DS over TCP: %v, err %v; want the one DS", got, err)
+	}
+}

@@ -39,6 +39,7 @@
 package tdnsmp
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -382,12 +383,20 @@ func askParentDS(zone, server string) ([]dns.RR, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(zone, dns.TypeDS)
 	m.SetEdns0(dns.DefaultMsgSize, false)
-	res, err := dns.Exchange(m, server)
+	ctx, cancel := context.WithTimeout(context.Background(), parentDSAskBound)
+	defer cancel()
+	// over TCP when the reply is truncated: the dns fork's Exchange does not,
+	// and what a truncated reply leaves out says nothing of the DS
+	res, err := exchangeServing(ctx, m, server)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", server, err)
 	}
 	return parentDSIn(res, m, server)
 }
+
+// parentDSAskBound bounds one parent server's DS query, a retry over TCP
+// included.
+const parentDSAskBound = 2 * servingAskTimeout
 
 // parentDSIn is the zone's DS records in a parent server's reply r to query, by
 // readServed's rules: only DS records the zone owns count, and a referral or an
