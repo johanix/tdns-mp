@@ -46,6 +46,8 @@ var (
 	// releasing is called as a turn is about to release the zone: a test hands
 	// a hand-over there
 	releasing = func(zone string) {}
+	// roleTurn is a zone's turn (signerRoleTurn); a test stands in for it
+	roleTurn = (*Config).signerRoleTurn
 )
 
 // signerRoleBook is the signer's turns of its zones' roles: the zones asked, the
@@ -55,6 +57,8 @@ type signerRoleBook struct {
 	pending     map[string]bool
 	wake        chan struct{}
 	said        map[string]string // by zone, folded: the failure last logged
+	running     map[string]bool   // by zone, folded: its turn runs now
+	again       map[string]bool   // by zone, folded: asked while its turn ran
 	provisional map[string]*tdns.ZoneData // by zone, folded: its agent has no copy of this ZoneData
 }
 
@@ -83,8 +87,8 @@ func (conf *Config) askSignerRole(zone string) {
 	}
 }
 
-// runSignerRoles takes the zones' turns, those asked at once and every zone on
-// a tick, until ctx ends.
+// runSignerRoles has the zones' turns taken, those asked at once and every zone
+// on a tick, until ctx ends.
 func (conf *Config) runSignerRoles(ctx context.Context) {
 	b := &conf.InternalMp.signerRoles
 	b.mu.Lock()
@@ -102,14 +106,51 @@ func (conf *Config) runSignerRoles(ctx context.Context) {
 			b.pending = nil
 			b.mu.Unlock()
 			for zone := range zones {
-				conf.signerRoleTurn(ctx, zone)
+				conf.takeSignerRoleTurn(ctx, zone)
 			}
 		case <-ticker.C:
 			for _, zone := range conf.mpZoneNames() {
-				conf.signerRoleTurn(ctx, zone)
+				conf.takeSignerRoleTurn(ctx, zone)
 			}
 		}
 	}
+}
+
+// takeSignerRoleTurn takes the zone's turn on a goroutine of its own: a start
+// signs the whole zone, and holds up no other zone's turn. A zone's turns are
+// taken one at a time; one asked while another runs is taken once that ends.
+func (conf *Config) takeSignerRoleTurn(ctx context.Context, zone string) {
+	b := &conf.InternalMp.signerRoles
+	key := canonicalName(zone)
+	b.mu.Lock()
+	if b.running[key] {
+		if b.again == nil {
+			b.again = map[string]bool{}
+		}
+		b.again[key] = true
+		b.mu.Unlock()
+		return
+	}
+	if b.running == nil {
+		b.running = map[string]bool{}
+	}
+	b.running[key] = true
+	b.mu.Unlock()
+	go func() {
+		for {
+			roleTurn(conf, ctx, zone)
+			b.mu.Lock()
+			again := b.again[key] && ctx.Err() == nil
+			delete(b.again, key)
+			if !again {
+				delete(b.running, key)
+			}
+			b.mu.Unlock()
+			if !again {
+				return
+			}
+		}
+	}()
 }
 
 // signerRoleTurn brings the zone to the role this signer acts by. Nothing for a

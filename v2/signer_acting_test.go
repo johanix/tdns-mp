@@ -1323,3 +1323,51 @@ func TestASignerWhoseCopyDropsItSignsByTheHandedSerial(t *testing.T) {
 		t.Fatalf("after a restart: %v", err)
 	}
 }
+
+// One zone's turn, a start that signs the whole zone, holds up no other zone's.
+// A zone's turns are one at a time: one asked while another runs is taken once
+// that ends, once however often it was asked (CodeRabbit on #374).
+func TestOneZonesRoleTurnHoldsUpNoOther(t *testing.T) {
+	conf := &Config{}
+	release := make(chan struct{})
+	turns := make(chan string, 8)
+	prev := roleTurn
+	roleTurn = func(_ *Config, _ context.Context, zone string) {
+		turns <- zone
+		if zone == "slow.example." {
+			<-release
+		}
+	}
+	t.Cleanup(func() { roleTurn = prev })
+	next := func(want string) {
+		t.Helper()
+		select {
+		case got := <-turns:
+			if got != want {
+				t.Fatalf("the turn taken is %s's, want %s's", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no turn for %s", want)
+		}
+	}
+	ctx := context.Background()
+	conf.takeSignerRoleTurn(ctx, "slow.example.")
+	next("slow.example.")
+	conf.takeSignerRoleTurn(ctx, "quick.example.")
+	next("quick.example.")
+	conf.takeSignerRoleTurn(ctx, "slow.example.")
+	conf.takeSignerRoleTurn(ctx, "slow.example.")
+	select {
+	case got := <-turns:
+		t.Fatalf("a turn for %s while slow.example.'s runs", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+	release <- struct{}{}
+	next("slow.example.")
+	release <- struct{}{}
+	select {
+	case got := <-turns:
+		t.Fatalf("another turn for %s: asked twice while one ran, it is taken once", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
