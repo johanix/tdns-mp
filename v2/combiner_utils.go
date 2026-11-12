@@ -315,6 +315,7 @@ type combineInput struct {
 	deferred        []ownerRRtype // cleanups put off until the upstream's apex is known
 	signatureOwner  string
 	signature       dns.RR // the signature TXT to serve, nil when the option is off
+	dropSignature   bool   // a key holder's combiner serves none: one served before goes
 }
 
 func (mpzd *MPZoneData) combineInput(conf *MultiProviderConf) *combineInput {
@@ -348,16 +349,20 @@ func (mpzd *MPZoneData) combineInput(conf *MultiProviderConf) *combineInput {
 		}
 	}
 	in.cleanups = mpzd.MP.takeCleanups()
-	if conf != nil && conf.CombinerOptions[CombinerOptAddSignature] && conf.Signature != "" && !mpzd.combinerHoldsKeysOnly() {
-		sig := strings.ReplaceAll(conf.Signature, "{identity}", conf.Identity)
-		sig = strings.ReplaceAll(sig, "{zone}", mpzd.ZoneName)
+	if conf != nil && conf.CombinerOptions[CombinerOptAddSignature] && conf.Signature != "" {
 		// At hsync-signature.{zone}, to avoid conflicts with apex TXT records.
 		in.signatureOwner = "hsync-signature." + mpzd.ZoneName
-		rr, err := dns.NewRR(fmt.Sprintf("%s 300 IN TXT %q", in.signatureOwner, sig))
-		if err != nil {
-			lgCombiner.Error("combiner signature TXT does not parse", "zone", mpzd.ZoneName, "err", err)
+		if mpzd.combinerHoldsKeysOnly() {
+			in.dropSignature = true
 		} else {
-			in.signature = rr
+			sig := strings.ReplaceAll(conf.Signature, "{identity}", conf.Identity)
+			sig = strings.ReplaceAll(sig, "{zone}", mpzd.ZoneName)
+			rr, err := dns.NewRR(fmt.Sprintf("%s 300 IN TXT %q", in.signatureOwner, sig))
+			if err != nil {
+				lgCombiner.Error("combiner signature TXT does not parse", "zone", mpzd.ZoneName, "err", err)
+			} else {
+				in.signature = rr
+			}
 		}
 	}
 	return in
@@ -486,8 +491,19 @@ func cleanupInto(s tdns.Stager, in *combineInput) bool {
 	return changed
 }
 
-// injectSignatureInto serves the combiner's signature TXT, once.
+// injectSignatureInto serves the combiner's signature TXT, once; for a key
+// holder's combiner it takes out one served while its provider signed.
 func injectSignatureInto(s tdns.Stager, in *combineInput) bool {
+	if in.dropSignature {
+		if s.RRset(in.signatureOwner, dns.TypeTXT) == nil {
+			return false
+		}
+		s.Delete(in.signatureOwner, dns.TypeTXT)
+		if len(s.Types(in.signatureOwner)) == 0 {
+			s.DeleteOwner(in.signatureOwner)
+		}
+		return true
+	}
 	if in.signature == nil {
 		return false
 	}

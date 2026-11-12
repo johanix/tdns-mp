@@ -268,6 +268,14 @@ func TestAKeyHoldingCombinerServesNoSignatureTXT(t *testing.T) {
 	if got := servedNames(t, mpzd.ZoneData, "hsync-signature."+zone, dns.TypeTXT); len(got) != 1 {
 		t.Fatalf("the signer's combiner serves the signature TXT %v, want it once", got)
 	}
+	// a hand-over makes it a key holder again: the TXT it served goes
+	mpzd.MP.MPdata = &MPdata{ZoneSigned: true, WeHoldKeys: true}
+	if changed, _, err := mpzd.combineAndPublish(conf); err != nil || !changed {
+		t.Fatalf("combineAndPublish as a key holder again: changed=%v err=%v", changed, err)
+	}
+	if mpzd.ZoneData.NameExists("hsync-signature." + zone) {
+		t.Fatal("the signature TXT served while it signed is still served now it holds keys only")
+	}
 }
 
 // The pre-refresh combine runs the same code on the incoming zone, which has
