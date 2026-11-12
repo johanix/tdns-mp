@@ -52,7 +52,7 @@ type signerRoleBook struct {
 	pending     map[string]bool
 	wake        chan struct{}
 	said        map[string]string // by zone, folded: the failure last logged
-	provisional map[string]bool   // by zone, folded: its agent has no copy
+	provisional map[string]*tdns.ZoneData // by zone, folded: its agent has no copy of this ZoneData
 }
 
 // wakeLocked is the book's wake channel, made on first use.
@@ -240,11 +240,24 @@ func (conf *Config) noRoleFailure(zone string) {
 	b.mu.Unlock()
 }
 
+// agentHasNoCopy: the zone's agent said it has no copy of the zone as it is
+// loaded now. Its word was of the ZoneData it was given for; a zone removed and
+// added again, or replaced, is another, whose copy may be one its agent refused,
+// and its agent says so again.
 func (conf *Config) agentHasNoCopy(zone string) bool {
 	b := &conf.InternalMp.signerRoles
+	key := canonicalName(zone)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.provisional[canonicalName(zone)]
+	given := b.provisional[key]
+	if given == nil {
+		return false
+	}
+	if now, ok := tdns.Zones.Get(zone); !ok || now != given {
+		delete(b.provisional, key)
+		return false
+	}
+	return true
 }
 
 // signerAgentHasNoCopy is the agent's word that it has no copy of the zone this
@@ -265,9 +278,9 @@ func (conf *Config) signerAgentHasNoCopy(mpzd *MPZoneData) {
 	b := &conf.InternalMp.signerRoles
 	b.mu.Lock()
 	if b.provisional == nil {
-		b.provisional = map[string]bool{}
+		b.provisional = map[string]*tdns.ZoneData{}
 	}
-	b.provisional[canonicalName(zone)] = true
+	b.provisional[canonicalName(zone)] = mpzd.ZoneData
 	b.mu.Unlock()
 	mpzd.actBySets(conf, mpzd.roles(), conf.signerConfirmers(zone))
 	conf.askSignerRole(zone)

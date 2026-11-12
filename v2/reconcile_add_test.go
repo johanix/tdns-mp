@@ -1315,6 +1315,18 @@ func TestAnAgentWithNoCopySaysSoAndItsSignerActsByItsOwnCopy(t *testing.T) {
 	if rr.mpzd.Withheld() || !rr.mpzd.Ready || len(rr.started) != 0 {
 		t.Errorf("no role by its copy: withheld %v, Ready %v, started %v", rr.mpzd.Withheld(), rr.mpzd.Ready, rr.started)
 	}
+
+	// its agent's word was of the zone as loaded then: replaced, the zone is
+	// another, whose copy may be one its agent refused (CodeRabbit on #374)
+	if !rr.conf.agentHasNoCopy(relay) {
+		t.Fatal("its agent's word is not kept")
+	}
+	loaded, _ := tdns.Zones.Get(relay)
+	tdns.Zones.Set(relay, &tdns.ZoneData{ZoneName: relay})
+	t.Cleanup(func() { tdns.Zones.Set(relay, loaded) })
+	if rr.conf.agentHasNoCopy(relay) {
+		t.Error("its agent's word of the zone it replaced still stands")
+	}
 }
 
 // A withheld zone's inventory says so, and a provider whose keys are published is
