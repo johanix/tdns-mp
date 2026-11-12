@@ -90,9 +90,9 @@ func wantApexSigned(t *testing.T, zd *tdns.ZoneData) {
 	}
 }
 
-// The auditor's start runs the resigner: the registration its identity set-up
-// put on the queue is read, and the engine that read it signs this zone when
-// asked to.
+// The auditor's start runs the resigner, and the identity zone is one it
+// signs. The identity set-up puts the zone on the resigner's watchlist
+// (tdns's KeepRenewed), which only that engine reads.
 //
 // The periodic pass that renews ageing signatures cannot be had sooner than
 // the engine's shortest interval, a minute, so it is not waited for here. A
@@ -102,18 +102,8 @@ func TestTheAuditorsStartRunsTheResigner(t *testing.T) {
 	conf, zd := startTestAuditor(t)
 	q := conf.Config.Internal.ResignQ
 
-	// The set-up's registration has a reader.
-	deadline := time.Now().Add(5 * time.Second)
-	for len(q) > 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if n := len(q); n != 0 {
-		t.Fatalf("%d request(s) left on the resigner's queue after the auditor's start: nothing reads it, and the identity zone's signatures are never renewed", n)
-	}
-
-	// And the reader is the resigner, with this zone to sign: asked to
-	// replace the zone's signatures, it publishes the zone anew, signed.
-	// Nothing else publishes the zone here: its set-up is done.
+	// Asked to replace the zone's signatures, the resigner publishes the zone
+	// anew, signed. Nothing else publishes the zone here: its set-up is done.
 	wantApexSigned(t, zd)
 	atStart := servedSerial(t, zd, auditorTestZone)
 	select {
@@ -121,7 +111,7 @@ func TestTheAuditorsStartRunsTheResigner(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the resigner's queue does not take a request")
 	}
-	deadline = time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for servedSerial(t, zd, auditorTestZone) == atStart {
 		if time.Now().After(deadline) {
 			t.Fatalf("the identity zone is still at serial %d: the resigner did not sign it", atStart)

@@ -98,11 +98,11 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	tdns.StartEngine(&tdns.Globals.App, "Notifier", func() error {
 		return tdns.Notifier(ctx, conf.Config, conf.Config.Internal.NotifyQ)
 	})
-	// The reader of ResignQ, as in StartMPAgent. The identity set-up the
-	// auditor shares with the agent (SetupAgentAutoZone) registers the
-	// identity zone for periodic re-signing on that queue; with no engine
-	// reading it the zone was signed once, at the start, and an auditor that
-	// ran for longer than its signatures were valid served expired ones.
+	// The resigner, as in StartMPAgent. The identity set-up the auditor
+	// shares with the agent (SetupAgentAutoZone) puts the identity zone on
+	// its watchlist; with no engine running, the zone was signed once, at the
+	// start, and an auditor that ran for longer than its signatures were
+	// valid served expired ones.
 	tdns.StartEngineNoError(&tdns.Globals.App, "ResignerEngine", func() {
 		tdns.ResignerEngine(ctx, conf.Config.Internal.ResignQ)
 	})

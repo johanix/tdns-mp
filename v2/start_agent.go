@@ -144,9 +144,8 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker", func() error {
 		return tdns.KeyStateWorker(ctx, conf.Config)
 	})
-	// The reader of ResignQ. SetupAgentAutoZone registers the agent's own
-	// zone for periodic re-signing on that queue; without an engine reading
-	// it the registration sat in the buffer and the zone was never renewed.
+	// The resigner. SetupAgentAutoZone puts the agent's own zone on its
+	// watchlist; without the engine running, the zone was never renewed.
 	tdns.StartEngineNoError(&tdns.Globals.App, "ResignerEngine", func() {
 		tdns.ResignerEngine(ctx, conf.Config.Internal.ResignQ)
 	})
