@@ -2951,3 +2951,31 @@ func TestAParentReferralIsNoAnswerForTheDS(t *testing.T) {
 		t.Errorf("every parent server refers: seen %+v, err %v; want no answer", seen, err)
 	}
 }
+
+// A look at the joiner's keys that finds no nameserver's address asked nothing,
+// and says nothing of them, as one with no IMR: the keys step is not let go on
+// silent servers alone. One nameserver with no address is silent (CodeRabbit on
+// #374).
+func TestALookWithNoNameserverAddressIsBlind(t *testing.T) {
+	const zone = "blind.adding.signer.example."
+	const other = "ns.p2.example."
+	k := testDnskey(t, zone, 256)
+	r := newSignerRig(t, zone, append(sigRecords(`serial="5" servers="us,p2" signers="p2"`), `3600 IN NS `+other)...)
+	resolves := map[string]bool{}
+	prev := servingKeysLookup
+	servingKeysLookup = func(_ context.Context, _ string, ns string) (*core.RRset, error) {
+		if !resolves[ns] {
+			return nil, fmt.Errorf("%w for %s", errNoAddress, ns)
+		}
+		return &core.RRset{RRs: []dns.RR{k}}, nil
+	}
+	t.Cleanup(func() { servingKeysLookup = prev })
+	if seen, err := lookForJoinerKeys(r.mpzd, []*dns.DNSKEY{k}); err == nil {
+		t.Errorf("no nameserver has an address: the look saw %+v, want it blind", seen)
+	}
+	resolves[other] = true
+	seen, err := lookForJoinerKeys(r.mpzd, []*dns.DNSKEY{k})
+	if err != nil || len(seen.silent) != 1 || len(seen.with) != 1 {
+		t.Errorf("one nameserver has an address: the look saw %+v, err %v; want one silent, one with the keys", seen, err)
+	}
+}

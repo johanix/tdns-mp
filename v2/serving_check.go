@@ -29,6 +29,10 @@ import (
 // of what the nameserver serves.
 var errIMRNotRunning = errors.New("the IMR is not running")
 
+// errNoAddress: the IMR finds no address for the nameserver, so nothing can be
+// asked of it.
+var errNoAddress = errors.New("the IMR finds no address")
+
 // errServesNoRRset: the nameserver answers for the name, with NODATA or NXDOMAIN,
 // and holds no RRset of the type.
 var errServesNoRRset = errors.New("it serves no such RRset")
@@ -110,7 +114,7 @@ func servingAddrs(ctx context.Context, ns string) ([]string, error) {
 		}
 	}
 	if len(addrs) == 0 {
-		return nil, fmt.Errorf("the IMR finds no address for %s", ns)
+		return nil, fmt.Errorf("%w for %s", errNoAddress, ns)
 	}
 	return addrs, nil
 }
@@ -419,7 +423,8 @@ type joinerKeysServed struct {
 // lookForJoinerKeys asks each of the zone's nameservers, by the NS RRset of its
 // copy, for its DNSKEY RRset, under a bound of its own, and looks for keys in it.
 // An error says the look says nothing of them: the copy names none, or nothing can
-// be asked.
+// be asked, as when no nameserver it names has an address the IMR finds. One
+// nameserver with no address is silent, as one that does not answer.
 func lookForJoinerKeys(mpzd *MPZoneData, keys []*dns.DNSKEY) (joinerKeysServed, error) {
 	names, err := copyNameservers(mpzd)
 	if err != nil {
@@ -429,6 +434,7 @@ func lookForJoinerKeys(mpzd *MPZoneData, keys []*dns.DNSKEY) (joinerKeysServed, 
 		return joinerKeysServed{}, errors.New("the zone's copy names no nameserver")
 	}
 	seen := joinerKeysServed{copyTTL: copyDnskeyTTL(mpzd)}
+	unresolved := 0
 	for _, ns := range names {
 		ctx, cancel := lookCtx()
 		rrset, err := servingKeysLookup(ctx, mpzd.ZoneName, ns)
@@ -437,6 +443,9 @@ func lookForJoinerKeys(mpzd *MPZoneData, keys []*dns.DNSKEY) (joinerKeysServed, 
 		case errors.Is(err, errIMRNotRunning):
 			return joinerKeysServed{}, err
 		case err != nil && !errors.Is(err, errServesNoRRset):
+			if errors.Is(err, errNoAddress) {
+				unresolved++
+			}
 			seen.silent, seen.why = append(seen.silent, ns), fmt.Errorf("%s: %w", ns, err)
 			continue
 		}
@@ -447,6 +456,9 @@ func lookForJoinerKeys(mpzd *MPZoneData, keys []*dns.DNSKEY) (joinerKeysServed, 
 		} else {
 			seen.without = append(seen.without, ns)
 		}
+	}
+	if unresolved == len(names) {
+		return joinerKeysServed{}, fmt.Errorf("no nameserver of the zone's copy has an address: %w", seen.why)
 	}
 	return seen, nil
 }
