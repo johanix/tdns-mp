@@ -176,7 +176,7 @@ func setZoneNS(t *testing.T, zone string, names ...string) {
 func (r *signerAddRig) nameserversServeInventory(t *testing.T) {
 	t.Helper()
 	prev := servingKeysLookup
-	servingKeysLookup = func(_ context.Context, zone, _ string) (*core.RRset, error) {
+	servingKeysLookup = byOneAddress(func(_ context.Context, zone, _ string) (*core.RRset, error) {
 		rrset := &core.RRset{}
 		mpzd, _ := Zones.Get(zone)
 		if snap := mpzd.GetLastKeyInventory(); snap != nil {
@@ -191,7 +191,7 @@ func (r *signerAddRig) nameserversServeInventory(t *testing.T) {
 			}
 		}
 		return rrset, nil
-	}
+	})
 	t.Cleanup(func() { servingKeysLookup = prev })
 }
 
@@ -210,9 +210,9 @@ func (r *signerAddRig) nameserversServe(t *testing.T, serial uint32, key *dns.DN
 	t.Helper()
 	serving(t, soa(t, r.zone, serial, nil, nil), nil)
 	prev := servingKeysLookup
-	servingKeysLookup = func(context.Context, string, string) (*core.RRset, error) {
+	servingKeysLookup = byOneAddress(func(context.Context, string, string) (*core.RRset, error) {
 		return signedDNSKEYs(t, r.zone, key, priv), nil
-	}
+	})
 	t.Cleanup(func() { servingKeysLookup = prev })
 }
 
@@ -1422,10 +1422,10 @@ func TestAZonesFirstSignerHasNoWait(t *testing.T) {
 	knownAs(t, r.store, r.zone, r.v)
 	asked := 0
 	prev := servingKeysLookup
-	servingKeysLookup = func(context.Context, string, string) (*core.RRset, error) {
+	servingKeysLookup = byOneAddress(func(context.Context, string, string) (*core.RRset, error) {
 		asked++
 		return nil, errServesNoRRset
-	}
+	})
 	t.Cleanup(func() { servingKeysLookup = prev })
 	mint := signerAddStepsOf(Provider{Label: "a", Identity: signerAddSelf}, true)[1]
 	r.keys(KeyStateStandby, KeyStateActive)
@@ -1948,7 +1948,7 @@ func servedKeyTTLs(t *testing.T, zone string, ttls map[string]time.Duration) {
 	t.Helper()
 	k := testDnskey(t, zone, 256)
 	prev := servingKeysLookup
-	servingKeysLookup = func(_ context.Context, _ string, ns string) (*core.RRset, error) {
+	servingKeysLookup = byOneAddress(func(_ context.Context, _ string, ns string) (*core.RRset, error) {
 		ttl, ok := ttls[ns]
 		if !ok {
 			return nil, errors.New("no answer")
@@ -1956,7 +1956,7 @@ func servedKeyTTLs(t *testing.T, zone string, ttls map[string]time.Duration) {
 		key := *k
 		key.Hdr.Ttl = uint32(ttl / time.Second)
 		return &core.RRset{RRs: []dns.RR{&key}}, nil
-	}
+	})
 	t.Cleanup(func() { servingKeysLookup = prev })
 }
 
@@ -2180,10 +2180,10 @@ func TestAProviderThatSignsWaitsTheTTLItServesAndAsksNobody(t *testing.T) {
 		t.Error("it serves, and its first keys would sign before they have propagated")
 	}
 	prev := servingKeysLookup
-	servingKeysLookup = func(context.Context, string, string) (*core.RRset, error) {
+	servingKeysLookup = byOneAddress(func(context.Context, string, string) (*core.RRset, error) {
 		t.Error("a provider that signs asked the zone's servers")
 		return nil, errors.New("no answer")
-	}
+	})
 	t.Cleanup(func() { servingKeysLookup = prev })
 	if got, known := r.e.wire.ServedDnskeyTTL(zone); got != 5*time.Minute || !known {
 		t.Errorf("it waits %s (known %v), want its own copy's 5m0s", got, known)
@@ -2348,13 +2348,13 @@ func newKeysWait(t *testing.T, zone string) *keysWait {
 		}
 	}
 	prev := servingKeysLookup
-	servingKeysLookup = func(_ context.Context, _ string, ns string) (*core.RRset, error) {
+	servingKeysLookup = byOneAddress(func(_ context.Context, _ string, ns string) (*core.RRset, error) {
 		w.asked++
 		if answer := w.answers[ns]; answer != nil {
 			return answer()
 		}
 		return nil, errors.New("no answer")
-	}
+	})
 	t.Cleanup(func() { servingKeysLookup = prev })
 	mint := signerAddStepsOf(Provider{Label: "a", Identity: signerAddSelf}, false)[1]
 	w.wait = func() string { return mint.wait(r.conf, zone, w.now) }
@@ -2996,12 +2996,12 @@ func TestALookWithNoNameserverAddressIsBlind(t *testing.T) {
 	r := newSignerRig(t, zone, append(sigRecords(`serial="5" servers="us,p2" signers="p2"`), `3600 IN NS `+other)...)
 	resolves := map[string]bool{}
 	prev := servingKeysLookup
-	servingKeysLookup = func(_ context.Context, _ string, ns string) (*core.RRset, error) {
+	servingKeysLookup = byOneAddress(func(_ context.Context, _ string, ns string) (*core.RRset, error) {
 		if !resolves[ns] {
 			return nil, fmt.Errorf("%w for %s", errNoAddress, ns)
 		}
 		return &core.RRset{RRs: []dns.RR{k}}, nil
-	}
+	})
 	t.Cleanup(func() { servingKeysLookup = prev })
 	if seen, err := lookForJoinerKeys(r.mpzd, []*dns.DNSKEY{k}); err == nil {
 		t.Errorf("no nameserver has an address: the look saw %+v, want it blind", seen)
@@ -3057,5 +3057,53 @@ func TestATruncatedParentDSReplyIsAskedAgainOverTCP(t *testing.T) {
 	got, err := askParentDS(zone, ln.Addr().String())
 	if err != nil || len(got) != 1 {
 		t.Fatalf("the DS over TCP: %v, err %v; want the one DS", got, err)
+	}
+}
+
+// byOneAddress has a test's lookup answer at one address of each nameserver, as
+// servingKeysLookup does: an error that says it answers with no RRset is that
+// address's answer, any other says nothing can be asked.
+func byOneAddress(look func(context.Context, string, string) (*core.RRset, error)) func(context.Context, string, string) ([]servedAnswer, error) {
+	return func(ctx context.Context, zone, ns string) ([]servedAnswer, error) {
+		rrset, err := look(ctx, zone, ns)
+		if err != nil && !errors.Is(err, errServesNoRRset) {
+			return nil, err
+		}
+		return []servedAnswer{{Addr: "192.0.2.53:53", RRset: rrset, Err: err}}, nil
+	}
+}
+
+// Each address of a nameserver is asked for the keys: one whose address serves
+// them while another serves an older DNSKEY RRset does not serve them, and the
+// largest TTL is that of any address. An address that does not answer is not
+// counted (CodeRabbit on #374).
+func TestEveryAddressOfANameserverIsAskedForTheKeys(t *testing.T) {
+	const zone = "addrs.adding.signer.example."
+	joiner, old := testDnskey(t, zone, 256), testDnskey(t, zone, 257)
+	at := func(k *dns.DNSKEY, ttl time.Duration) dns.RR {
+		c := *k
+		c.Hdr.Ttl = uint32(ttl / time.Second)
+		return &c
+	}
+	r := newSignerRig(t, zone, sigRecords(`serial="5" servers="us,p2" signers="p2"`)...)
+	answers := []servedAnswer{
+		{Addr: "192.0.2.1:53", RRset: &core.RRset{RRs: []dns.RR{at(old, time.Hour), at(joiner, time.Hour)}}},
+		{Addr: "[2001:db8::1]:53", RRset: &core.RRset{RRs: []dns.RR{at(old, 2*time.Hour)}}},
+	}
+	prev := servingKeysLookup
+	servingKeysLookup = func(context.Context, string, string) ([]servedAnswer, error) { return answers, nil }
+	t.Cleanup(func() { servingKeysLookup = prev })
+
+	seen, err := lookForJoinerKeys(r.mpzd, []*dns.DNSKEY{joiner})
+	if err != nil || len(seen.with) != 0 || len(seen.without) != 1 || seen.ttl != 2*time.Hour {
+		t.Errorf("its IPv6 address serves an older RRset: the look saw %+v, err %v; want it without the keys, at 2h", seen, err)
+	}
+	if largest, served, _, err := largestServedDnskeyTTL(r.mpzd); err != nil || largest != 2*time.Hour || len(served) != 1 {
+		t.Errorf("the largest TTL served is %s (served %v, err %v), want 2h", largest, served, err)
+	}
+	answers[1] = servedAnswer{Err: errors.New("[2001:db8::1]:53: i/o timeout")}
+	seen, err = lookForJoinerKeys(r.mpzd, []*dns.DNSKEY{joiner})
+	if err != nil || len(seen.with) != 1 || seen.ttl != time.Hour {
+		t.Errorf("its IPv6 address does not answer: the look saw %+v, err %v; want it with the keys, at 1h", seen, err)
 	}
 }

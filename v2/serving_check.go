@@ -37,8 +37,8 @@ var errNoAddress = errors.New("the IMR finds no address")
 // and holds no RRset of the type.
 var errServesNoRRset = errors.New("it serves no such RRset")
 
-// servedAnswer is one address's answer to the serving check's query: the
-// zone's SOA RRset with its RRSIGs, or why there is none.
+// servedAnswer is one address's answer to a serving query: the zone's RRset
+// of the type asked, with its RRSIGs, or why there is none.
 type servedAnswer struct {
 	Addr  string
 	RRset *core.RRset
@@ -50,24 +50,30 @@ type servedAnswer struct {
 // stands in for it.
 var servingLookup = imrServingLookup
 
-// servingKeysLookup asks the nameserver ns, by name, for the zone's DNSKEY
-// RRset (imrServingQuery). A test stands in for it.
-var servingKeysLookup = func(ctx context.Context, zone, ns string) (*core.RRset, error) {
-	return imrServingQuery(ctx, zone, ns, dns.TypeDNSKEY)
+// servingKeysLookup asks each address of the nameserver ns, found by name,
+// for the zone's DNSKEY RRset: an answer per address. A test stands in for it.
+var servingKeysLookup = func(ctx context.Context, zone, ns string) ([]servedAnswer, error) {
+	return imrServingAnswers(ctx, zone, ns, dns.TypeDNSKEY)
 }
 
-// imrServingLookup asks each of ns's addresses (servingAddrs) on its own for
-// the zone's SOA (askServing): over a list of addresses the first that
-// answers is taken, and another address of the same name can serve an older
-// or an unsigned copy. A failure's error names its address already.
+// imrServingLookup asks each of ns's addresses for the zone's SOA.
 func imrServingLookup(ctx context.Context, zone, ns string) ([]servedAnswer, error) {
+	return imrServingAnswers(ctx, zone, ns, dns.TypeSOA)
+}
+
+// imrServingAnswers asks each of ns's addresses (servingAddrs) on its own for
+// the zone's RRset of qtype (askServing): over a list of addresses the first
+// that answers is taken, and another address of the same name can serve an
+// older or an unsigned copy, or an older DNSKEY RRset. A failure's error names
+// its address already.
+func imrServingAnswers(ctx context.Context, zone, ns string, qtype uint16) ([]servedAnswer, error) {
 	addrs, err := servingAddrs(ctx, ns)
 	if err != nil {
 		return nil, err
 	}
 	answers := make([]servedAnswer, 0, len(addrs))
 	for _, addr := range addrs {
-		rrset, err := askServing(ctx, zone, dns.TypeSOA, []string{addr})
+		rrset, err := askServing(ctx, zone, qtype, []string{addr})
 		a := servedAnswer{RRset: rrset, Err: err}
 		if err == nil {
 			a.Addr = addr
@@ -79,16 +85,6 @@ func imrServingLookup(ctx context.Context, zone, ns string) ([]servedAnswer, err
 
 // servingAskTimeout bounds one exchange with one address of a nameserver.
 const servingAskTimeout = 2 * time.Second
-
-// imrServingQuery asks ns's addresses (servingAddrs) for the zone's RRset of
-// qtype (askServing): the first that answers.
-func imrServingQuery(ctx context.Context, zone, ns string, qtype uint16) (*core.RRset, error) {
-	addrs, err := servingAddrs(ctx, ns)
-	if err != nil {
-		return nil, err
-	}
-	return askServing(ctx, zone, qtype, addrs)
-}
 
 // servingAddrs are ns's addresses, found through the IMR, each with its port.
 func servingAddrs(ctx context.Context, ns string) ([]string, error) {
@@ -363,16 +359,18 @@ func largestServedDnskeyTTL(mpzd *MPZoneData) (largest time.Duration, served, si
 	}
 	for _, ns := range names {
 		ctx, cancel := lookCtx()
-		keys, lookErr := servingKeysLookup(ctx, mpzd.ZoneName, ns)
+		answers, lookErr := servingKeysLookup(ctx, mpzd.ZoneName, ns)
 		cancel()
-		ttl, found := dnskeyTTLOf(keys)
+		k := readKeysAtAddrs(answers, nil)
 		switch {
 		case lookErr != nil:
 			err = fmt.Errorf("%s: %w", ns, lookErr)
-		case !found:
+		case !k.answered:
+			err = fmt.Errorf("%s: %w", ns, k.why)
+		case !k.found:
 			err = fmt.Errorf("%s serves no DNSKEY for the zone", ns)
 		default:
-			largest = max(largest, ttl)
+			largest = max(largest, k.ttl)
 			served = append(served, ns)
 			continue
 		}
@@ -421,7 +419,9 @@ type joinerKeysServed struct {
 }
 
 // lookForJoinerKeys asks each of the zone's nameservers, by the NS RRset of its
-// copy, for its DNSKEY RRset, under a bound of its own, and looks for keys in it.
+// copy, for its DNSKEY RRset at each of its addresses, under a bound of its own,
+// and looks for keys in it: a nameserver serves them when each of its addresses
+// that answers does.
 // An error says the look says nothing of them: the copy names none, or nothing can
 // be asked, as when no nameserver it names has an address the IMR finds. One
 // nameserver with no address is silent, as one that does not answer.
@@ -437,21 +437,24 @@ func lookForJoinerKeys(mpzd *MPZoneData, keys []*dns.DNSKEY) (joinerKeysServed, 
 	unresolved := 0
 	for _, ns := range names {
 		ctx, cancel := lookCtx()
-		rrset, err := servingKeysLookup(ctx, mpzd.ZoneName, ns)
+		answers, err := servingKeysLookup(ctx, mpzd.ZoneName, ns)
 		cancel()
-		switch {
-		case errors.Is(err, errIMRNotRunning):
+		if errors.Is(err, errIMRNotRunning) {
 			return joinerKeysServed{}, err
-		case err != nil && !errors.Is(err, errServesNoRRset):
+		}
+		k := readKeysAtAddrs(answers, keys)
+		if err == nil && !k.answered {
+			err = k.why
+		}
+		if err != nil {
 			if errors.Is(err, errNoAddress) {
 				unresolved++
 			}
 			seen.silent, seen.why = append(seen.silent, ns), fmt.Errorf("%s: %w", ns, err)
 			continue
 		}
-		ttl, _ := dnskeyTTLOf(rrset)
-		seen.ttl = max(seen.ttl, ttl)
-		if servesKeys(rrset, keys) {
+		seen.ttl = max(seen.ttl, k.ttl)
+		if k.serves {
 			seen.with = append(seen.with, ns)
 		} else {
 			seen.without = append(seen.without, ns)
@@ -461,6 +464,40 @@ func lookForJoinerKeys(mpzd *MPZoneData, keys []*dns.DNSKEY) (joinerKeysServed, 
 		return joinerKeysServed{}, fmt.Errorf("no nameserver of the zone's copy has an address: %w", seen.why)
 	}
 	return seen, nil
+}
+
+// keysAtAddrs is one nameserver's answers, one per address, read for keys:
+// whether any address answered, with the zone's DNSKEY RRset or with none;
+// whether each that answered serves every one of keys; whether any serves a
+// DNSKEY RRset, and the largest TTL any serves it with; and why the first that
+// did not answer did not. An address that does not answer is not counted, as a
+// nameserver that does not answer is not.
+type keysAtAddrs struct {
+	answered, serves, found bool
+	ttl                     time.Duration
+	why                     error
+}
+
+func readKeysAtAddrs(answers []servedAnswer, keys []*dns.DNSKEY) keysAtAddrs {
+	k := keysAtAddrs{serves: true}
+	for _, a := range answers {
+		if a.Err != nil && !errors.Is(a.Err, errServesNoRRset) {
+			if k.why == nil {
+				k.why = a.Err
+			}
+			continue
+		}
+		k.answered = true
+		if ttl, ok := dnskeyTTLOf(a.RRset); ok {
+			k.ttl, k.found = max(k.ttl, ttl), true
+		}
+		k.serves = k.serves && servesKeys(a.RRset, keys)
+	}
+	k.serves = k.serves && k.answered
+	if !k.answered && k.why == nil {
+		k.why = errors.New("no address answers")
+	}
+	return k
 }
 
 // servesKeys: rrset holds each of keys, the key and not just its tag. A signer
