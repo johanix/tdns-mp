@@ -12,7 +12,6 @@ package tdnsmp
 
 import (
 	"sync"
-	"time"
 
 	tdns "github.com/johanix/tdns/v2"
 )
@@ -103,15 +102,7 @@ func (conf *Config) firstLoadSetup(zd *MPZoneData) {
 			if !zd.Options[tdns.OptInlineSigning] {
 				return
 			}
-			q := conf.Config.Internal.ResignQ
-			if q == nil {
-				return
-			}
-			select {
-			case q <- tdns.ResignRequest{Zd: zd, Reason: tdns.ResignPeriodic}:
-			case <-time.After(5 * time.Second):
-				lg.Error("timeout registering zone for periodic re-signing", "zone", zd.ZoneName)
-			}
+			zd.KeepRenewed()
 		})
 	}
 }
