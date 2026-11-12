@@ -8,6 +8,7 @@ package tdnsmp
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -303,7 +304,18 @@ func (mpzd *MPZoneData) restoreContributions(hdb *HsyncDB, zoneContribs map[stri
 	defer mpzd.Unlock()
 	mpzd.EnsureMP()
 	if mpzd.MP.PersistContributions == nil {
+		mp := mpzd.MP
 		mpzd.MP.PersistContributions = func(zone, senderID string, contribs map[string]map[uint16]core.RRset) error {
+			// A save replaces the sender's stored rows. Until the store has
+			// been read (a read that failed here, and the re-apply reads it
+			// again), the map in memory is at most part of them. An update
+			// does not get this far before the read (contributionsMayChange);
+			// the _signal KEYs the combiner publishes from its stored
+			// instructions can, and the re-apply puts them back from those.
+			// Called under the zone's lock, which guards ContributionsRead.
+			if !mp.ContributionsRead {
+				return fmt.Errorf("zone %s: its stored contributions are not read yet; %s's are not replaced", zone, senderID)
+			}
 			return SaveContributions(hdb, zone, senderID, contribs)
 		}
 	}
