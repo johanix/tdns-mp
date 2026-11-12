@@ -53,6 +53,11 @@ func APIcombiner(app *tdns.AppDetails, refreshZoneCh chan<- tdns.ZoneRefresher, 
 
 		switch cp.Command {
 		case "add":
+			if !mpzd.contributionsMayChange(hdb, "local data") {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("zone %s: its stored contributions are not read yet; add the data again later", cp.Zone)
+				return
+			}
 			changed, err := mpzd.AddCombinerDataNG("", cp.Data)
 			if err != nil {
 				resp.Error = true
@@ -159,6 +164,16 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				resp.Error = true
 				resp.ErrorMsg = "edit_id is required"
 				return
+			}
+
+			// The edit stays pending until its zone's stored contributions
+			// are read (contributionsMayChange).
+			if pe, err := GetPendingEdit(hdb, cp.EditID); err == nil {
+				if mpzd, ok := Zones.Get(dns.Fqdn(pe.Zone)); ok && !mpzd.contributionsMayChange(hdb, "approval") {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("edit #%d stays pending: the stored contributions of zone %s are not read yet; approve it again later", cp.EditID, pe.Zone)
+					return
+				}
 			}
 
 			rec, err := ApprovePendingEdit(hdb, cp.EditID)
