@@ -374,8 +374,11 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	peerRegistry.OnRemove = tm.APITransport.ForgetPeer
 	lgTransport.Info("API client transport enabled")
 
-	// Create DNS transport if control zone is configured AND supported
-	if cfg.ControlZone != "" && tm.isTransportSupported("dns") {
+	// The DNS transport is created when the DNS mechanism is supported, and
+	// for an agent with a signer or combiner of its own whatever the
+	// mechanisms: those two speak only DNS, so an agent's link to them is
+	// DNS. supported_mechanisms governs what goes between agents (dnsWith).
+	if cfg.ControlZone != "" && (tm.isTransportSupported("dns") || tm.hasLocalDaemons()) {
 		dnsCfg := &transport.DNSTransportConfig{
 			LocalID:                    cfg.LocalID,
 			ControlZone:                cfg.ControlZone,
@@ -427,7 +430,11 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 			}
 		}
 
-		lgTransport.Info("DNS transport enabled")
+		if tm.isTransportSupported("dns") {
+			lgTransport.Info("DNS transport enabled")
+		} else {
+			lgTransport.Info("DNS transport enabled for this agent's own signer and combiner only: the DNS mechanism is not enabled between agents")
+		}
 	} else if cfg.ControlZone == "" {
 		lgTransport.Info("DNS transport not configured (no control zone)")
 	} else {
@@ -725,6 +732,30 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) (*MPTransportBridge, err
 	return tm, nil
 }
 
+// hasLocalDaemons says whether this is an agent with a signer or combiner of
+// its own.
+func (tm *MPTransportBridge) hasLocalDaemons() bool {
+	return (tm.role == "" || tm.role == roleAgent) && (tm.combinerID != "" || tm.signerID != "")
+}
+
+// isLocalDaemon says whether id is this agent's own signer or combiner.
+func (tm *MPTransportBridge) isLocalDaemon(id string) bool {
+	if id == "" || !tm.hasLocalDaemons() {
+		return false
+	}
+	id = dns.Fqdn(id)
+	return (tm.combinerID != "" && core.EqualNames(id, dns.Fqdn(string(tm.combinerID)))) ||
+		(tm.signerID != "" && core.EqualNames(id, dns.Fqdn(tm.signerID)))
+}
+
+// dnsWith says whether DNS may carry a message to or from id: always when
+// the DNS mechanism is supported, and otherwise only to and from this
+// agent's own signer and combiner, which speak only DNS. Between agents,
+// supported_mechanisms decides.
+func (tm *MPTransportBridge) dnsWith(id string) bool {
+	return tm.isTransportSupported("dns") || tm.isLocalDaemon(id)
+}
+
 // isTransportSupported checks if a transport mechanism is enabled in configuration.
 func (tm *MPTransportBridge) isTransportSupported(mechanism string) bool {
 	if len(tm.SupportedMechanisms) == 0 {
@@ -747,15 +778,39 @@ func (tm *MPTransportBridge) RegisterChunkNotifyHandler() error {
 
 	// Register the handler for CHUNK type NOTIFYs
 	// RouteViaRouter routes through the DNSMessageRouter with middleware
-	err := tdns.RegisterNotifyHandler(core.TypeCHUNK, func(ctx context.Context, req *tdns.DnsNotifyRequest) error {
-		return tm.ChunkHandler.RouteViaRouter(ctx, req.Qname, req.Msg, req.ResponseWriter)
-	})
+	err := tdns.RegisterNotifyHandler(core.TypeCHUNK, tm.chunkNotify)
 	if err != nil {
 		return fmt.Errorf("failed to register CHUNK NOTIFY handler: %w", err)
 	}
 
 	lgTransport.Info("registered CHUNK NOTIFY handler", "controlZone", tm.ControlZone)
 	return nil
+}
+
+// chunkNotify takes a NOTIFY(CHUNK) to an agent or an auditor. Without the
+// DNS mechanism only the agent's own signer and combiner are heard over DNS:
+// a NOTIFY from anyone else is refused before anything in it is read.
+func (tm *MPTransportBridge) chunkNotify(ctx context.Context, req *tdns.DnsNotifyRequest) error {
+	if sender := chunkNotifySender(req.Qname); !tm.dnsWith(sender) {
+		lgTransport.Debug("NOTIFY(CHUNK) refused: the DNS mechanism is not enabled, and the sender is not this agent's signer or combiner", "sender", sender)
+		if req.ResponseWriter == nil {
+			return nil
+		}
+		resp := new(dns.Msg)
+		resp.SetRcode(req.Msg, dns.RcodeRefused)
+		return req.ResponseWriter.WriteMsg(resp)
+	}
+	return tm.ChunkHandler.RouteViaRouter(ctx, req.Qname, req.Msg, req.ResponseWriter)
+}
+
+// chunkNotifySender is the sender a NOTIFY(CHUNK)'s query name names: the
+// name after its first label, the distribution ID. "" if it names none.
+func chunkNotifySender(qname string) string {
+	labels := dns.SplitDomainName(qname)
+	if len(labels) < 2 {
+		return ""
+	}
+	return dns.Fqdn(strings.Join(labels[1:], "."))
 }
 
 // StartIncomingMessageRouter starts a goroutine that routes incoming DNS messages
@@ -1937,7 +1992,7 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 	apiGate, _ := mechStateForGate(peer, "API")
 	apiEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.APIUsable() && apiGate == AgentStateKnown
 	dnsGate, _ := mechStateForGate(peer, "DNS")
-	dnsEligible := tm.DNSTransport != nil && dnsMethod && tm.isTransportSupported("dns") && dnsGate == AgentStateKnown
+	dnsEligible := tm.DNSTransport != nil && dnsMethod && tm.dnsWith(peer.ID) && dnsGate == AgentStateKnown
 	results := tm.TransportManager.SendAll(ctx, peer, eligibleMechanisms(apiEligible, dnsEligible), req)
 	if apiEligible {
 		apiResp, apiErr = helloResult(results["API"])
@@ -2069,7 +2124,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 	apiBeatGate, _ := mechStateForGate(peer, "API")
 	apiBeatEligible := tm.APITransport != nil && tm.isTransportSupported("api") && apiMethod && peer.APIUsable() && beatable(apiBeatGate)
 	dnsBeatGate, _ := mechStateForGate(peer, "DNS")
-	dnsBeatEligible := tm.DNSTransport != nil && dnsMethod && tm.isTransportSupported("dns") && beatable(dnsBeatGate)
+	dnsBeatEligible := tm.DNSTransport != nil && dnsMethod && tm.dnsWith(peer.ID) && beatable(dnsBeatGate)
 	apiRaw, _ := peer.MechanismRawState("API")
 	apiWasOperational := apiRaw == transport.PeerStateOperational
 	dnsRaw, _ := peer.MechanismRawState("DNS")
@@ -3564,11 +3619,13 @@ func (tm *MPTransportBridge) Start(ctx context.Context) error {
 	case roleSigner, roleCombiner:
 		// Chunk handler and router were built and registered at init.
 	default:
-		// The CHUNK NOTIFY handler is the DNS mechanism's receive path and
-		// nothing else: without DNS it is not registered, so no NOTIFY(CHUNK)
-		// is answered (the handler object still serves the HTTPS entry). DNS
-		// enabled but not configured fails startup (StartMPAgent,
-		// StartMPAuditor).
+		// The CHUNK NOTIFY handler is the DNS transport's receive path and
+		// nothing else: without a DNS transport it is not registered, so no
+		// NOTIFY(CHUNK) is answered (the handler object still serves the
+		// HTTPS entry). An agent without the DNS mechanism has the transport
+		// for its own signer and combiner, and its handler hears only them
+		// (chunkNotify). DNS enabled but not configured fails startup
+		// (StartMPAgent, StartMPAuditor).
 		switch {
 		case tm.DNSTransport != nil:
 			if err := tm.RegisterChunkNotifyHandler(); err != nil {
