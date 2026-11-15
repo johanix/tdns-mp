@@ -248,7 +248,18 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 	// the agent's clock: the clock here need not agree with it.
 	lease := s.LeaderExpiry.Sub(s.LastChecked).Truncate(time.Second)
 	leader := termSafe(string(s.Leader))
+	if s.NoVote {
+		// A member that does not vote learns the leader from gossip
+		// (plan S15).
+		fmt.Fprintf(w, "  this agent:     does not vote in the zone (%s)\n", termSafe(s.Standing))
+		if s.Leader == "" || lease <= 0 {
+			fmt.Fprintln(w, "  leader:         not known yet")
+		} else {
+			fmt.Fprintf(w, "  leader:         %s, term %d, learned from gossip\n", leader, s.ElectionTerm)
+		}
+	}
 	switch {
+	case s.NoVote:
 	case s.Leader == "":
 		fmt.Fprintln(w, "  leader:         none")
 	case lease <= 0:
@@ -261,7 +272,7 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 	fmt.Fprintf(w, "  election term:  %d\n", s.ElectionTerm)
 	if c := s.CatchUp; c != nil {
 		if c.NotVoting {
-			fmt.Fprintln(w, "  catch-up:       none: this agent does not vote in the zone, and asks nothing")
+			fmt.Fprintln(w, "  catch-up:       none: this agent asks nothing in the zone (an auditor, or no member)")
 		} else if c.CaughtUp {
 			fmt.Fprintln(w, "  catch-up:       caught up")
 		} else {
@@ -385,18 +396,22 @@ func printParentSyncStatus(w io.Writer, s tdnsmp.ParentSyncStatus) {
 
 	if len(s.InstructionMembers) > 0 {
 		// what each member tells, first hand (plan S5a); Hold is its
-		// signer's confirmation of the hold (S6)
+		// signer's confirmation of the hold (S6), CaughtUp whether it has
+		// caught up in the zone (S18a)
 		fmt.Fprintln(w, "\nInstructions, per member:")
-		fmt.Fprintf(w, "  %-6s  %-6s  %-8s  %-4s  %-8s  %s\n", "Active", "Newest", "Rollover", "Hold", "Heard", "Identity")
+		fmt.Fprintf(w, "  %-6s  %-6s  %-8s  %-4s  %-8s  %-8s  %s\n", "Active", "Newest", "Rollover", "Hold", "CaughtUp", "Heard", "Identity")
 		for _, m := range s.InstructionMembers {
-			rollover, hold := "no", "no"
+			rollover, hold, caughtUp := "no", "no", "no"
 			if m.Rollover {
 				rollover = "yes"
 			}
 			if m.Hold {
 				hold = "yes"
 			}
-			fmt.Fprintf(w, "  %-6s  %-6s  %-8s  %-4s  %-8s  %s%s\n", serialOrDash(m.Active), serialOrDash(m.Newest), rollover, hold,
+			if m.CaughtUp {
+				caughtUp = "yes"
+			}
+			fmt.Fprintf(w, "  %-6s  %-6s  %-8s  %-4s  %-8s  %-8s  %s%s\n", serialOrDash(m.Active), serialOrDash(m.Newest), rollover, hold, caughtUp,
 				clockOrDash(m.Heard), termSafe(m.Identity), memberNotes(m))
 		}
 	}

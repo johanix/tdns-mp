@@ -164,6 +164,80 @@ func TestATransitionWithNothingToCarryOutIsDoneWhenEveryPartHoldsIt(t *testing.T
 	}
 }
 
+// Y1: the zone's only voting member leaves its role, and no voting member is
+// left under the new serial to carry a step or confirm one. The transition is
+// done as it takes effect (the project owner, 2026-11-06). Before, it never
+// finished, and every later serial waited behind it, the one that gives the
+// role back too. That one thaws with no voting member under the active serial
+// (design 3.2), and its own transition starts. The serials are held unjudged:
+// the judge refuses a role taken or given until its steps are built (S17b,
+// S18a).
+func TestATransitionWithNoVotingMemberIsDoneAsItTakesEffect(t *testing.T) {
+	r := newThawRig(t, "novoters.reconcile.example.", "")
+	logs := captureLog(t)
+	n, none, back := freezeAt(t, 71, "n", "a", ""), freezeAt(t, 72, "none", "", ""), freezeAt(t, 73, "back", "a", "")
+	if err := r.store.Forget(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	knownAs(t, r.store, r.zone, n)
+	r.holdUnjudged(none, time.Now())
+	r.hold()
+	r.conf.thawTurn(r.zone)
+	if r.active() != 72 {
+		t.Fatalf("a, the only voting member, did not thaw to 72: %q", r.view().waits)
+	}
+	r.conf.reconcileTurn(r.zone, time.Now())
+	if s := status(t, r.store, r.zone); s.Phase != PhaseSteady || s.From != nil || s.DoneAt.IsZero() {
+		t.Fatalf("72, with no voting member, is not done: %+v", s)
+	}
+	if why := r.conf.zoneFrozen(r.zone); len(why) > 0 {
+		t.Errorf("frozen after done: %v", why)
+	}
+	if !strings.Contains(logs.String(), `msg="transition done"`) || !strings.Contains(logs.String(), "serial=72") {
+		t.Errorf("no log line for done: %s", logs)
+	}
+
+	r.holdUnjudged(back, time.Now())
+	r.conf.thawTurn(r.zone)
+	if r.active() != 73 {
+		t.Fatalf("the serial that gives a its role back did not thaw: %q", r.view().waits)
+	}
+	if s := status(t, r.store, r.zone); s.Phase != PhaseReconciling {
+		t.Fatalf("73's transition did not start: %+v", s)
+	}
+	// 73 gives a role: its transition is not done at its first turn
+	r.conf.reconcileTurn(r.zone, time.Now())
+	if s := status(t, r.store, r.zone); s.Phase != PhaseReconciling || s.From == nil || s.From.Serial != 72 {
+		t.Errorf("73's transition after a turn: phase %s from %s", s.Phase, serialOf(s.From))
+	}
+}
+
+// A change with no voting member under the active serial nor under the one
+// agreed on: nobody was there to thaw it, and it waited for good (the HSYNC3
+// records removed from a zone with no role, the way out's step b). Every agent
+// makes it active at once, by the judge as ever, and it is done as it takes
+// effect (the project owner, 2026-11-06).
+func TestAChangeWithNoVotingMemberEitherSideIsMadeActiveAtOnce(t *testing.T) {
+	r := newThawRig(t, "novoters.thaw.example.", "")
+	n, gone := freezeAt(t, 81, "n", "", ""), jAt(t, 82, `nsmgmt="agent" suffix="gone"`)
+	if err := r.store.Forget(r.zone); err != nil {
+		t.Fatal(err)
+	}
+	knownAs(t, r.store, r.zone, n)
+	r.store.Note(r.zone, gone, nil)
+	if vw := r.view(); !vw.ready() {
+		t.Fatalf("no voting member either side: the thaw waits for %q", vw.waits)
+	}
+	r.conf.thawTurn(r.zone)
+	if r.active() != 82 {
+		t.Fatalf("82, the records removed, is not active: %d", r.active())
+	}
+	r.conf.reconcileTurn(r.zone, time.Now())
+	if s := status(t, r.store, r.zone); s.Phase != PhaseSteady || s.From != nil || s.DoneAt.IsZero() {
+		t.Fatalf("82 is not done: %+v", s)
+	}
+}
+
 // TestDoneWaitsForEveryVotingMembersParts, with
 // TestAStepIsConfirmedOnlyWhenTheCombinerAndSignerHoldIt: a step is held
 // only once this agent's combiner and signer both hold it, and every other
@@ -220,8 +294,8 @@ func TestDoneWaitsForEveryVotingMembersParts(t *testing.T) {
 // with them. The last step hands V's lists.
 func TestUntilTheFirstStepThePartsKeepTheSetsTheyHold(t *testing.T) {
 	r := newReconcileRig(t, "keep.reconcile.example.", roleA)
-	// v gives n a server role and leaves the NS to the owner: kinds of change
-	// the judge refuses until their steps exist (S18a, S19), here as if one did
+	// v gives n a server role (S18a) and leaves the NS to the owner, a kind
+	// of change the judge refuses until S19, here as if it did not
 	r.v = jAt(t, 42, `servers="a,b,n" nsmgmt="owner" suffix="v"`, freezeRecords...)
 	r.holdUnjudged(r.v, time.Now())
 	r.hear(roleN, tells(r.n, r.v), true) // a voting member under V: its payload encryption
@@ -240,8 +314,16 @@ func TestUntilTheFirstStepThePartsKeepTheSetsTheyHold(t *testing.T) {
 	r.holdsToo(roleB)
 	r.holdsToo(roleN)
 	r.turn(time.Now())
+	// n's server role first (S18a): its step changes no set
+	if h = r.wanted(); h.Step != 1 || !slices.Equal(providerLabels(h.Sets.Servers), []string{"a", "b"}) {
+		t.Fatalf("the server role's step: step %d, servers %v", h.Step, providerLabels(h.Sets.Servers))
+	}
+	r.partsTake()
+	r.holdsToo(roleB)
+	r.holdsToo(roleN)
+	r.turn(time.Now())
 	h = r.wanted()
-	if got := providerLabels(h.Sets.Servers); h.Step != 1 || !slices.Equal(got, []string{"a", "b", "n"}) || h.Sets.NSmgmt != rolesFor(r.v, r.v, 0).NSmgmt {
+	if got := providerLabels(h.Sets.Servers); h.Step != 2 || !slices.Equal(got, []string{"a", "b", "n"}) || h.Sets.NSmgmt != rolesFor(r.v, r.v, 0).NSmgmt {
 		t.Errorf("the last step's sets: step %d, servers %v, nsmgmt %d", h.Step, got, h.Sets.NSmgmt)
 	}
 }

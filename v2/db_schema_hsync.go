@@ -218,6 +218,15 @@ var HsyncTables = map[string]string{
 		UNIQUE (zonename)
 	)`,
 
+	// MPSignerActed is what a signer handed nothing last acted by for a zone
+	// (signer_acted.go, tdns-mp #357): the sets as JSON, from its first load
+	// until its first hand-over. Temporary: it goes with P5 (tdns-mp #146).
+	"MPSignerActed": `CREATE TABLE IF NOT EXISTS 'MPSignerActed' (
+		zonename TEXT NOT NULL,
+		sets     TEXT NOT NULL DEFAULT '',
+		UNIQUE (zonename)
+	)`,
+
 	// CombinerContributions is a snapshot of the current per-agent contributions.
 	// One row per RR. Used to restore AgentContributions on restart.
 	"CombinerContributions": `CREATE TABLE IF NOT EXISTS 'CombinerContributions' (
@@ -242,6 +251,25 @@ var HsyncTables = map[string]string{
 		rrtype      INTEGER NOT NULL,
 		origin_time INTEGER NOT NULL, -- unix nanoseconds; the wire Time is RFC3339Nano
 		dist_id     TEXT NOT NULL,
+		under       INTEGER NOT NULL DEFAULT 0, -- the active serial stamped at the send (S16)
+		has_under   INTEGER NOT NULL DEFAULT 0,
+		UNIQUE(zone, agent_id, rrtype)
+	)`,
+
+	// CombinerReplaceOrigin is the combiner's side of the same guard
+	// (combinerReplaceOrigins): per (zone, sender, rrtype) the origin of the
+	// last REPLACE the combiner applied, so a queued older one stays refused
+	// after a restart. A table of its own, so an agent and a combiner that
+	// share a KeyDB keep their guards apart.
+	"CombinerReplaceOrigin": `CREATE TABLE IF NOT EXISTS 'CombinerReplaceOrigin' (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		zone        TEXT NOT NULL,
+		agent_id    TEXT NOT NULL,
+		rrtype      INTEGER NOT NULL,
+		origin_time INTEGER NOT NULL, -- unix nanoseconds
+		dist_id     TEXT NOT NULL,
+		under       INTEGER NOT NULL DEFAULT 0,
+		has_under   INTEGER NOT NULL DEFAULT 0,
 		UNIQUE(zone, agent_id, rrtype)
 	)`,
 
@@ -687,6 +715,14 @@ func (hdb *HsyncDB) migrateHsyncSchema() error {
 			}
 		}
 	}
+	// a replace's origin keeps the serial stamped at its send (S16)
+	for _, col := range []string{"under", "has_under"} {
+		if !dbColumnExists(hdb.DB, "ZoneDataReplaceOrigin", col) {
+			if _, err := hdb.DB.Exec(fmt.Sprintf("ALTER TABLE ZoneDataReplaceOrigin ADD COLUMN %s INTEGER NOT NULL DEFAULT 0", col)); err != nil {
+				log.Printf("schema migration failed: ZoneDataReplaceOrigin.%s: %v", col, err)
+			}
+		}
+	}
 	return hdb.migrateMPKeystore()
 }
 
@@ -734,6 +770,7 @@ func (hdb *HsyncDB) InitCombinerEditTables() error {
 		"CombinerRejectedEdits",
 		"CombinerContributions",
 		"CombinerPublishInstructions",
+		"CombinerReplaceOrigin",
 		"MPActingSerial",
 	}
 

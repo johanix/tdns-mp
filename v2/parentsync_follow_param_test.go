@@ -75,8 +75,8 @@ func namedInTheZone(t *testing.T, mpzd *MPZoneData, identity string) {
 // found the HSYNC records changed.
 func refreshed(t *testing.T, conf *Config, mpzd *MPZoneData) {
 	t.Helper()
-	if !slices.Contains(conf.InternalMp.MPZoneNames, mpzd.ZoneName) {
-		conf.InternalMp.MPZoneNames = append(conf.InternalMp.MPZoneNames, mpzd.ZoneName)
+	if !slices.Contains(conf.mpZoneNames(), mpzd.ZoneName) {
+		conf.InternalMp.mpZones.includeForTest(mpzd.ZoneName)
 		conf.RegisterMPRefreshCallbacks()
 	}
 	mpzd.EnsureMP()

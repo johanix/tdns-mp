@@ -170,6 +170,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 		// every provider's combiner publishes it there (#206); taken from
 		// the leader only (refuseCsyncNotFromLeader)
 		zu.Publish = ampp.Publish
+		zu.Withdraw = ampp.Withdraw
 
 		var cresp = make(chan *AgentMsgResponse, 1)
 		synchedDataUpdateQ <- &SynchedDataUpdate{
@@ -183,6 +184,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			OriginatingTime:   ampp.Time,
 			DeliveredBy:       ampp.DeliveredBy,
 			CatchUp:           ampp.CatchUp,
+			Withdraw:          ampp.Withdraw,
 			Response:          cresp,
 		}
 		select {
@@ -636,8 +638,8 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				resp.ErrorMsg = "this agent has no catch-up tracker"
 				return
 			}
-			if !isVotingMember(msg.Zone, ar.LocalAgent.Identity) {
-				resp.Msg = fmt.Sprintf("zone %s: nothing is sent: this agent does not vote in the zone (it is in neither servers= nor signers=)", msg.Zone)
+			if !asksInZone(msg.Zone, AgentId(ar.LocalAgent.Identity)) {
+				resp.Msg = fmt.Sprintf("zone %s: nothing is sent: this agent asks nothing in the zone (it is an auditor, or no member)", msg.Zone)
 				return
 			}
 			asked := catchUp.AskZone(msg.Zone, catchUpManual)

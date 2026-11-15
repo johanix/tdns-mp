@@ -131,8 +131,11 @@ type catchUpTracker struct {
 
 	self       AgentId
 	startZones map[ZoneName]bool // the multi-provider zones the agent started with
-	outage     time.Duration
-	notAPeer   func(AgentId) bool // the agent's own combiner and signer
+	// unasked: the reason AskZone could not ask with for a zone, for want
+	// of its provider data; askUnasked asks with it (plan S15).
+	unasked  map[ZoneName]string
+	outage   time.Duration
+	notAPeer func(AgentId) bool // the agent's own combiner and signer
 	// operational and send are the transport's; a test stands in for them.
 	operational func(AgentId) bool
 	send        func(ctx context.Context, zone ZoneName, peer AgentId, cu *CatchUp) error
@@ -200,7 +203,7 @@ const (
 var catchUpRoomRetry = 5 * time.Second
 
 // newCatchUpTracker is the agent's tracker. startZones are the
-// multi-provider zones the agent starts with (MPZoneNames as initMPAgent
+// multi-provider zones the agent starts with (mpZoneNames as initMPAgent
 // finds it): the first load of any other zone asks with join.
 func newCatchUpTracker(self AgentId, startZones []string, outage time.Duration) *catchUpTracker {
 	t := &catchUpTracker{
@@ -359,12 +362,21 @@ func (t *catchUpTracker) ask(zone ZoneName, peer AgentId, reason, startRequest s
 	return askRecorded
 }
 
+// asksInZone: this agent asks the zone's voting members for the zone's
+// state: it votes in the zone, or is a member with no role, which its peers
+// answer from the switch on (plan S15). The auditor holds nothing and asks
+// nothing (decision 36).
+func asksInZone(zone ZoneName, self AgentId) bool {
+	switch zoneStanding(instructionsFor(zone), string(self)) {
+	case standingVoting, standingNoRole:
+		return true
+	}
+	return false
+}
+
 // AskZone asks every voting member of the zone other than this agent, in a
-// zone in which this agent votes. An agent with no role in the zone asks
-// nothing: its peers would refuse it until the switch (issue 158), and it
-// asks with role when the role comes. The auditor holds nothing and asks
-// nothing (decision 36). It returns what each Ask did, nil where nothing is
-// asked.
+// zone in which this agent asks (asksInZone). It returns what each Ask did,
+// nil where nothing is asked.
 //
 // Only a zone that is multi-provider here is asked about: one to which the
 // load gave provider data (populateMPdata). A zone with HSYNC3 records and
@@ -372,14 +384,65 @@ func (t *catchUpTracker) ask(zone ZoneName, peer AgentId, reason, startRequest s
 // would repeat every five minutes for ever. Whether such a zone is
 // multi-provider is the transitions design's question.
 func (t *catchUpTracker) AskZone(zone ZoneName, reason string) map[AgentId]askResult {
-	if t == nil || !isVotingMember(zone, string(t.self)) {
+	if t == nil || !asksInZone(zone, t.self) {
+		return nil
+	}
+	if zd, ok := Zones.Get(string(zone)); !ok || !zd.hasProviderData() {
+		t.mu.Lock()
+		if t.unasked == nil {
+			t.unasked = map[ZoneName]string{}
+		}
+		// a first load's start is kept over a later refresh's join
+		if z := ZoneName(dns.Fqdn(string(zone))); t.unasked[z] != catchUpStart {
+			t.unasked[z] = reason
+		}
+		t.mu.Unlock()
+		return nil
+	}
+	out := map[AgentId]askResult{}
+	for _, peer := range votingPeers(zone, t.self) {
+		out[peer] = t.Ask(zone, peer, reason)
+	}
+	return out
+}
+
+// askUnasked asks every voting member of the zone that this agent has never
+// asked, in a zone in which it asks (AskZone's tests), with the reason
+// AskZone could not ask with for want of the zone's provider data, or join
+// when it noted none. It runs when the zone's active instructions become
+// known or change (know, activate), once the provider data follows them. A
+// standing that rose at a refresh asked nothing when that refresh read the
+// provider data by the instructions from before the copy was noted: a
+// newcomer whose own record arrives with the copy has none until its
+// active instructions are known (plan S15). A peer already asked, answered
+// or not, is left to the tracker.
+func (t *catchUpTracker) askUnasked(zone ZoneName) map[AgentId]askResult {
+	if t == nil || !asksInZone(zone, t.self) {
 		return nil
 	}
 	if zd, ok := Zones.Get(string(zone)); !ok || !zd.hasProviderData() {
 		return nil
 	}
+	zone = ZoneName(dns.Fqdn(string(zone)))
+	peers := votingPeers(zone, t.self)
+	var unasked []AgentId
+	t.mu.Lock()
+	reason, noted := t.unasked[zone]
+	if !noted {
+		reason = catchUpJoin
+	}
+	delete(t.unasked, zone)
+	for _, peer := range peers {
+		if _, asked := t.peers[zone][AgentId(dns.Fqdn(string(peer)))]; !asked {
+			unasked = append(unasked, peer)
+		}
+	}
+	t.mu.Unlock()
+	if len(unasked) == 0 {
+		return nil
+	}
 	out := map[AgentId]askResult{}
-	for _, peer := range votingPeers(zone, t.self) {
+	for _, peer := range unasked {
 		out[peer] = t.Ask(zone, peer, reason)
 	}
 	return out
@@ -431,8 +494,8 @@ func (t *catchUpTracker) PeerOperational(peer AgentId) {
 }
 
 // sharedZones are the multi-provider zones that have loaded here, with the
-// provider data AskZone asks for at a load, and in which both this agent
-// and peer vote. A zone with HSYNC3 records and no HSYNCPARAM has no
+// provider data AskZone asks for at a load, in which this agent asks and
+// peer votes. A zone with HSYNC3 records and no HSYNCPARAM has no
 // provider data, and is asked about neither at a load nor at a beat.
 func (t *catchUpTracker) sharedZones(peer AgentId) []ZoneName {
 	var out []ZoneName
@@ -442,7 +505,7 @@ func (t *catchUpTracker) sharedZones(peer AgentId) []ZoneName {
 			continue
 		}
 		zone := ZoneName(zd.ZoneName)
-		if isVotingMember(zone, string(t.self)) && isVotingMember(zone, string(peer)) {
+		if asksInZone(zone, t.self) && isVotingMember(zone, string(peer)) {
 			out = append(out, zone)
 		}
 	}
@@ -706,7 +769,7 @@ func (t *catchUpTracker) appliesLocked(zone ZoneName, peer AgentId) bool {
 	if _, held := tdns.Zones.Get(string(zone)); !held {
 		return false
 	}
-	return isVotingMember(zone, string(t.self)) && isVotingMember(zone, string(peer))
+	return asksInZone(zone, t.self) && isVotingMember(zone, string(peer))
 }
 
 // afterRefresh asks what a refresh calls for (the reasons at a refresh):
@@ -714,7 +777,8 @@ func (t *catchUpTracker) appliesLocked(zone ZoneName, peer AgentId) bool {
 // join for one added since, and nothing else; at a later refresh, join when
 // this agent's standing rose from none, role when it rose to voting, and
 // peer-role for each other identity that became a voting member, in a zone
-// in which this agent votes. Entries that no longer apply are dropped.
+// in which this agent asks (asksInZone). Entries that no longer apply are
+// dropped.
 func (t *catchUpTracker) afterRefresh(zone ZoneName, a *ZoneRefreshAnalysis) {
 	if t == nil || a == nil {
 		return
@@ -743,10 +807,30 @@ func (t *catchUpTracker) afterRefresh(zone ZoneName, a *ZoneRefreshAnalysis) {
 	case a.StandingAfter == standingVoting && a.StandingBefore != standingVoting:
 		t.AskZone(zone, catchUpRole)
 	}
-	if !isVotingMember(zone, string(t.self)) {
+	t.askNewVoters(zone, a.NewVoters)
+}
+
+// peersEntered asks each other provider that a thaw's activation put in
+// servers= or signers=, a list it was not in under from, for the zone's
+// state: peer-role, as for a peer given its first role, and so for a
+// provider put back (design 5.1, plan S18a). A refresh asks the same
+// through afterRefresh.
+func (t *catchUpTracker) peersEntered(zone ZoneName, from, to *Instructions) {
+	if t == nil || from == nil || to == nil {
 		return
 	}
-	for _, peer := range a.NewVoters {
+	a := &ZoneRefreshAnalysis{}
+	catchUpReasons(a, from, to, t.self, true)
+	t.askNewVoters(ZoneName(dns.Fqdn(string(zone))), a.NewVoters)
+}
+
+// askNewVoters asks each of the zone's new voting members but this agent
+// with peer-role, in a zone in which this agent asks.
+func (t *catchUpTracker) askNewVoters(zone ZoneName, voters []AgentId) {
+	if !asksInZone(zone, t.self) {
+		return
+	}
+	for _, peer := range voters {
 		if !isAmong([]string{string(t.self)}, peer) {
 			t.Ask(zone, peer, catchUpPeerRole)
 		}
@@ -929,7 +1013,7 @@ func (t *catchUpTracker) failLocked(zone ZoneName, peer AgentId, e *catchUpPeer,
 
 // CatchUpStatus is the zone's catch-up, for agent parentsync status.
 type CatchUpStatus struct {
-	NotVoting  bool                `json:"not_voting,omitempty"` // this agent does not vote in the zone, and asks nothing
+	NotVoting  bool                `json:"not_voting,omitempty"` // this agent asks nothing in the zone (asksInZone): an auditor, or no member
 	CaughtUp   bool                `json:"caught_up"`
 	WaitingFor string              `json:"waiting_for,omitempty"`
 	Peers      []CatchUpPeerStatus `json:"peers,omitempty"`
@@ -952,7 +1036,7 @@ func (t *catchUpTracker) Status(zone ZoneName) *CatchUpStatus {
 		return nil
 	}
 	zone = ZoneName(dns.Fqdn(string(zone)))
-	if !isVotingMember(zone, string(t.self)) {
+	if !asksInZone(zone, t.self) {
 		return &CatchUpStatus{NotVoting: true}
 	}
 	t.mu.Lock()

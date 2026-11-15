@@ -378,7 +378,7 @@ func TestARefusedCSYNCLeavesTheRestoredOneInPlace(t *testing.T) {
 	const zone = "csync.restored.example."
 	restored := zone + "\t3600\tIN\tCSYNC\t1 3 NS"
 	r := newEngineRigWith(t, zone, func(conf *Config) {
-		conf.InternalMp.MPZoneNames = []string{zone}
+		conf.InternalMp.mpZones.setForTest(zone)
 		conf.InternalMp.editsRequest = func(context.Context, *tdns.ZoneData, *MPTransportBridge, *MsgQs) (*EditsResponseMsg, time.Time, error) {
 			return &EditsResponseMsg{SenderID: "combiner.a.role.example.", Zone: zone, Message: editsLoaded,
 				AgentRecords: map[string]map[string][]string{roleB: {zone: {restored}}}}, time.Now(), nil
@@ -409,7 +409,7 @@ func TestARefusedCSYNCLeavesTheRestoredOneInPlace(t *testing.T) {
 func TestResyncKeepsTheLocalDNSKEYs(t *testing.T) {
 	const zone = "resync.dnskeys.example."
 	r := newEngineRigWith(t, zone, func(conf *Config) {
-		conf.InternalMp.MPZoneNames = []string{zone}
+		conf.InternalMp.mpZones.setForTest(zone)
 		conf.InternalMp.MPTransport.signerID = "signer.a.role.example."
 		conf.InternalMp.editsRequest = func(context.Context, *tdns.ZoneData, *MPTransportBridge, *MsgQs) (*EditsResponseMsg, time.Time, error) {
 			return &EditsResponseMsg{SenderID: "combiner.a.role.example.", Zone: zone, Message: editsLoaded}, time.Now(), nil

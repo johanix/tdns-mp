@@ -240,7 +240,7 @@ func startMPServedZone(t *testing.T, kdb *tdns.KeyDB, up *mpUpstream, mp *MultiP
 		FirstZoneLoad: true,
 	}
 	tdns.Zones.Set(up.zone, zd)
-	conf.InternalMp.MPZoneNames = []string{up.zone}
+	conf.InternalMp.mpZones.setForTest(up.zone)
 	conf.RegisterMPRefreshCallbacks()
 	if len(zd.OnZonePreRefresh) == 0 {
 		t.Fatal("RegisterMPRefreshCallbacks attached no pre-refresh callback to the zone")

@@ -527,6 +527,9 @@ func TestAlgorithmRolloverCancelledBeforeTheNewAlgorithmSigns(t *testing.T) {
 	if err != nil || from != dns.ED25519 || to != algRollTo {
 		t.Fatalf("cancel: from %d to %d err %v, want ED25519, ECDSAP256SHA256 and no error", from, to, err)
 	}
+	if r.wire.marks != 1 {
+		t.Errorf("the cancel told %d times, want once: the algorithm rollover's flag changed", r.wire.marks)
+	}
 	if r.l.Policy.KSKAlgorithm != dns.ED25519 {
 		t.Fatalf("after the cancel the policy's KSK algorithm is %d, want ED25519", r.l.Policy.KSKAlgorithm)
 	}

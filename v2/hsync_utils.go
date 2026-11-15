@@ -587,11 +587,11 @@ func requestConfigWith(ar *AgentRegistry, agent *Agent, zone string, subtype str
 	answer, cancel := msgQs.configWaiters.register(rfiWaitKey(string(agent.ID), zone, subtype, nonce))
 	defer cancel()
 	// The answer to a request for the zone's SIG(0) key is let in from a
-	// peer that has no role in the zone (keyHandOverAdmits): the leader of
-	// the group the zone left, whose role the owner may have taken. So is
-	// the answer to a request for a serial of its instructions: until this
-	// agent knows the active serial, its copy may give it no role itself.
-	// Its delivery confirmation is let in by its distribution id alone.
+	// peer that is no member of the zone here (keyHandOverAdmits): a voting
+	// member under the zone's other serial (plan S14, S15). So is the answer
+	// to a request for a serial of its instructions: until this agent knows
+	// the active serial, its copy may make it no member itself. Its delivery
+	// confirmation is let in by its distribution id alone.
 	var distributionID string
 	if (subtype == "sig0key" || subtype == "instructions") && ar.MPTransport != nil {
 		defer ar.MPTransport.keyAsks.start(string(agent.ID), zone)()
@@ -1083,6 +1083,15 @@ func (mpzd *MPZoneData) hasPubkey() bool {
 	return mpzd.roles().Pubkey
 }
 
+// pubkeyHere: the zone says pubkey and its instructions carry HSYNC3, so
+// its providers' agents publish its key in zones of their own. A zone with
+// no HSYNC3 is not a multi-provider zone: tdns's use-hsyncparam publishes
+// for it, each provider on its own, and stands aside only for a copy with
+// HSYNC3 (the project owner, 2026-11-06).
+func (mpzd *MPZoneData) pubkeyHere() bool {
+	return mpzd.hasPubkey() && hasHSYNC3(mpzd.instructions())
+}
+
 // mpDataLocks is a lock per zone (canonicalName), held while the zone's
 // multi-provider data is computed and set and acted on: by a refresh
 // (MPPreRefresh) and by a hand-over (actBySignerHandover, actByHandover),
@@ -1164,8 +1173,8 @@ func (mpzd *MPZoneData) populateMPdata(mp *MultiProviderConf, r Roles) {
 	// Non-signer servers in signed zones get disallow-edits but MPdata is
 	// still populated (allows persistence without editing — sep-1 behavior).
 	switch {
-	case weAreAuditor:
-		// Auditors never edit
+	case weAreAuditor, !weAreServer && !weShouldSign:
+		// Auditors never edit, nor does a member with no role (plan S15)
 		mpzd.MPOptions[OptMPDisallowEdits] = true
 		mpzd.MPOptions[tdns.OptAllowEdits] = false
 	case zoneSigned && !weShouldSign:
@@ -1389,16 +1398,18 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 		// step's (S12, S13). A signer that waits for its agent's hand-over
 		// signs by the signer sets it last acted by, unchanged by its copy
 		// (rule 5), and keeps its data whole when the copy drops this
-		// provider. At its first load here it has acted by none: what the
-		// config parse leaves is no data (computed), and the first load
-		// takes its copy's, so that inline-signing is on before the first
-		// publish (main_init.go).
+		// provider; those sets are kept on disk, so a restart keeps them
+		// (signer_acted.go, until P5). At its first load here it has acted by
+		// none: what the config parse leaves is no data (computed), and the
+		// first load takes its copy's, so that inline-signing is on before
+		// the first publish (main_init.go).
 		r := newMpzd.roles()
 		_, handed := actingHeld.Load().roles(mpzd.ZoneName)
-		kept := mpzd.MP.MPdata
-		waits := !handed && tdns.Globals.App.Type == AppTypeMPSigner && signerWaits(mpzd.ZoneName, newApex) && kept.computed()
+		unhanded := !handed && tdns.Globals.App.Type == AppTypeMPSigner && signerWaits(mpzd.ZoneName, newApex)
+		last, acted := signerLastActed(mpzd.ZoneName, mpzd.MP.MPdata)
+		waits := unhanded && acted
 		if waits {
-			r.KeySigners, r.DSSigners, r.KeyConfirmers, r.Signing = kept.Sets.KeySigners, kept.Sets.DSSigners, kept.Sets.KeyConfirmers, kept.Sets.Signing
+			r.KeySigners, r.DSSigners, r.KeyConfirmers, r.Signing = last.KeySigners, last.DSSigners, last.KeyConfirmers, last.Signing
 		}
 		newMpzd.populateMPdata(mp, r)
 		if !waits || newMpzd.MP.MPdata != nil {
@@ -1407,6 +1418,11 @@ func (mpzd *MPZoneData) MPPreRefresh(new_zd *tdns.ZoneData, tm *MPTransportBridg
 			mpzd.MP.MPdata = newMpzd.MP.MPdata
 			mpzd.MPOptions = newMpzd.MPOptions
 			mpzd.Unlock()
+		}
+		if unhanded {
+			if err := signerActed.Load().keep(mpzd.ZoneName, r); err != nil {
+				lg.Error("the sets the signer acts by are not kept: a restart takes its copy's", "zone", mpzd.ZoneName, "err", err)
+			}
 		}
 	}
 
@@ -1785,7 +1801,8 @@ func (mpzd *MPZoneData) PostRefresh(tm *MPTransportBridge, msgQs *MsgQs) {
 // through them PR #186's callbacks). Then, at the agent, membership step 8's
 // one check of the zone's election, after the groups are recomputed: called
 // before it, a zone reduced to one provider would still find its old group
-// (#149).
+// (#149). An agent whose own standing becomes "no role" says so once
+// (plan S15).
 func (mpzd *MPZoneData) onActiveChanged(tm *MPTransportBridge, from, to *Instructions) {
 	lg.Info("the zone's active instructions changed", "zone", mpzd.ZoneName, "from", instructionsName(from), "to", instructionsName(to))
 	if tm == nil || tm.agentRegistry == nil {
@@ -1796,6 +1813,11 @@ func (mpzd *MPZoneData) onActiveChanged(tm *MPTransportBridge, from, to *Instruc
 	diff := hsync.HsyncDiff{Entered: entered, Left: left}
 	switch tdns.Globals.App.Type {
 	case AppTypeMPAgent:
+		if ar.LocalAgent != nil {
+			if self := ar.LocalAgent.Identity; zoneStanding(to, self) == standingNoRole && zoneStanding(from, self) != standingNoRole {
+				lg.Info("an HSYNC3 record and no role: member, no vote, no edits", "zone", mpzd.ZoneName)
+			}
+		}
 		if ar.HsyncEngine != nil {
 			_ = ar.HsyncEngine.ApplyHsyncDiff(hsync.ZoneName(mpzd.ZoneName), diff)
 		}
@@ -1831,10 +1853,10 @@ func (mpzd *MPZoneData) onActiveChanged(tm *MPTransportBridge, from, to *Instruc
 // provider that enters either list: a provider put back, design 5.1), and
 // whether the active instructions changed.
 func catchUpReasons(a *ZoneRefreshAnalysis, from, to *Instructions, self AgentId, changed bool) {
-	pBefore, before := participantsOf(from)
-	pAfter, after := participantsOf(to)
-	a.StandingBefore = standingIn(from, pBefore, before, string(self))
-	a.StandingAfter = standingIn(to, pAfter, after, string(self))
+	_, before, aBefore := participantsOf(from)
+	_, after, aAfter := participantsOf(to)
+	a.StandingBefore = standingIn(from, before, aBefore, string(self))
+	a.StandingAfter = standingIn(to, after, aAfter, string(self))
 	a.HsyncChanged = changed
 	a.NewVoters = nil
 	newVoter := func(id string) {

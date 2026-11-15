@@ -62,6 +62,8 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	// Register tdns-mp PreRefresh/PostRefresh closures on MP zones.
 	conf.RegisterMPRefreshCallbacks()
 	conf.Config.Internal.PostParseZonesHook = conf.RegisterMPRefreshCallbacks
+	// and a zone whose ZoneData tdns replaces gets them again (#396)
+	conf.installZoneHooks(conf.registerRefreshCallbacks, conf.firstLoadSetup)
 
 	// Wire the receive path (CHUNK NOTIFY handler + router dispatch); must
 	// precede NotifyHandler (D3: one entry point per role).
@@ -96,11 +98,11 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 	tdns.StartEngine(&tdns.Globals.App, "Notifier", func() error {
 		return tdns.Notifier(ctx, conf.Config, conf.Config.Internal.NotifyQ)
 	})
-	// The reader of ResignQ, as in StartMPAgent. The identity set-up the
-	// auditor shares with the agent (SetupAgentAutoZone) registers the
-	// identity zone for periodic re-signing on that queue; with no engine
-	// reading it the zone was signed once, at the start, and an auditor that
-	// ran for longer than its signatures were valid served expired ones.
+	// The resigner, as in StartMPAgent. The identity set-up the auditor
+	// shares with the agent (SetupAgentAutoZone) puts the identity zone on
+	// its watchlist; with no engine running, the zone was signed once, at the
+	// start, and an auditor that ran for longer than its signatures were
+	// valid served expired ones.
 	tdns.StartEngineNoError(&tdns.Globals.App, "ResignerEngine", func() {
 		tdns.ResignerEngine(ctx, conf.Config.Internal.ResignQ)
 	})
@@ -202,9 +204,11 @@ func (conf *Config) StartMPAuditor(ctx context.Context, apirouter *mux.Router) e
 		})
 	}
 
-	// Delegation sync for the auditor's identity zone (its DS at its
-	// parent): tdns's own syncher, since the auditor has no cells to elect
-	// a leader for.
+	// The reader of the delegation sync queue: tdns's own syncher, since
+	// the auditor has no cells to elect a leader for. It was started for
+	// the auditor's identity zone, which no longer asks for a sync (tdns-mp
+	// #391); it stays so that a request queued for any other zone is read
+	// and not left to block its sender.
 	if kdb != nil && conf.Config.Internal.DelegationSyncQ != nil {
 		tdns.StartEngine(&tdns.Globals.App, "DelegationSyncher", func() error {
 			return kdb.DelegationSyncher(ctx, conf.Config.Internal.DelegationSyncQ, conf.Config.Internal.NotifyQ, conf.Config)

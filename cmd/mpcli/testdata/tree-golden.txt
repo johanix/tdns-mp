@@ -679,6 +679,29 @@ inherited: |
   -v, --verbose         verbose output
   -z, --zone string     zone name
 
+=== tdns-mpcli agent debug withdraw
+use: withdraw
+short: Withdraw another provider's NS, DNSKEY or CDS records from a zone, as its leader
+long: |
+  Withdraw another provider's records of one type from a zone: an empty
+  replace in the provider's name, sent to this agent's combiner and to every
+  member. Refused unless this agent leads the zone and the active instructions
+  do not list the provider in servers= (NS) or signers= (DNSKEY, CDS).
+  
+    tdns-mpcli agent debug withdraw --zone <zone> --provider <identity> --rrtype NS|DNSKEY|CDS
+flags: |
+      --provider string   the identity of the provider whose records are withdrawn
+      --rrtype string     NS, DNSKEY or CDS
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+      --qname string    qname of rrset to examine
+      --qtype string    qtype of rrset to examine
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
 === tdns-mpcli agent debug zone-txlog
 use: zone-txlog
 short: Show staged-but-unpublished zone changes
@@ -769,7 +792,7 @@ inherited: |
 use: op [operation]
 short: Run an operation toward a peer
 long: |
-  Run an operation toward a peer by identity (e.g. ping to combiner or a peer agent). Use "distrib peers" to list identities. Supported operations: ping (use --dns or --api for combiner ping).
+  Run an operation toward a peer by identity (e.g. ping to combiner or a peer agent). Use "distrib peers" to list identities. Supported operations: ping, over DNS (--dns, the default) or the API (--api), and that transport only.
 flags: |
       --api         For ping: use HTTPS API ping
       --dns         For ping: use CHUNK-based DNS ping (default)
@@ -810,6 +833,18 @@ inherited: |
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
   -z, --zone string     zone name
+
+=== tdns-mpcli agent distrib stamps
+use: stamps [--zone Z]
+short: Show each distribution's stamps per recipient: at its latest send, and in its latest confirmation
+flags: |
+  -z, --zone string   Only the distributions of this zone
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
 
 === tdns-mpcli agent gossip
 use: gossip
@@ -1576,29 +1611,19 @@ long: |
   .private.orig, and writes the manifest. The .key files are NOT touched: they
   already hold the public RR in exactly the form tdns exports.
   
-  Key state comes from bind's .state file (9.16+, dnssec-policy zones), mapped
-  onto tdns's states. A key with no .state file has no state to read, and it is
-  not guessed -- pass --state to say which one applies. Guessing wrong is how a
-  retired key gets published again.
+  SIG(0) keys are not managed by dnssec-policy, so there is no key state to
+  read: a .state file beside a key is ignored. --state names the state that
+  every key the run converts gets: created, published, active or retired. It is
+  required whenever there is a key to convert, because it is not guessed:
+  guessing wrong is how a retired key gets published again.
   
   Runs entirely locally: no daemon, no API, no keystore. That is the point --
   these directories are built and committed before the server that serves them
   exists. Re-running is safe; already-converted keys are left alone.
-  
-  --from cascade (DNSSEC only) converts the keys of zones signed by NLnet Labs'
-  Cascade, so a zone moves to tdns with the same keys and the parent's DS is left
-  as it is. Give each zone's dnst state file with --state-file (in Cascade's
-  keys-dir, <zone>.state) and a NEW directory with --dest: Cascade's files are
-  only read, never rewritten. The state file decides each key's tdns state, and
-  the conversion is refused unless the result reproduces the DNSKEY RRset and DS
-  set Cascade serves. A key roll in progress is refused unless
-  --allow-roll-in-progress; another signer's key in the DNSKEY RRset is refused
-  unless --multi-signer (the target is tdns-mpsigner, which takes such keys from
-  its incoming zone). See docs/2026-09-16-cascade-key-migration.md.
 flags: |
-      --dir string     Directory of bind9 key files to convert in place (--from bind)
-      --no-backup      Do not keep the original bind-format key as .private.orig (--from bind)
-      --state string   Key state for keys with no .state file (required only for those; --from bind)
+      --dir string     Directory of bind9 key files to convert in place
+      --no-backup      Do not keep the original bind-format key as .private.orig
+      --state string   Key state for every key converted: created, published, active or retired (required)
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
@@ -2552,8 +2577,9 @@ inherited: |
 use: addrr
 short: Add a resource record to a zone and sync with peers and combiner
 long: |
-  Add a resource record to the specified zone. Supported RR types: NS, DNSKEY, CDS, CSYNC, KEY.
-  The RR type is inferred from the --rr argument.
+  Add a resource record to the specified zone. Supported RR types: NS, DNSKEY, CDS, CSYNC.
+  The RR type is inferred from the --rr argument. A KEY is refused: the zone's KEY is the group's,
+  and its leader publishes it.
   
   This will:
   - Add the RR to the local synced data store
@@ -2591,7 +2617,8 @@ use: delrr
 short: Delete a resource record from a zone and sync with peers and combiner
 long: |
   Delete a resource record from the specified zone. Supported RR types: NS, DNSKEY, CDS, CSYNC, KEY.
-  The RR type is inferred from the --rr argument.
+  The RR type is inferred from the --rr argument. A KEY is deleted from what this agent holds of its own;
+  at the zone's leader, the KEY it publishes is refused.
   
   This will:
   - Remove the RR from the local synced data store
@@ -2721,6 +2748,39 @@ inherited: |
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+
+=== tdns-mpcli agent zone instructions
+use: instructions
+short: The serials the agent keeps of a zone's instructions
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -F, --force           force operation
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
+
+=== tdns-mpcli agent zone instructions forget
+use: forget
+short: Forget a steady zone's stored serials
+long: |
+  Clear the serials this agent keeps of a zone's instructions: the one
+  exception to never giving a serial up. The agent refuses unless the zone is
+  steady here. Run it at every agent of the zone together. Its uses: a zone the
+  owner re-creates at a lower serial, and an agent left behind by a jump of the
+  serial of 2^31 or more.
+  
+  Example:
+    tdns-mpcli agent zone instructions forget --zone example.com.
+inherited: |
+      --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
+  -d, --debug           debug output
+  -F, --force           force operation
+  -H, --headers         show headers
+  -Z, --pzone string    parent zone name
+  -v, --verbose         verbose output
+  -z, --zone string     zone name
 
 === tdns-mpcli agent zone list
 use: list
@@ -3863,29 +3923,19 @@ long: |
   .private.orig, and writes the manifest. The .key files are NOT touched: they
   already hold the public RR in exactly the form tdns exports.
   
-  Key state comes from bind's .state file (9.16+, dnssec-policy zones), mapped
-  onto tdns's states. A key with no .state file has no state to read, and it is
-  not guessed -- pass --state to say which one applies. Guessing wrong is how a
-  retired key gets published again.
+  SIG(0) keys are not managed by dnssec-policy, so there is no key state to
+  read: a .state file beside a key is ignored. --state names the state that
+  every key the run converts gets: created, published, active or retired. It is
+  required whenever there is a key to convert, because it is not guessed:
+  guessing wrong is how a retired key gets published again.
   
   Runs entirely locally: no daemon, no API, no keystore. That is the point --
   these directories are built and committed before the server that serves them
   exists. Re-running is safe; already-converted keys are left alone.
-  
-  --from cascade (DNSSEC only) converts the keys of zones signed by NLnet Labs'
-  Cascade, so a zone moves to tdns with the same keys and the parent's DS is left
-  as it is. Give each zone's dnst state file with --state-file (in Cascade's
-  keys-dir, <zone>.state) and a NEW directory with --dest: Cascade's files are
-  only read, never rewritten. The state file decides each key's tdns state, and
-  the conversion is refused unless the result reproduces the DNSKEY RRset and DS
-  set Cascade serves. A key roll in progress is refused unless
-  --allow-roll-in-progress; another signer's key in the DNSKEY RRset is refused
-  unless --multi-signer (the target is tdns-mpsigner, which takes such keys from
-  its incoming zone). See docs/2026-09-16-cascade-key-migration.md.
 flags: |
-      --dir string     Directory of bind9 key files to convert in place (--from bind)
-      --no-backup      Do not keep the original bind-format key as .private.orig (--from bind)
-      --state string   Key state for keys with no .state file (required only for those; --from bind)
+      --dir string     Directory of bind9 key files to convert in place
+      --no-backup      Do not keep the original bind-format key as .private.orig
+      --state string   Key state for every key converted: created, published, active or retired (required)
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output
@@ -10010,29 +10060,19 @@ long: |
   .private.orig, and writes the manifest. The .key files are NOT touched: they
   already hold the public RR in exactly the form tdns exports.
   
-  Key state comes from bind's .state file (9.16+, dnssec-policy zones), mapped
-  onto tdns's states. A key with no .state file has no state to read, and it is
-  not guessed -- pass --state to say which one applies. Guessing wrong is how a
-  retired key gets published again.
+  SIG(0) keys are not managed by dnssec-policy, so there is no key state to
+  read: a .state file beside a key is ignored. --state names the state that
+  every key the run converts gets: created, published, active or retired. It is
+  required whenever there is a key to convert, because it is not guessed:
+  guessing wrong is how a retired key gets published again.
   
   Runs entirely locally: no daemon, no API, no keystore. That is the point --
   these directories are built and committed before the server that serves them
   exists. Re-running is safe; already-converted keys are left alone.
-  
-  --from cascade (DNSSEC only) converts the keys of zones signed by NLnet Labs'
-  Cascade, so a zone moves to tdns with the same keys and the parent's DS is left
-  as it is. Give each zone's dnst state file with --state-file (in Cascade's
-  keys-dir, <zone>.state) and a NEW directory with --dest: Cascade's files are
-  only read, never rewritten. The state file decides each key's tdns state, and
-  the conversion is refused unless the result reproduces the DNSKEY RRset and DS
-  set Cascade serves. A key roll in progress is refused unless
-  --allow-roll-in-progress; another signer's key in the DNSKEY RRset is refused
-  unless --multi-signer (the target is tdns-mpsigner, which takes such keys from
-  its incoming zone). See docs/2026-09-16-cascade-key-migration.md.
 flags: |
-      --dir string     Directory of bind9 key files to convert in place (--from bind)
-      --no-backup      Do not keep the original bind-format key as .private.orig (--from bind)
-      --state string   Key state for keys with no .state file (required only for those; --from bind)
+      --dir string     Directory of bind9 key files to convert in place
+      --no-backup      Do not keep the original bind-format key as .private.orig
+      --state string   Key state for every key converted: created, published, active or retired (required)
 inherited: |
       --config string   config file (default is $TDNS_MPCLI_CONFIG, then /etc/tdns/tdns-mpcli.yaml)
   -d, --debug           debug output

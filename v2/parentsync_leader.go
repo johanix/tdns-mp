@@ -185,6 +185,16 @@ func (lem *LeaderElectionManager) SetOnZoneJoined(f func(zone ZoneName) error) {
 	}
 }
 
+// SetOnKeyLocations sets the callback invoked when a zone this agent leads
+// has a change of its active instructions (zoneChanged): it sends the KEY to
+// a location the zone has gained, with no new lead. It runs with the zone's
+// key-setup lock held, as every setup of the zone's key does.
+func (lem *LeaderElectionManager) SetOnKeyLocations(f func(zone ZoneName) error) {
+	lem.onKeyLocations = func(zone ZoneName) error {
+		return lem.inKeySetup(zone, func() error { return f(zone) })
+	}
+}
+
 // StartGroupElection initiates a leader election for a provider group.
 func (lem *LeaderElectionManager) StartGroupElection(groupHash string, members []string, zones []ZoneName) {
 	lem.startGroupElection(groupHash, members, zones, nil)
@@ -1140,6 +1150,11 @@ func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state Gr
 // leader that acts only when the views of a zone agree is what closes that
 // window (the membership design).
 func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string) {
+	was := "no group"
+	if from != "" {
+		was = shortHash(from)
+	}
+	lg.Info("the zone joined a provider group", "zone", zone, "group", shortHash(to), "was_in", was)
 	// The parent work under way for the zone belongs to the hold of the lead
 	// it began in, the zone's own election's or the group's it left. From
 	// now on a loss of the new group's lead is the one that ends this
@@ -1163,10 +1178,6 @@ func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string
 			"zone", zone, "group", shortHash(to))
 		return
 	}
-	was := "no group"
-	if from != "" {
-		was = shortHash(from)
-	}
 	lgElect.Info("zone joined a group this agent leads, asking for its delegation sync",
 		"zone", zone, "group", shortHash(to), "was_in", was)
 	go func() {
@@ -1186,6 +1197,11 @@ func (lem *LeaderElectionManager) zoneJoinedGroup(zone ZoneName, from, to string
 // on parentsync=agent.
 func (lem *LeaderElectionManager) electAtFirstLoad(zd *tdns.ZoneData) {
 	if !zd.Options[tdns.OptParentSync] && !zd.Options[tdns.OptMultiProvider] {
+		return
+	}
+	// The agent's own identity zone holds no election, whatever its
+	// options: it has no delegation sync (tdns-mp #391).
+	if sameName(zd.ZoneName, string(lem.localID)) {
 		return
 	}
 	zone := ZoneName(zd.ZoneName)
@@ -1226,11 +1242,16 @@ func (lem *LeaderElectionManager) electAtFirstLoad(zd *tdns.ZoneData) {
 //     nothing else is done; the group's election decides;
 //  3. no group covers the zone and this agent is its only voting member:
 //     it elects itself, unless it leads already (#149).
+//
+// And when this agent votes in the zone and leads it, a location the zone
+// has gained for its KEY gets the KEY with no new lead (onKeyLocations):
+// at-ns once HSYNC3 is added to a zone that says pubkey.
 func (lem *LeaderElectionManager) zoneChanged(zone ZoneName) {
 	if !votesInZone(zone, lem.localID) {
 		lem.dropZoneElection(zone)
 		return
 	}
+	defer lem.keyLocationsChanged(zone)
 	if lem.providerGroupMgr != nil {
 		if pg := lem.providerGroupMgr.GetGroupForZone(zone); pg != nil {
 			lem.dropZoneElection(zone)
@@ -1240,6 +1261,19 @@ func (lem *LeaderElectionManager) zoneChanged(zone ZoneName) {
 	if lem.configuredPeers(zone) == 0 && !lem.IsLeader(zone) {
 		lem.StartElection(zone, 0)
 	}
+}
+
+// keyLocationsChanged runs onKeyLocations for a zone this agent leads, in
+// a goroutine of its own.
+func (lem *LeaderElectionManager) keyLocationsChanged(zone ZoneName) {
+	if lem.onKeyLocations == nil || !lem.IsLeader(zone) {
+		return
+	}
+	go func() {
+		if err := lem.onKeyLocations(zone); err != nil {
+			logLeaderCallback("onKeyLocations", err, "zone", zone)
+		}
+	}()
 }
 
 // dropZoneElection drops the zone's own election, its timers and a deferred
@@ -2237,7 +2271,7 @@ func importSig0KeyFromPeer(hdb *HsyncDB, keyName string, configData map[string]s
 
 // broadcastElectToZone sends an election RFI message to the zone's voting
 // members and its auditors (the plan's 3.2), by an explicit test: Agents
-// holds the role holders today, and every member from the switch on.
+// holds every member, those with no role too (plan S15).
 func (ar *AgentRegistry) broadcastElectToZone(zone ZoneName, rfiType string, records map[string][]string) error {
 	zad, err := ar.GetZoneAgentData(zone)
 	if err != nil {
@@ -2343,6 +2377,11 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *tdns.Zo
 	// The same test as IsLeader: a lead that no longer counts is not shown
 	// as this agent's.
 	status.IsLeader = status.Leader == lem.localID && time.Now().Before(status.LeaderExpiry) && votesInZone(zone, lem.localID)
+	// This agent's standing (plan S15): one that does not vote learns the
+	// leader from gossip, and the status says so.
+	if status.Standing = zoneStandingName(string(zone), string(lem.localID)); status.Standing != "" {
+		status.NoVote = !votesInZone(zone, lem.localID)
+	}
 
 	// The zone's catch-up (catchup.go), which needs neither the zone's data
 	// nor the keystore.

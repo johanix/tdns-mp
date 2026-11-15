@@ -584,10 +584,11 @@ func TestACsyncFromTheLeaderIsTakenAndReachesTheCombiner(t *testing.T) {
 	}
 }
 
-// A CSYNC from an agent that is not the zone's leader is rejected, and so
-// is any CSYNC while no leader is known. The sender is told why in a final
-// confirmation, and nothing of it reaches the repo or the combiner. What
-// else the SYNC carries is processed as usual.
+// A CSYNC from an agent that is not the zone's leader is rejected. The
+// sender is told why in a final confirmation, and nothing of it reaches the
+// repo or the combiner. What else the SYNC carries is processed as usual.
+// One that comes while no leader is known is kept until one is (plan S15,
+// kept_for_leader_test.go).
 func TestACsyncFromAnyoneButTheLeaderIsRejected(t *testing.T) {
 	r := receivingRig(t, "refused.csync.example.")
 	z := r.mpzd.ZoneName
@@ -620,19 +621,11 @@ func TestACsyncFromAnyoneButTheLeaderIsRejected(t *testing.T) {
 	rejected("another member in the leader's name", r.receives(t, string(r.lem.localID), sender, op),
 		"a CSYNC is taken only from the zone's delegation sync leader: the sender is "+sender+", the leader is "+string(r.lem.localID))
 
-	// no leader is known: the lease has run out, or no election was held
-	r.lem.mu.Lock()
-	delete(r.lem.elections, ZoneName(z))
-	r.lem.mu.Unlock()
-	rejected("no leader known", r.receives(t, sender, sender, op),
-		"a CSYNC is taken only from the zone's delegation sync leader: the sender is "+sender+", and no leader is known")
-	r.logged(t, 1, logCsyncRefused+" zone="+z+" sender="+sender+" originator="+sender+` leader="(none known)"`)
-
 	// an NS record beside the CSYNC is the sender's own contribution, and
 	// is taken
 	ns := fmt.Sprintf("%s\t3600\tIN\tNS\tns9.provider.example.", z)
 	rejected("a CSYNC beside an NS record", r.receives(t, sender, sender, op, core.RROperation{Operation: "replace", RRtype: "NS", Records: []string{ns}}),
-		"a CSYNC is taken only from the zone's delegation sync leader: the sender is "+sender+", and no leader is known")
+		"a CSYNC is taken only from the zone's delegation sync leader: the sender is "+sender+", the leader is "+string(r.lem.localID))
 	var held []TrackedRRInfo
 	for end := time.Now().Add(10 * time.Second); time.Now().Before(end) && len(held) == 0; time.Sleep(10 * time.Millisecond) {
 		held = r.repo(t)[AgentId(sender)][dns.TypeNS]

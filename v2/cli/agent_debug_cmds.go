@@ -44,7 +44,45 @@ func debugAgentLeaves(kind string) []*cobra.Command {
 		newDebugAgentResyncCmd(kind),
 		newDebugAgentShowKeyInventoryCmd(kind),
 		newDebugAgentQueueStatusCmd(kind),
+		newDebugAgentWithdrawCmd(kind),
 	}
+}
+
+// newDebugAgentWithdrawCmd is the leader's withdrawal of another provider's
+// records (plan S16), refused unless this agent leads the zone and the
+// active instructions do not list the provider for the type.
+func newDebugAgentWithdrawCmd(kind string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "withdraw",
+		Short: "Withdraw another provider's NS, DNSKEY or CDS records from a zone, as its leader",
+		Long: `Withdraw another provider's records of one type from a zone: an empty
+replace in the provider's name, sent to this agent's combiner and to every
+member. Refused unless this agent leads the zone and the active instructions
+do not list the provider in servers= (NS) or signers= (DNSKEY, CDS).
+
+  tdns-mpcli agent debug withdraw --zone <zone> --provider <identity> --rrtype NS|DNSKEY|CDS`,
+		Run: func(cmd *cobra.Command, args []string) {
+			tdnscli.PrepArgs("zonename")
+			provider := requiredInjectFlag(cmd, "provider")
+			rrtype, ok := dns.StringToType[strings.ToUpper(requiredInjectFlag(cmd, "rrtype"))]
+			if !ok {
+				log.Fatalf("Error: unknown RR type %q", requiredInjectFlag(cmd, "rrtype"))
+			}
+			amr, err := SendAgentDebugCmd(cmd, AgentMgmtPost{
+				Command: "withdraw",
+				Zone:    ZoneName(tdns.Globals.Zonename),
+				AgentId: AgentId(dns.Fqdn(provider)),
+				RRType:  rrtype,
+			}, false)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			fmt.Println(amr.Msg)
+		},
+	}
+	c.Flags().String("provider", "", "the identity of the provider whose records are withdrawn")
+	c.Flags().String("rrtype", "", "NS, DNSKEY or CDS")
+	return c
 }
 
 func newDebugAgentSendNotifyCmd(kind string) *cobra.Command {

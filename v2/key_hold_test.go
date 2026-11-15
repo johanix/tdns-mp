@@ -403,3 +403,158 @@ func TestASyncOwedForTheKeyDoesNotWaitForRoom(t *testing.T) {
 		t.Errorf("the status says %q, want the key", st.ParentSync)
 	}
 }
+
+// pollEndsWithoutAVerdict runs a poll of the zone's key k to its end in this
+// lead and leaves parent_state as it was: a parent that does not answer
+// KeyState, whose poll tdns gives up.
+func (r *keyHoldRig) pollEndsWithoutAVerdict(t *testing.T, k sig0Row) {
+	t.Helper()
+	keyPoll := r.conf.InternalMp.keyPoll
+	r.conf.InternalMp.keyPoll = func(context.Context, ZoneName, string, uint16, uint8) {}
+	defer func() { r.conf.InternalMp.keyPoll = keyPoll }()
+	r.conf.launchKeyPoll(r.ctx, nil, r.zone, string(r.zone), k.keyid, k.key.Algorithm)
+	waitUntil(t, "the poll did not end\n"+r.log.String(), func() bool {
+		n, _, ended := r.conf.InternalMp.keyPolls.state(r.zone)
+		return n == 0 && ended.keyid == k.keyid
+	})
+}
+
+// Whether the leader's sync waits for the zone's key follows the parent's
+// verdict on it, as tdns recorded it (#404). A verdict that is not trusted
+// holds it, and so does a poll of the key that runs. A key the parent never
+// gave a verdict on holds it until a poll of the key has run to its end in
+// this lead; after that it does not: the next sync tests the key.
+func TestTheHoldFollowsTheParentsVerdict(t *testing.T) {
+	r := newKeyHoldRig(t, "verdict.key.example.")
+	const notTaken = "the parent has not taken the key"
+	cases := []struct {
+		state    uint8
+		unpolled bool // held before a poll of the key ends in this lead
+		polled   bool // held after it
+	}{
+		{0, true, false},
+		{edns0.KeyStateUninitialized, true, false},
+		{edns0.KeyStateTrusted, false, false},
+		{edns0.KeyStateUnknown, true, true},
+		{edns0.KeyStateRefused, true, true},
+		{edns0.KeyStateInvalid, true, true},
+		{edns0.KeyStateValidationFail, true, true},
+		{edns0.KeyStateBootstrapManualRequired, true, true},
+	}
+	check := func(when string, held func(int) bool) {
+		t.Helper()
+		for i, tc := range cases {
+			tdns.UpdateParentState(r.mpzd.KeyDB, string(r.zone), r.key.keyid, tc.state)
+			want := ""
+			if held(i) {
+				want = notTaken
+			}
+			if _, why := r.conf.keyHold(r.ctx, r.zone); why != want {
+				t.Errorf("parent_state %s, %s: held for %q, want %q", edns0.KeyStateToString(tc.state), when, why, want)
+			}
+			if got := r.conf.keyPending(r.ctx, r.zone); got != held(i) {
+				t.Errorf("parent_state %s, %s: keyPending %v, want %v", edns0.KeyStateToString(tc.state), when, got, held(i))
+			}
+		}
+	}
+	check("no poll ended", func(i int) bool { return cases[i].unpolled })
+	r.pollEndsWithoutAVerdict(t, r.key)
+	check("a poll ended in this lead", func(i int) bool { return cases[i].polled })
+
+	tdns.UpdateParentState(r.mpzd.KeyDB, string(r.zone), r.key.keyid, 0)
+	r.pollRuns(t)
+	if _, why := r.conf.keyHold(r.ctx, r.zone); why != "poll running" {
+		t.Errorf("a key with no verdict and a poll of it running: held for %q, want \"poll running\"", why)
+	}
+}
+
+// The leader's sync of a zone whose key the parent never gave a verdict on
+// waits until a poll of the key has run to its end in this lead, and then
+// goes out: it is what tests the key (keys-parent-down K7). tdns records the
+// key trusted when the parent answers it NOERROR, and starts its re-bootstrap
+// on BADKEY.
+func TestASyncTestsAKeyTheParentNeverGaveAVerdictOn(t *testing.T) {
+	r := newKeyHoldRig(t, "tested.key.example.")
+	tdns.UpdateParentState(r.mpzd.KeyDB, string(r.zone), r.key.keyid, 0) // from before S14, or a parent that does not answer KeyState
+	if got := r.explicit(t); !strings.Contains(got.Msg, "the parent has not taken the key") {
+		t.Fatalf("before a poll of the key ended the explicit sync's answer: %q", got.Msg)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := r.parent.updatesSeen(); n != 0 {
+		t.Fatalf("%d UPDATEs reached the parent before a poll of the key ended", n)
+	}
+	r.pollEndsWithoutAVerdict(t, r.key)
+	waitUntil(t, "the sync that waited went out to the parent\n"+r.log.String(), func() bool { return r.parent.updatesSeen() > 0 })
+	if got := r.explicit(t); strings.Contains(got.Msg, "the parent has not taken the key") {
+		t.Errorf("after a poll of the key ended in this lead the explicit sync's answer: %q", got.Msg)
+	}
+}
+
+// keys-k3 a: a key just made, or taken up, is published before its poll
+// starts (the take-up's poll waits until every recipient has the KEY). The
+// parent has not been asked about it yet, and does not trust it: the sync
+// waits until a poll of that key ends, even though a poll of the key before
+// it ended in this lead. A sync signed with it would get BADKEY.
+func TestAFreshKeyPublishedBeforeItsPollHoldsTheSync(t *testing.T) {
+	r := newKeyHoldRig(t, "fresh.key.example.")
+	r.pollEndsWithoutAVerdict(t, r.key) // the key before it, polled in this lead
+
+	fresh := testSig0Key(t, r.mpzd.KeyDB, string(r.zone)) // parent_state 0: never asked
+	zk, err := readZoneKey(r.mpzd.KeyDB, r.zone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range zk.active {
+		if zk.active[i].keyid == fresh.keyid {
+			zk.held = &zk.active[i]
+		}
+	}
+	if only, err := retireOtherActiveKeys(r.mpzd.KeyDB, r.zone, zk); !only || err != nil {
+		t.Fatalf("retiring the key before it: %v, %v", only, err)
+	}
+	if zk, err := readZoneKey(r.mpzd.KeyDB, r.zone); err != nil || zk.held == nil || zk.held.keyid != fresh.keyid {
+		t.Fatalf("the zone's key is not the fresh one: %+v, %v", zk, err)
+	}
+
+	if got := r.explicit(t); !strings.Contains(got.Msg, "the parent has not taken the key") {
+		t.Fatalf("a fresh key no poll of which has ended: the explicit sync's answer: %q", got.Msg)
+	}
+	if !r.conf.keyPending(r.ctx, r.zone) {
+		t.Error("a fresh key no poll of which has ended is not pending")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := r.parent.updatesSeen(); n != 0 {
+		t.Fatalf("%d UPDATEs signed with a key the parent was not asked about reached it", n)
+	}
+
+	r.pollEndsWithoutAVerdict(t, fresh)
+	waitUntil(t, "the sync that waited went out after the fresh key's poll ended\n"+r.log.String(), func() bool { return r.parent.updatesSeen() > 0 })
+}
+
+// A new lead has not polled the key: a key the parent gave no verdict on
+// holds the sync again until a poll of it ends in that lead.
+func TestANewLeadHoldsAKeyWithNoVerdictUntilItsPollEnds(t *testing.T) {
+	r := newKeyHoldRig(t, "new.lead.example.")
+	tdns.UpdateParentState(r.mpzd.KeyDB, string(r.zone), r.key.keyid, 0)
+	r.pollEndsWithoutAVerdict(t, r.key)
+	if _, why := r.conf.keyHold(r.ctx, r.zone); why != "" {
+		t.Fatalf("after a poll of the key ended in this lead: held for %q", why)
+	}
+
+	before := r.lem.LeadStart(r.zone)
+	r.leader(AgentId(r.us.Identity)) // a new election that this agent wins
+	if after := r.lem.LeadStart(r.zone); after == 0 || after == before {
+		t.Fatalf("the new lead is %d, the earlier one %d", after, before)
+	}
+	if _, why := r.conf.keyHold(r.ctx, r.zone); why != "the parent has not taken the key" {
+		t.Errorf("in a new lead before a poll of the key ended: held for %q", why)
+	}
+	if !r.conf.keyPending(r.ctx, r.zone) {
+		t.Error("in a new lead before a poll of the key ended the key is not pending")
+	}
+
+	r.pollEndsWithoutAVerdict(t, r.key)
+	if _, why := r.conf.keyHold(r.ctx, r.zone); why != "" {
+		t.Errorf("after a poll of the key ended in the new lead: held for %q", why)
+	}
+}

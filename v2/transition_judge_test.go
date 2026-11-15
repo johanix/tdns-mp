@@ -226,7 +226,6 @@ func TestAKindWithoutItsStepsIsRefused(t *testing.T) {
 		{jServers2 + ` parentsync="agent"`, "changes parentsync"},
 		{jServers2 + ` pubkey`, "changes pubkey"},
 		{jServers2 + ` pubcds`, "changes pubcds"},
-		{jServers3, "gives agent.charlie.example. a server role"},
 		{`servers="alpha" signers="alpha"`, "takes a role from agent.beta.example."},
 	} {
 		to := jAt(t, 42, c.param, jAlpha, jBeta, jCharlie)
@@ -296,7 +295,8 @@ func TestARefusedSerialIsJudgedAgainWhenTheActiveSerialChanges(t *testing.T) {
 	if err := s.Activate(storeZone, Thaw{From: sd(from), To: sd(record)}); err != nil {
 		t.Fatal(err)
 	}
-	wantRefusals(t, "43 against 42", heldAt(t, s, 43).Refused, Refusal{RefusedNotBuilt, "gives agent.charlie.example. a server role: not built yet"})
+	// a role for a provider with a record: built (S18a)
+	wantRefusals(t, "43 against 42", heldAt(t, s, 43).Refused)
 }
 
 func TestAnEditWithoutARaisedSerialIsAnOwnerError(t *testing.T) {

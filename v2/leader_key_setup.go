@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	tdns "github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
@@ -80,7 +81,10 @@ func (conf *Config) leaderKeySetup(ctx context.Context, zone ZoneName, elected b
 	if renewalKeepsKey(zk, ended, lem.LeadStart(zone)) {
 		lgAgent.Info("a renewal of the lead keeps the zone's SIG(0) key as it is: published, and bootstrapped in this lead",
 			"zone", zone, "keyid", zk.held.keyid)
-		return nil
+		// a location the zone has gained since, at-ns once HSYNC3 is added,
+		// gets the KEY with no new poll: the take-up after the transition
+		// that added it comes here
+		return conf.sendKeyToNewLocations(ctx, zone)
 	}
 	lgAgent.Info("leader has local SIG(0) key, proceeding to publish", "zone", zone, "keyid", zk.held.keyid)
 	// The leader's sync of the zone waits from here until the poll this
@@ -136,7 +140,6 @@ func (conf *Config) makeZoneKey(hdb *HsyncDB, zone ZoneName, readEmpty bool) (ma
 // errLeadMoved.
 func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPollToken, made bool, madeKeyid uint16) error {
 	lem := conf.InternalMp.LeaderElectionManager
-	tm := conf.InternalMp.MPTransport
 	kdb := conf.zoneKeyDB(zone)
 	hdb := NewHsyncDB(kdb)
 	zd, ok := Zones.Get(string(zone))
@@ -170,7 +173,26 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 	held := *zk.held
 	keyRR := held.key
 	lgAgent.Info("publishing KEY to combiner with PublishInstruction", "zone", zone, "keyid", held.keyid)
+	if err := conf.sendZoneKey(zone, held); err != nil {
+		return err
+	}
+	conf.InternalMp.keyPolls.published(zone)
 
+	// The KeyState inquiry and bootstrap with the parent (async), for the
+	// zone's key: the poll takes the set-up's count (keyPolls).
+	if zd.Options[tdns.OptParentSync] {
+		conf.launchKeyPoll(ctx, tk, zone, string(zone), held.keyid, keyRR.Algorithm)
+	}
+	return nil
+}
+
+// sendZoneKey hands the zone's KEY, with its publish instruction, to the
+// combiner and to the zone's other agents, and notes where it went in this
+// lead (keyPolls.sentTo).
+func (conf *Config) sendZoneKey(zone ZoneName, held sig0Row) error {
+	tm := conf.InternalMp.MPTransport
+	keyRR := held.key
+	locations := publishLocations(zone)
 	zu := &ZoneUpdate{
 		Zone: zone,
 		Operations: []core.RROperation{{
@@ -180,7 +202,7 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 		}},
 		Publish: &core.PublishInstruction{
 			KEYRRs:    []string{keyRR.String()},
-			Locations: publishLocations(zone),
+			Locations: locations,
 		},
 	}
 	distID, err := tm.EnqueueForCombiner(zone, zu, "")
@@ -188,8 +210,10 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 		lgAgent.Error("failed to publish KEY to combiner", "zone", zone, "err", err)
 		return err
 	}
-	lgAgent.Info("KEY + PublishInstruction sent to combiner", "zone", zone, "distID", distID)
-	conf.InternalMp.keyPolls.published(zone)
+	lgAgent.Info("KEY + PublishInstruction sent to combiner", "zone", zone, "distID", distID, "locations", locations)
+	if lem := conf.InternalMp.LeaderElectionManager; lem != nil {
+		conf.InternalMp.keyPolls.sentTo(zone, held.keyid, lem.LeadStart(zone), locations)
+	}
 
 	// The KEY is the group's: every provider's combiner publishes it where
 	// the instruction says, at-ns under its own nameservers too (#206)
@@ -205,12 +229,51 @@ func (conf *Config) publishZoneKey(ctx context.Context, zone ZoneName, tk *keyPo
 	if err := tm.EnqueueForZoneAgents(zone, agentUpdate, distID); err != nil {
 		lgAgent.Error("failed to enqueue KEY for remote agents", "zone", zone, "err", err)
 	}
+	return nil
+}
 
-	// The KeyState inquiry and bootstrap with the parent (async), for the
-	// zone's key: the poll takes the set-up's count (keyPolls).
-	if zd.Options[tdns.OptParentSync] {
-		conf.launchKeyPoll(ctx, tk, zone, string(zone), held.keyid, keyRR.Algorithm)
+// sendKeyToNewLocations sends the zone's KEY again, with its publish
+// instruction, when the zone has a location for it now that the KEY's last
+// send in this lead did not name: HSYNC3 added to a zone that says pubkey,
+// and that this agent led before and leads still, adds at-ns
+// (publishLocations). The lead's set-up does not run for that: the lead did
+// not change, and a renewal keeps the key as it is (renewalKeepsKey). The
+// same key goes, and neither a poll nor a hold starts: the key rounds offer
+// it again while the parent does not trust it (keyCheck). A new key, or
+// none sent in this lead, is the set-up's. Held while the zone is frozen:
+// the take-up when the transition is done sends it (takeUp).
+func (conf *Config) sendKeyToNewLocations(ctx context.Context, zone ZoneName) error {
+	lem := conf.InternalMp.LeaderElectionManager
+	if lem == nil || !lem.IsLeader(zone) {
+		return nil
 	}
+	last := conf.InternalMp.keyPolls.lastSent(zone)
+	locations := publishLocations(zone)
+	gained := slices.ContainsFunc(locations, func(l string) bool { return !slices.Contains(last.locations, l) })
+	if last.leadStart == 0 || last.leadStart != lem.LeadStart(zone) || !gained {
+		return nil
+	}
+	kdb := conf.zoneKeyDB(zone)
+	if kdb == nil {
+		return fmt.Errorf("no keystore for zone %s", zone)
+	}
+	zk, err := readZoneKey(kdb, zone)
+	if err != nil {
+		return fmt.Errorf("reading the SIG(0) keys of %s: %v", zone, err)
+	}
+	if zk.held == nil || zk.held.key == nil || zk.held.keyid != last.keyid || len(zk.active) != 1 {
+		return nil
+	}
+	if held, why := conf.offerHeld(ctx, zone); held {
+		lgAgent.Info("the zone's KEY goes to its new locations when the transition is done", "zone", zone, "phase", why, "locations", locations)
+		return errHeldDuringTransition
+	}
+	lgAgent.Info("the zone has a location for its KEY that the KEY's last send in this lead did not name: sending it again",
+		"zone", zone, "keyid", zk.held.keyid, "was", last.locations, "now", locations)
+	if err := conf.sendZoneKey(zone, *zk.held); err != nil {
+		return err
+	}
+	conf.InternalMp.CatchUp.keyCheck(zone)
 	return nil
 }
 

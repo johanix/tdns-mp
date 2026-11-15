@@ -244,7 +244,7 @@ func TestAMixedCaseIdentityIsAMemberWhereverItIsLookedUp(t *testing.T) {
 	mpzd := instrTestZone(t, "mixedcase.access.example.", acRecords("", `serial="7" servers="alpha,beta"`)...)
 	zone := ZoneName(mpzd.ZoneName)
 	const mixed, self = "Agent.BETA.example", "AGENT.Alpha.Example."
-	if !participantFQDNSet(instructionsFor(zone)).has(mixed) {
+	if !participantFQDNSet(string(zone), instructionsFor(zone)).has(mixed) {
 		t.Errorf("the member set does not have %s", mixed)
 	}
 	// admission: this agent's and the sender's identities
@@ -399,20 +399,25 @@ func TestThePreRefreshReadersGetTheActiveReading(t *testing.T) {
 	}
 }
 
+// Admission reads the active reading, not the copy; every ON record of it
+// is a member, with a role or without (plan S15).
 func TestAdmissionReadsTheActiveReading(t *testing.T) {
-	mpzd := instrTestZone(t, "admission.access.example.", acRecords("ON", `serial="7" servers="alpha,beta"`)...)
+	mpzd := instrTestZone(t, "admission.access.example.", acRecords("OFF", `serial="7" servers="alpha,beta"`)...)
 	tm := &MPTransportBridge{TransportManager: &transport.TransportManager{LocalID: acAlpha}, getZone: tdns.Zones.Get}
 	if ok, why := tm.isInHSYNC(acGamma, mpzd.ZoneName); ok {
-		t.Fatalf("gamma, no role by the copy, was admitted (%s)", why)
+		t.Fatalf("gamma, OFF by the copy, was admitted (%s)", why)
 	}
 	s := newStore(t)
 	withStore(t, s)
-	activeAs(t, s, mpzd.ZoneName, readOf(t, acRecords("ON", `serial="8" servers="alpha,gamma"`)...))
+	activeAs(t, s, mpzd.ZoneName, readOf(t,
+		`3600 IN HSYNC3 ON alpha `+acAlpha+` .`,
+		`3600 IN HSYNC3 ON gamma `+acGamma+` .`,
+		`3600 IN HSYNCPARAM `+numberedText(`serial="8" servers="alpha"`)))
 	if ok, why := tm.isInHSYNC(acGamma, mpzd.ZoneName); !ok {
-		t.Errorf("gamma, a server by the active serial, was refused: %s", why)
+		t.Errorf("gamma, a member with no role by the active serial, was refused: %s", why)
 	}
 	if ok, _ := tm.isInHSYNC(acBeta, mpzd.ZoneName); ok {
-		t.Error("beta, no role by the active serial, was admitted by the copy")
+		t.Error("beta, with no record by the active serial, was admitted by the copy")
 	}
 }
 
@@ -550,7 +555,7 @@ func TestRolesFromTheReadingAgreeWithTodaysFlags(t *testing.T) {
 	} {
 		in := readOf(t, acRecords("", c.param)...)
 		r := rolesFor(in, in, 0)
-		_, voting := participantsOf(in)
+		_, voting, _ := participantsOf(in)
 		if has(r.Servers, "alpha") != c.server || has(r.Signing, "alpha") != c.signer || isAmong(voting, acAlpha) != c.voter {
 			t.Errorf("%s: server %v signer %v voter %v; want %v %v %v", c.name,
 				has(r.Servers, "alpha"), has(r.Signing, "alpha"), isAmong(voting, acAlpha), c.server, c.signer, c.voter)

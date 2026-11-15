@@ -224,8 +224,9 @@ func TestOwnerNeedsAMultiProviderZone(t *testing.T) {
 	owner := NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return kdb })
 	mp := &tdns.ZoneData{ZoneName: "mp.example.", Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}}
 	plain := &tdns.ZoneData{ZoneName: "plain.example.", Options: map[tdns.ZoneOption]bool{}}
-	owner.Take(mp.ZoneName)
-	owner.Take(plain.ZoneName)
+	// taken on these ZoneData, which tdns does not hold
+	owner.takeOn(mp.ZoneName, mp)
+	owner.takeOn(plain.ZoneName, plain)
 	if !owner.Owns(mp) {
 		t.Error("the multi-provider zone taken is not owned")
 	}

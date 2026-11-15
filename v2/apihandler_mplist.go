@@ -39,6 +39,10 @@ func (conf *Config) APImplist() func(w http.ResponseWriter, r *http.Request) {
 
 			info := MPZoneInfoFromMPZoneData(zd)
 			conf.InternalMp.Instructions.fillMPZoneInfo(zname, &info)
+			// the agent's own standing (plan S15)
+			if mp := conf.MpConfig(); mp != nil && tdns.Globals.App.Type == AppTypeMPAgent {
+				info.This = zoneStandingName(zd.ZoneName, mp.Identity)
+			}
 			resp.MPZones[zname] = info
 		}
 	}

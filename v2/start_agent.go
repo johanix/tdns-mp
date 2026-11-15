@@ -144,9 +144,8 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	tdns.StartEngine(&tdns.Globals.App, "KeyStateWorker", func() error {
 		return tdns.KeyStateWorker(ctx, conf.Config)
 	})
-	// The reader of ResignQ. SetupAgentAutoZone registers the agent's own
-	// zone for periodic re-signing on that queue; without an engine reading
-	// it the registration sat in the buffer and the zone was never renewed.
+	// The resigner. SetupAgentAutoZone puts the agent's own zone on its
+	// watchlist; without the engine running, the zone was never renewed.
 	tdns.StartEngineNoError(&tdns.Globals.App, "ResignerEngine", func() {
 		tdns.ResignerEngine(ctx, conf.Config.Internal.ResignQ)
 	})
@@ -216,7 +215,8 @@ func (conf *Config) StartMPAgent(ctx context.Context, apirouter *mux.Router) err
 	// sign, the engine publishes nothing: its answer is the CDS that the
 	// agent's copy of the zone carries, the one the signers serve (key
 	// lifecycle ownership design §4.1, Amendment 3). The zone it does write
-	// a CDS for is the agent's own identity zone (startIdentityParentSync).
+	// a CDS for is the agent's own identity zone, whose delegation the agent
+	// does not sync (tdns-mp #391).
 	tdns.StartEngine(&tdns.Globals.App, "DSEngine", func() error {
 		return hdb.DSEngine(ctx)
 	})
@@ -287,13 +287,19 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 	// and not heard, as its gate does (design 3.2, plan S7).
 	lem.SetGateExcused(conf.gateExcused)
 
-	// Attach OnFirstLoad callbacks to zone stubs.
+	// Attach OnFirstLoad callbacks to zone stubs, and to every zone whose
+	// ZoneData a reload replaces later, through the zone hooks (#396).
 	delegationSyncQ := conf.Config.Internal.DelegationSyncQ
-	for _, zoneName := range conf.Config.Internal.AllZones {
-		mpzd, exists := Zones.Get(zoneName)
-		if !exists {
-			continue
+	agentFirstLoad := func(mpzd *MPZoneData) {
+		if !mpzd.Options[tdns.OptParentSync] && !mpzd.Options[tdns.OptMultiProvider] {
+			return
 		}
+		if !conf.InternalMp.agentFirstLoad.first(mpzd.ZoneData) {
+			return
+		}
+		// under the zone's lock, as tdns drains OnFirstLoad
+		mpzd.Lock()
+		defer mpzd.Unlock()
 		// Detect parentsync=agent from HSYNCPARAM and enable delegation sync.
 		if mpzd.Options[tdns.OptMultiProvider] {
 			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, func(zd *tdns.ZoneData) {
@@ -304,7 +310,7 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 				if mp == nil {
 					return
 				}
-				w, ok := Zones.Get(zd.ZoneName)
+				w, ok := Zones.GetFor(zd)
 				if !ok {
 					return
 				}
@@ -331,10 +337,14 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 		// registers the peers and recomputes the groups, before OnFirstLoad
 		// runs. The election callback below therefore finds the zone's group.
 		// Leader election callback (must run after parentsync detection above).
-		if mpzd.Options[tdns.OptParentSync] || mpzd.Options[tdns.OptMultiProvider] {
-			mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, lem.electAtFirstLoad)
+		mpzd.OnFirstLoad = append(mpzd.OnFirstLoad, lem.electAtFirstLoad)
+	}
+	for _, zoneName := range conf.Config.Internal.AllZones {
+		if mpzd, exists := Zones.Get(zoneName); exists {
+			agentFirstLoad(mpzd)
 		}
 	}
+	conf.installZoneHooks(conf.registerRefreshCallbacks, conf.firstLoadSetup, agentFirstLoad)
 
 	leaderKeySetup := func(zone ZoneName, elected bool) error {
 		return conf.leaderKeySetup(ctx, zone, elected)
@@ -364,7 +374,12 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 	// group's lead, or ends it where another agent leads that group.
 	lem.SetOnLeadLost(conf.stopRunsOfLostLead)
 	lem.SetOnZoneRegrouped(conf.retieRuns)
-	lem.SetOnLeaderNamed(conf.retieAllRuns)
+	// A CSYNC or KEY kept until the zone's leader is known is judged once an
+	// election names one (plan S15).
+	lem.SetOnLeaderNamed(func() {
+		conf.retieAllRuns()
+		conf.askLeaderWaits()
+	})
 	// A zone that joins a group this agent already leads is asked for the
 	// same sync: nobody else asks for it (tdns-mp #179). Its key is left as
 	// it is: the key this agent holds is published, and one it does not
@@ -389,6 +404,16 @@ func (conf *Config) setUpLeaderElection(ctx context.Context, mp *MultiProviderCo
 		}
 		conf.requestDelegationSync(ctx, string(zone), "the zone joined a provider group this agent leads")
 		return nil
+	})
+	// HSYNC3 added to a zone this agent leads, which says pubkey, adds the
+	// at-ns location: the KEY goes there too, with no new lead. While the
+	// zone is frozen the take-up when the transition is done sends it.
+	lem.SetOnKeyLocations(func(zone ZoneName) error {
+		err := conf.sendKeyToNewLocations(ctx, zone)
+		if errors.Is(err, errHeldDuringTransition) {
+			return nil
+		}
+		return err
 	})
 	return lem
 }

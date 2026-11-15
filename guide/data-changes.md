@@ -29,7 +29,7 @@ The `--rr` argument is a full DNS record in zone-file
 syntax: owner, TTL, class, type, RDATA. The CLI parses
 it locally before submitting, so a syntactically broken
 record fails fast. Supported RR types: NS, DNSKEY, CDS,
-CSYNC, KEY.
+CSYNC; `delrr` also takes a KEY (section 1.4).
 
 ### 1.1 Adding an NS record
 
@@ -98,6 +98,11 @@ for the full rationale.
 - **DNSKEYs.** The signer owns DNSKEYs and exposes them
   to the agent via KEYSTATE. Use the signer's rollover
   commands (next section), not `addrr DNSKEY`.
+- **The zone's SIG(0) KEY.** The KEY is the group's: the
+  zone's leader publishes it, and `addrr` of a KEY is
+  refused. `delrr` of a KEY takes it out of what this
+  agent holds of its own; at the zone's leader the KEY it
+  publishes stays, and a `delrr` of that KEY is refused.
 - **RRSIGs.** The signer produces these from DNSKEYs +
   zone content. They are not editable.
 - **SOA.** The signer manages the serial of a zone it
@@ -106,6 +111,19 @@ for the full rationale.
   force a re-serve.
 - **Records in zones you do not have `OptAllowEdits`
   for.** Even per-provider edits require authorization.
+
+When `agent parentsync status` says `KEY at apex: several
+(N); an operator has to leave one`, the way out depends
+on where the extra KEY comes from:
+
+- **The owner's zone data.** The owner edits the zone.
+- **An agent's own data.** `delrr` at that agent.
+- **A publish instruction.** `delrr` is refused: the KEY
+  is not in the agent's own data. Today the only way is
+  `combiner zone edits purge --origin <agent>` at each
+  combiner that holds it. That removes everything from
+  that origin, and leaves the stored instruction, so
+  `reapply` brings the KEY back.
 
 ## 2. DNSSEC Key Rollover
 

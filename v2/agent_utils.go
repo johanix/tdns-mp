@@ -15,7 +15,7 @@ import (
 )
 
 func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
-	members := participantFQDNSet(instructionsFor(zone))
+	members := participantFQDNSet(string(zone), instructionsFor(zone))
 	var agents []*Agent
 	for _, agent := range ar.S.Items() {
 		if members.has(string(agent.ID)) {
@@ -146,9 +146,10 @@ func AgentToString(a *Agent) string {
 	return string(a.ID)
 }
 
-// GetZoneAgentData returns the zone's member agents, derived from the HSYNC3
-// RRset and HSYNCPARAM roles. It does not check whether the agents are
-// operational, or try to fetch missing information.
+// GetZoneAgentData returns the zone's member agents (zoneParticipants), each
+// with its standing: every ON record, with a role or without (plan S15), and
+// a provider whose removal is under way. It does not check whether the
+// agents are operational, or try to fetch missing information.
 func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, error) {
 	var zad = &ZoneAgentData{
 		ZoneName: zonename,
@@ -182,29 +183,40 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 		return nil, fmt.Errorf("zone %q has no HSYNC3 RRset", zonename)
 	}
 
-	// Membership is role-derived: only identities with a role are zone
-	// members / distribution recipients. An identity with an ON record but
-	// no role is not included. Upstreams resolve through the ON records: an
-	// OFF record is nobody's upstream or downstream.
-	participantList, _ := participantsOf(in)
+	// Every member is a recipient, with a role or without; the callers that
+	// mean a vote filter by standing. Upstreams resolve through the ON
+	// records: an OFF record is nobody's upstream or downstream. The members
+	// come in the records' order, then the providers whose removal is under
+	// way with no record.
+	members, voting, auditors := zoneParticipants(zd.ZoneName, in)
 	self := AgentId(ar.LocalAgent.Identity)
+	ids := make([]string, 0, len(members))
 	for _, r := range in.Records {
 		if isAmong([]string{r.Identity}, self) {
 			zad.MyUpstream = AgentId(in.identityOf(r.Upstream))
-			continue // don't add ourselves to the list of agents
 		} else if isAmong([]string{in.identityOf(r.Upstream)}, self) {
 			zad.MyDownstreams = append(zad.MyDownstreams, AgentId(r.Identity))
 		}
-		if !isAmong(participantList, AgentId(r.Identity)) {
-			continue
+		ids = append(ids, r.Identity)
+	}
+	for _, id := range members {
+		if !isAmong(ids, AgentId(id)) {
+			ids = append(ids, id)
 		}
-		agent, err := ar.GetAgentInfo(AgentId(r.Identity))
+	}
+	zad.Standing = map[AgentId]string{}
+	for _, id := range ids {
+		if isAmong([]string{id}, self) {
+			continue // don't add ourselves to the list of agents
+		}
+		zad.Standing[AgentId(id)] = standingName(in, members, voting, auditors, id)
+		agent, err := ar.GetAgentInfo(AgentId(id))
 		if err != nil {
 			// A placeholder for an agent the registry does not have;
 			// never stored in ar.S, so the throwaway hsync.Peer
 			// allocation is fine (E1.b). agentInfo reports it as ERROR.
 			agent = &Agent{
-				Peer:     hsync.NewPeer(AgentId(r.Identity)),
+				Peer:     hsync.NewPeer(AgentId(id)),
 				ErrorMsg: fmt.Sprintf("error getting agent info: %v", err),
 			}
 			agent.LastState = time.Now()
@@ -280,7 +292,7 @@ func (ar *AgentRegistry) agentInfo(agent *Agent) *AgentInfo {
 
 // zoneAgentInfo is the report of a zone's agents.
 func (ar *AgentRegistry) zoneAgentInfo(zad *ZoneAgentData) *ZoneAgentInfo {
-	info := &ZoneAgentInfo{ZoneName: zad.ZoneName, MyUpstream: zad.MyUpstream, MyDownstreams: zad.MyDownstreams}
+	info := &ZoneAgentInfo{ZoneName: zad.ZoneName, MyUpstream: zad.MyUpstream, MyDownstreams: zad.MyDownstreams, Standing: zad.Standing}
 	for _, agent := range zad.Agents {
 		info.Agents = append(info.Agents, ar.agentInfo(agent))
 	}

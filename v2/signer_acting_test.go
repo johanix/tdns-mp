@@ -72,6 +72,13 @@ func newSignerRig(t *testing.T, zone string, records ...string) *signerRig {
 	r.owner.Take(zone)
 	r.store = withActing(t, NewHsyncDB(kdb))
 	hdb := NewHsyncDB(kdb)
+	acted, err := loadSignerActed(hdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevActed := signerActed.Load()
+	signerActed.Store(acted)
+	t.Cleanup(func() { signerActed.Store(prevActed) })
 	if _, err := hdb.DB.Exec(HsyncTables["MPKeyHold"]); err != nil {
 		t.Fatal(err)
 	}
@@ -172,6 +179,9 @@ func (r *signerRig) foreignKey(t *testing.T, flags uint16) uint16 {
 func incomingCopy(t *testing.T, zone string, records ...string) *tdns.ZoneData {
 	t.Helper()
 	src := instrTestZone(t, "incoming."+zone, records...)
+	// the wrapper is cached by name, and the next copy of the zone is another
+	tdns.Zones.Remove(src.ZoneName)
+	Zones.Invalidate(src.ZoneName)
 	zd := &tdns.ZoneData{ZoneName: zone, ZoneStore: tdns.MapZone, ZoneType: tdns.Primary, Logger: src.Logger,
 		Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}, Data: src.Data}
 	if apex, _ := src.GetOwner(src.ZoneName); apex != nil {
@@ -642,7 +652,9 @@ func TestASignerWithNothingHandedAndASerialKeepsItsForeignRows(t *testing.T) {
 // options alone (main_init.go), no data it acted by. So inline-signing is
 // on before the first publish, and the zone's DNSSEC policy binds as the
 // zone loads. Switched on only at the hand-over, the signer found no policy
-// bound and signed nothing (the smoke stage at 211-demo cacec84).
+// bound and signed nothing (the smoke stage at 211-demo cacec84). So a signer
+// whose very first load sees a refused copy still takes the role, until P5
+// lets a policy be bound when signing starts (tdns-mp #146, #357).
 func TestASignersFirstLoadSwitchesInlineSigningOnBeforeItsHandOver(t *testing.T) {
 	const zone = "firstload.signer.example."
 	records := sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)
@@ -661,6 +673,188 @@ func TestASignersFirstLoadSwitchesInlineSigningOnBeforeItsHandOver(t *testing.T)
 	}
 	if !r.e.wire.IsSigner(zone) {
 		t.Error("the key machine does not take the zone for one this provider signs")
+	}
+}
+
+// restart is the signer's start: what it kept read from disk, its data the
+// config parse's stub, inline-signing off, and the zone not loaded yet.
+func (r *signerRig) restart(t *testing.T) {
+	t.Helper()
+	s, err := loadSignerActed(NewHsyncDB(r.kdb))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signerActed.Store(s)
+	r.mpzd.MP.MPdata = &MPdata{Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}}
+	r.mpzd.SetRuntimeOption(tdns.OptInlineSigning, false)
+	r.mpzd.restoreSignerActed(r.conf.MpConfig())
+}
+
+// firstLoad is the signer's first load of records with nothing handed: its
+// data the config parse's stub, as main_init.go leaves it.
+func (r *signerRig) firstLoad(t *testing.T, records ...string) {
+	t.Helper()
+	r.mpzd.MP.MPdata = &MPdata{Options: map[tdns.ZoneOption]bool{tdns.OptMultiProvider: true}}
+	r.mpzd.MPPreRefresh(incomingCopy(t, r.mpzd.ZoneName, records...), nil, nil, r.conf.MpConfig())
+}
+
+// A signer that waits for its agent takes no role from its copy, also across
+// a restart: edit 2 moved this provider into signers=, its agent refused that,
+// and its signer restarted. Its agent hands it nothing, not knowing the active
+// serial, and it signs nothing and mints nothing (tdns-mp #357, design 3.1).
+func TestARestartedSignerThatWaitsTakesNoRoleFromARefusedCopy(t *testing.T) {
+	const zone = "refused.waiting.signer.example."
+	noRole := sigRecords(`serial="5" servers="us,p2" signers="p2"`)
+	r := newSignerRig(t, zone, noRole...)
+	r.firstLoad(t, noRole...)
+	if r.mpzd.MP.MPdata.WeAreSigner {
+		t.Fatal("a signer with no role under its first copy signs")
+	}
+	refused := sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)
+	for _, restart := range []bool{false, true} {
+		if restart {
+			r.restart(t)
+		}
+		incoming := incomingCopy(t, zone, refused...)
+		if apex, _ := incoming.OwnerForAnalysis(zone); readingOf(apex) == nil || readingOf(apex).Serial != 6 {
+			t.Fatalf("the copy is not the refused one: %+v", readingOf(apex))
+		}
+		r.mpzd.MPPreRefresh(incoming, nil, nil, r.conf.MpConfig())
+		if d := r.mpzd.MP.MPdata; d == nil || d.WeAreSigner {
+			t.Fatalf("restart %v: the signer took its copy's role: %+v", restart, d)
+		}
+		if incoming.Options[tdns.OptInlineSigning] {
+			t.Errorf("restart %v: inline-signing is on in the copy it publishes", restart)
+		}
+		if r.e.wire.IsSigner(zone) {
+			t.Errorf("restart %v: the key machine takes the zone for one this provider signs", restart)
+		}
+	}
+}
+
+// One that signed by its first load signs on across a restart, as its
+// inline-signing and its policy need, with its copy unchanged and with a copy
+// that drops it (rule 5).
+func TestARestartedSignerThatWaitsKeepsTheRolesItActedBy(t *testing.T) {
+	records := sigRecords(`serial="5" servers="us,p2" signers="us,p2"`)
+	for _, c := range []struct {
+		name, zone string
+		copy       []string
+	}{
+		{"its copy unchanged", "unchanged.signs.waiting.signer.example.", records},
+		{"a copy that drops it", "dropped.signs.waiting.signer.example.", []string{`3600 IN HSYNC3 ON p2 agent.p2.example. .`, `3600 IN HSYNCPARAM serial="6" servers="p2" signers="p2"`}},
+	} {
+		zone := c.zone
+		r := newSignerRig(t, zone, records...)
+		r.firstLoad(t, records...)
+		r.restart(t)
+		incoming := incomingCopy(t, zone, c.copy...)
+		r.mpzd.MPPreRefresh(incoming, nil, nil, r.conf.MpConfig())
+		if d := r.mpzd.MP.MPdata; d == nil || !d.WeAreSigner || d.OtherSigners != 1 {
+			t.Fatalf("%s: after the restart its data is %+v", c.name, d)
+		}
+		if !incoming.Options[tdns.OptInlineSigning] {
+			t.Errorf("%s: inline-signing is off in the copy it publishes", c.name)
+		}
+		if !r.e.wire.IsSigner(zone) || !slices.Equal(r.e.wire.OtherSigners(zone), []string{"p2"}) {
+			t.Errorf("%s: signs %v, expects confirmations from %v", c.name, r.e.wire.IsSigner(zone), r.e.wire.OtherSigners(zone))
+		}
+	}
+}
+
+// A first load whose copy does not list this provider is what it acted by
+// too: the copy that first lists it, with a role its agent refused, gives it
+// no role, also across a restart.
+func TestAFirstLoadThatDoesNotListTheSignerIsWhatItActedBy(t *testing.T) {
+	const zone = "unlisted.waiting.signer.example."
+	unlisted := []string{`3600 IN HSYNC3 ON p2 agent.p2.example. .`, `3600 IN HSYNCPARAM serial="5" servers="p2" signers="p2"`}
+	r := newSignerRig(t, zone, unlisted...)
+	r.firstLoad(t, unlisted...)
+	refused := sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)
+	for _, restart := range []bool{false, true} {
+		if restart {
+			r.restart(t)
+		}
+		incoming := incomingCopy(t, zone, refused...)
+		r.mpzd.MPPreRefresh(incoming, nil, nil, r.conf.MpConfig())
+		if d := r.mpzd.MP.MPdata; d == nil || d.WeAreSigner {
+			t.Fatalf("restart %v: the signer took its copy's role: %+v", restart, d)
+		}
+		if incoming.Options[tdns.OptInlineSigning] {
+			t.Errorf("restart %v: inline-signing is on in the copy it publishes", restart)
+		}
+	}
+}
+
+// A hand-over takes over from what the signer kept: nothing is left of it on
+// disk, and after a restart the hand-over is what it acts by. One with no
+// records hands no sets: the signer acts on by what it kept, which stays.
+func TestAHandOverEndsWhatTheSignerKept(t *testing.T) {
+	const zone = "ended.waiting.signer.example."
+	noRole := sigRecords(`serial="5" servers="us,p2" signers="p2"`)
+	r := newSignerRig(t, zone, noRole...)
+	r.firstLoad(t, noRole...)
+	if _, kept := signerActed.Load().get(zone); !kept {
+		t.Fatal("the first load kept nothing")
+	}
+	r.hand(&ActingHandover{Zone: zone, Phase: PhaseSteady, Made: time.Now()}, sigUs)
+	if _, kept := signerActed.Load().get(zone); !kept {
+		t.Fatal("a hand-over with no records ended what the signer kept")
+	}
+	handed := sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)
+	r.hand(handoverFor(t, zone, handed...), sigUs)
+	r.restart(t)
+	if _, kept := signerActed.Load().get(zone); kept {
+		t.Error("kept on disk after a hand-over")
+	}
+	r.mpzd.MPPreRefresh(incomingCopy(t, zone, noRole...), nil, nil, r.conf.MpConfig())
+	if d := r.mpzd.MP.MPdata; d == nil || !d.WeAreSigner {
+		t.Errorf("after the restart it does not act by the hand-over: %+v", d)
+	}
+}
+
+// A hand-over during the zone's first load does not wait for the load to act
+// (actBySignerHandover), but what it ends does: the load read that nothing was
+// held, and keeps its sets after that, under the lock (CodeRabbit's review of
+// #362). Left there, what it kept is what a restart acts by once a hand-over
+// with no records has cleared the one held.
+func TestAHandOverDuringTheFirstLoadEndsWhatItKeeps(t *testing.T) {
+	const zone = "duringload.waiting.signer.example."
+	noRole := sigRecords(`serial="5" servers="us,p2" signers="p2"`)
+	r := newSignerRig(t, zone, noRole...)
+	r.mpzd.Lock()
+	r.mpzd.Ready = false
+	r.mpzd.Unlock()
+	handed := handoverFor(t, zone, sigRecords(`serial="6" servers="us,p2" signers="us,p2"`)...)
+
+	// the load, past its read of the hand-over state
+	mu := mpDataLock(zone)
+	mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		r.hand(handed, sigUs)
+		close(done)
+	}()
+	waitUntil(t, "the hand-over is held", func() bool {
+		_, held := actingHeld.Load().roles(zone)
+		return held
+	})
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := signerActed.Load().keep(zone, Roles{}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Unlock()
+	<-done
+
+	if _, kept := signerActed.Load().get(zone); kept {
+		t.Error("kept after the hand-over ended it")
+	}
+	r.restart(t)
+	if _, kept := signerActed.Load().get(zone); kept {
+		t.Error("kept on disk after the hand-over ended it")
 	}
 }
 

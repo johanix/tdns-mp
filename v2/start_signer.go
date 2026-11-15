@@ -41,6 +41,8 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 	// too, passes the same gate, and is taken if listed (signerZonesReloaded).
 	conf.RegisterMPRefreshCallbacks()
 	conf.Config.Internal.PostParseZonesHook = conf.signerZonesReloaded
+	// and a zone whose ZoneData tdns replaces gets them again (#396)
+	conf.installZoneHooks(conf.registerRefreshCallbacks, conf.firstLoadSetup)
 
 	// Register all signer API routes from tdns-mp
 	conf.SetupMPSignerRoutes(ctx, apirouter)
