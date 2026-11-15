@@ -117,9 +117,13 @@ type plannedStep struct {
 	removals func(held []Removal) []Removal
 	// start is the leader's own action when it takes the step (a
 	// withdrawal, a sync: S16, S17b); wait what else the step waits for
-	// before it is held, since it was taken ("" for nothing). Nil for none.
+	// before it is held, given the step as held: since it was taken, and
+	// the TTL it carries ("" for nothing). Nil for none.
 	start func(conf *Config, zone string)
-	wait  func(conf *Config, zone string, since time.Time) string
+	wait  func(conf *Config, zone string, step heldStep) string
+	// ttl is the TTL the step carries (InstrStep.TTL) when the leader
+	// takes it, from the step held before it. Nil for none.
+	ttl func(conf *Config, zone string, held heldStep) time.Duration
 }
 
 // lastStepKey is the key of every transition's last step.
@@ -182,6 +186,9 @@ type heldStep struct {
 	at   time.Time
 }
 
+// ttl is the TTL the step carries (InstrStep.TTL).
+func (h heldStep) ttl() time.Duration { return time.Duration(h.TTL) * time.Second }
+
 // stepDigest is the digest of a step's sets: the first 8 octets of SHA-256
 // over their JSON, as 16 hex digits. Every agent of a zone runs the same
 // build (no mixed versions), so the same sets give the same JSON.
@@ -209,7 +216,7 @@ func (z *zoneSerials) stepHeldLocked() (heldStep, bool) {
 		return heldStep{}, false
 	}
 	return heldStep{
-		InstrStep: InstrStep{Number: z.Step, Of: z.StepOf, What: z.StepWhat, Sets: slices.Clone(z.Sets), Digest: digest, Taken: slices.Clone(z.Taken)},
+		InstrStep: InstrStep{Number: z.Step, Of: z.StepOf, What: z.StepWhat, Sets: slices.Clone(z.Sets), Digest: digest, Taken: slices.Clone(z.Taken), TTL: z.StepTTL},
 		sets:      sets,
 		at:        z.StepAt,
 	}, true
@@ -270,7 +277,7 @@ func (s *InstructionStore) setStep(zone string, active SerialDigest, st InstrSte
 		if old, ok := z.stepHeldLocked(); !ok || old.Number != st.Number || old.Digest != st.Digest {
 			z.StepAt = time.Now()
 		}
-		z.Step, z.Sets, z.StepOf, z.StepWhat, z.Taken, z.Pending = st.Number, raw, st.Of, st.What, slices.Clone(st.Taken), false
+		z.Step, z.Sets, z.StepOf, z.StepWhat, z.Taken, z.StepTTL, z.Pending = st.Number, raw, st.Of, st.What, slices.Clone(st.Taken), st.TTL, false
 		kept := make([]Removal, 0, len(removals))
 		for _, r := range removals {
 			r.Identity = canonicalName(r.Identity)
@@ -649,7 +656,7 @@ func (conf *Config) reconcileView(in reconcileInputs, told map[string]toldStamp,
 		}
 	}
 	if cur != nil && cur.wait != nil {
-		if w := cur.wait(conf, in.name, in.step.at); w != "" {
+		if w := cur.wait(conf, in.name, in.step); w != "" {
 			v.waits = append(v.waits, w)
 		}
 	}
@@ -818,6 +825,9 @@ func (conf *Config) takeStep(in reconcileInputs, st plannedStep, of int) {
 		return
 	}
 	next := InstrStep{Number: in.step.Number + 1, Of: of, What: st.what, Sets: raw, Digest: digest, Taken: append(slices.Clone(in.step.Taken), st.key)}
+	if st.ttl != nil {
+		next.TTL = uint32(st.ttl(conf, in.name, in.step) / time.Second)
+	}
 	if err := conf.InternalMp.Instructions.setStep(in.name, in.active.SerialDigest, next, removals); err != nil {
 		lg.Error("the step could not be kept", "zone", in.name, "step", next.Number, "err", err)
 		return

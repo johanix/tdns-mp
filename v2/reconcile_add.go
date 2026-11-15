@@ -141,41 +141,62 @@ func signerAddStepsOf(joiner Provider, first bool) []plannedStep {
 			h.Signing = addProvider(h.Signing, joiner)
 			return h
 		},
-		wait: func(conf *Config, zone string, _ time.Time) string {
+		wait: func(conf *Config, zone string, _ heldStep) string {
 			switch {
 			case !conf.joinerKeysIn(zone, id, KeyStateActive):
 				return id + " (its KSK and ZSK active)"
 			case first:
 				return ""
 			}
-			return conf.InternalMp.signerAdds.keysPropagated(conf, zone, id)
+			if w := conf.InternalMp.signerAdds.keysPropagated(conf, zone, id); w != "" {
+				return w
+			}
+			// then the parent's DS RRset as it is before the joiner's DS
+			// can be in it, for its TTL (the DS step's, cachedDSTTL)
+			if _, known := conf.InternalMp.signerAdds.parentDS(conf, zone); !known {
+				return "the parent (the TTL of its DS RRset)"
+			}
+			return ""
 		}}
 	ds := plannedStep{key: key(signerAddDS), provider: id, keys: true, what: what(2, "its DS at the parent"),
 		sets: func(h Roles) Roles {
 			h.DSSigners = addProvider(h.DSSigners, joiner)
 			return h
 		},
-		wait: func(conf *Config, zone string, _ time.Time) string {
+		wait: func(conf *Config, zone string, _ heldStep) string {
 			if conf.joinerDSAtParent(zone, id) {
 				return ""
 			}
 			return "the parent (" + id + "'s DS)"
-		}}
+		},
+		ttl: cachedDSTTL}
 	caches := plannedStep{key: key(signerAddCaches), provider: id, what: what(3, "the caches' time"),
-		wait: func(conf *Config, zone string, since time.Time) string {
+		wait: func(conf *Config, zone string, step heldStep) string {
 			b := &conf.InternalMp.signerAdds
 			switch _, known := b.parentDS(conf, zone); {
 			case !known:
 				return "the parent (the TTL of its DS RRset)"
-			case time.Since(since) < b.parentDSTTL(conf, zone):
+			case time.Since(step.at) < cachedDSTTL(conf, zone, step):
 				return "the DS TTL at the parent, since every server there serves " + id + "'s DS"
 			}
 			return ""
-		}}
+		},
+		ttl: cachedDSTTL}
 	if first {
 		return []plannedStep{accept, mint, ds}
 	}
 	return []plannedStep{accept, mint, ds, caches}
+}
+
+// cachedDSTTL is the TTL a signer's DS and caches steps carry, and the caches'
+// time: the largest the parent was seen serving the zone's DS RRset with, by
+// this agent's looks or by the step held. The DS step is taken only after a
+// look made before the joiner's DS could be in the parent's set, so the TTL it
+// carries is that of the set caches may hold until the caches' time is over.
+// Carried in the steps, it holds over a restart and a change of leader, whose
+// looks see only the set the parent serves then.
+func cachedDSTTL(conf *Config, zone string, held heldStep) time.Duration {
+	return max(conf.InternalMp.signerAdds.parentDSTTL(conf, zone), held.ttl())
 }
 
 // forOwnSigner is what this agent hands its signer of h: at its own provider's

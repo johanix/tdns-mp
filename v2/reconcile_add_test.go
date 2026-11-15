@@ -98,6 +98,18 @@ func (r *signerAddRig) thawed() *signerAddRig {
 	return r
 }
 
+// restart is the agent's start: its store read from disk, and nothing kept of
+// what it saw at the parent and the zone's nameservers.
+func (r *signerAddRig) restart() {
+	r.t.Helper()
+	r.thawRig.restart()
+	r.stamps.stepHeld = r.conf.holdsStep
+	b := &r.conf.InternalMp.signerAdds
+	b.mu.Lock()
+	b.zones = nil
+	b.mu.Unlock()
+}
+
 // stepBegan has the step held have been taken at.
 func (r *signerAddRig) stepBegan(at time.Time) {
 	r.t.Helper()
@@ -1429,11 +1441,11 @@ func TestAZonesFirstSignerHasNoWait(t *testing.T) {
 	t.Cleanup(func() { servingKeysLookup = prev })
 	mint := signerAddStepsOf(Provider{Label: "a", Identity: signerAddSelf}, true)[1]
 	r.keys(KeyStateStandby, KeyStateActive)
-	if w := mint.wait(r.conf, r.zone, time.Now()); !strings.Contains(w, "active") {
+	if w := mint.wait(r.conf, r.zone, heldStep{at: time.Now()}); !strings.Contains(w, "active") {
 		t.Errorf("its KSK standby, the first signer's keys' step waits for %q", w)
 	}
 	r.keys(KeyStateActive, KeyStateActive)
-	if w := mint.wait(r.conf, r.zone, time.Now()); w != "" {
+	if w := mint.wait(r.conf, r.zone, heldStep{at: time.Now()}); w != "" {
 		t.Errorf("its keys active, the first signer's keys' step waits for %q", w)
 	}
 	if asked != 0 {
@@ -1644,12 +1656,12 @@ func TestADSStepEndsAtOnceWhenTheParentServesNoDS(t *testing.T) {
 		ds := signerAddStepsOf(Provider{Label: "a", Identity: signerAddSelf}, true)[2]
 		rigs := parentDSLook
 		parentDSLook = func(*Config, string) (parentDSSeen, error) { return parentDSSeen{}, errors.New("no answer") }
-		if w := ds.wait(r.conf, r.zone, time.Now()); w == "" {
+		if w := ds.wait(r.conf, r.zone, heldStep{at: time.Now()}); w == "" {
 			t.Error("no server of the parent answers, and the first signer's DS step ends")
 		}
 		parentDSLook = rigs
 		r.parentLooks()
-		if w := ds.wait(r.conf, r.zone, time.Now()); w != "" {
+		if w := ds.wait(r.conf, r.zone, heldStep{at: time.Now()}); w != "" {
 			t.Errorf("the parent serves no DS, and the first signer's DS step waits for %q", w)
 		}
 	})
@@ -2356,8 +2368,15 @@ func newKeysWait(t *testing.T, zone string) *keysWait {
 		return nil, errors.New("no answer")
 	})
 	t.Cleanup(func() { servingKeysLookup = prev })
+	// the parent's DS RRset known, which the keys' step asks for once they
+	// have propagated (cachedDSTTL)
+	b := &r.conf.InternalMp.signerAdds
+	b.mu.Lock()
+	l := b.looksLocked(r.conf, zone)
+	l.parentOK, l.parentAt = true, time.Now()
+	b.mu.Unlock()
 	mint := signerAddStepsOf(Provider{Label: "a", Identity: signerAddSelf}, false)[1]
-	w.wait = func() string { return mint.wait(r.conf, zone, w.now) }
+	w.wait = func() string { return mint.wait(r.conf, zone, heldStep{at: w.now}) }
 	return w
 }
 
@@ -2919,17 +2938,17 @@ func TestTheCachesTimeWaitsForItsOwnLookAtTheParent(t *testing.T) {
 	prev := parentDSLook
 	parentDSLook = func(*Config, string) (parentDSSeen, error) { return parentDSSeen{}, errors.New("no answer") }
 	t.Cleanup(func() { parentDSLook = prev })
-	if got := caches.wait(r.conf, r.zone, long); !strings.Contains(got, "the parent") {
+	if got := caches.wait(r.conf, r.zone, heldStep{at: long}); !strings.Contains(got, "the parent") {
 		t.Fatalf("the parent not known, it waits for %q, want the parent", got)
 	}
 	r.parentLooks()
 	parentDSLook = func(*Config, string) (parentDSSeen, error) {
 		return parentDSSeen{ttl: time.Hour}, nil
 	}
-	if got := caches.wait(r.conf, r.zone, time.Now()); !strings.Contains(got, "the DS TTL") {
+	if got := caches.wait(r.conf, r.zone, heldStep{at: time.Now()}); !strings.Contains(got, "the DS TTL") {
 		t.Errorf("the DS TTL just begun, it waits for %q", got)
 	}
-	if got := caches.wait(r.conf, r.zone, time.Now().Add(-time.Hour-time.Second)); got != "" {
+	if got := caches.wait(r.conf, r.zone, heldStep{at: time.Now().Add(-time.Hour - time.Second)}); got != "" {
 		t.Errorf("the DS TTL passed, it waits for %q", got)
 	}
 }
@@ -3167,5 +3186,96 @@ func TestANameserverThatServesNoDNSKEYAtAnAddressIsNotServedByAnEarlierLook(t *t
 	answers = []servedAnswer{keys(v4), keys(v6)}
 	if !whole() {
 		t.Error("each of its addresses serves the RRset again: not whole, want whole")
+	}
+}
+
+// The DS step carries the TTL the parent served the zone's DS RRset with before
+// the joiner's DS was in it, and the caches step the larger of that and what has
+// been seen since. A restart in either step keeps it: the looks after it see only
+// the parent's new set, here at a shorter TTL, and the caches' time is still the
+// old set's TTL (CodeRabbit on #374).
+func TestTheCachesTimeHoldsTheOldDSTTLOverARestart(t *testing.T) {
+	r := newSignerAddRig(t, "restart.caches.adding.example.", "owner").thawed()
+	r.at(r.next(), signerAddAccept)
+	r.at(r.next(), signerAddMint)
+	r.parentTTL = 24 * time.Hour
+	r.keys(KeyStateActive, KeyStateActive)
+	st := r.next()
+	r.at(st, signerAddDS)
+	if st.TTL != 24*3600 {
+		t.Fatalf("the DS step carries TTL %d, want the parent's set's from before it, 86400", st.TTL)
+	}
+
+	r.restart()
+	tag := r.keys(KeyStateActive, KeyStateActive)
+	r.parent[tag], r.parentTTL = true, time.Minute
+	r.parentLooks()
+	r.next()
+	st = r.next()
+	r.at(st, signerAddCaches)
+	if st.TTL != 24*3600 {
+		t.Fatalf("after a restart in the DS step the caches step carries TTL %d, want 86400", st.TTL)
+	}
+
+	r.restart()
+	r.stepBegan(time.Now().Add(-2 * time.Minute))
+	for range 2 {
+		r.at(r.next(), signerAddCaches) // past the new set's TTL, not the old one's
+	}
+	r.stepBegan(time.Now().Add(-24*time.Hour - time.Second))
+	if st = r.next(); st.Taken[len(st.Taken)-1] != lastStepKey {
+		t.Fatalf("after the old set's TTL the step is %+v, want the last", st)
+	}
+}
+
+// A member keeps the TTL the leader's caches step carries, over a restart too,
+// and waits the caches' time by it once it leads: its own looks see only the
+// parent's new set, at a shorter TTL.
+func TestANewLeaderWaitsTheCachesTimeByTheStepsTTL(t *testing.T) {
+	r := newSignerAddRig(t, "newleader.caches.adding.example.", "owner")
+	r.lead(roleB, time.Now().Add(time.Hour))
+	r.n = jAt(t, 41, `servers="b" signers="b" nsmgmt="owner" parentsync="owner" suffix="n"`, freezeRecords...)
+	knownAs(t, r.store, r.zone, r.n)
+	r.v = jAt(t, 42, `servers="b" signers="a,b" nsmgmt="owner" parentsync="owner" suffix="n"`, freezeRecords...)
+	r.agree()
+	th := tells(r.v, r.v)
+	th.Thaw, th.Reconciling = &Thaw{From: sd(r.n), To: sd(r.v)}, true
+	r.hear(roleB, th, true)
+	r.conf.thawTurn(r.zone)
+	if r.active() != r.v.Serial {
+		t.Fatalf("not thawed on its leader's word: active %d", r.active())
+	}
+	joiner := Provider{Label: "a", Identity: roleA}
+	sets := rolesFor(r.n, r.n, 0)
+	sets.KeySigners, sets.KeyConfirmers = addProvider(sets.KeySigners, joiner), addProvider(sets.KeyConfirmers, joiner)
+	sets.Signing, sets.DSSigners = addProvider(sets.Signing, joiner), addProvider(sets.DSSigners, joiner)
+	key := func(part string) string { return signerAddKey + part + " " + canonicalName(roleA) }
+	caches := r.leaderStep(4, sets, []string{key(signerAddAccept), key(signerAddMint), key(signerAddDS), key(signerAddCaches)})
+	caches.Step.TTL = 24 * 3600
+	r.hear(roleB, caches, true)
+	r.conf.thawTurn(r.zone)
+	got, ok := r.step()
+	if !ok {
+		t.Fatal("no step held")
+	}
+	r.at(got, signerAddCaches)
+	if got.TTL != 24*3600 {
+		t.Fatalf("the member holds the caches step with TTL %d, want the leader's 86400", got.TTL)
+	}
+	r.restart()
+	if got, _ = r.step(); got.TTL != 24*3600 {
+		t.Fatalf("after a restart the member holds the caches step with TTL %d, want 86400", got.TTL)
+	}
+
+	r.lead(roleA, time.Now().Add(time.Hour))
+	tag := r.keys(KeyStateActive, KeyStateActive)
+	r.parent[tag], r.parentTTL = true, time.Minute
+	r.stepBegan(time.Now().Add(-2 * time.Minute))
+	for range 2 {
+		r.at(r.next(), signerAddCaches)
+	}
+	r.stepBegan(time.Now().Add(-24*time.Hour - time.Second))
+	if st := r.next(); st.Taken[len(st.Taken)-1] != lastStepKey {
+		t.Fatalf("the new leader after the step's TTL is at %+v, want the last step", st)
 	}
 }

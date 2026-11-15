@@ -125,6 +125,11 @@ type InstrStep struct {
 	Sets   json.RawMessage `json:"sets"`
 	Digest string          `json:"digest"`
 	Taken  []string        `json:"taken,omitempty"`
+	// TTL, in seconds, is the largest TTL of what a cache may still hold
+	// from before the step that its leader had seen when it took it: at a
+	// signer's DS and caches steps, the parent's DS RRset's (S18b). A
+	// leader that restarts, and a new one, wait by it. 0: none.
+	TTL uint32 `json:"ttl,omitempty"`
 }
 
 // InstrRemoval is a removal under way as an agent holds it (plan S12,
