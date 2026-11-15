@@ -217,7 +217,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 					}
 					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 					defer cancel()
-					msg, err := pingOn(ctx, conf.InternalMp.TransportManager, peer, useAPI)
+					msg, err := pingOn(ctx, conf.InternalMp.TransportManager, peer, useAPI, conf.pingOverDNSAllowed(peer.ID))
 					if err != nil {
 						resp.Error = true
 						resp.ErrorMsg = fmt.Sprintf("ping to %s: %v", toFqdn, err)

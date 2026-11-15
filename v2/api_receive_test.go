@@ -252,8 +252,9 @@ func TestAPIReceive_EndpointTakesOnlyItsVerbs(t *testing.T) {
 	}
 }
 
-// A bridge without the DNS mechanism registers no CHUNK NOTIFY handler, and
-// still has the receive pipeline for the HTTPS entry.
+// A bridge without the DNS mechanism, and with no signer or combiner of its
+// own, has no DNS transport and registers no CHUNK NOTIFY handler. It still
+// has the receive pipeline for the HTTPS entry.
 func TestBridge_WithoutDNSRegistersNoChunkNotifyHandler(t *testing.T) {
 	id := "api-only.agent.example."
 	mp := &MultiProviderConf{Identity: id}

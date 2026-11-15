@@ -521,6 +521,12 @@ func notifyPeersParentSyncDone(conf *Config, zonename string, result string, msg
 		lg.Debug("notifyPeersParentSyncDone: no TransportManager, skipping peer notification", "zone", zonename)
 		return
 	}
+	// STATUS-UPDATE goes over DNS only, and DNS goes to other agents only
+	// with the DNS mechanism.
+	if !tm.isTransportSupported("dns") {
+		lg.Debug("notifyPeersParentSyncDone: the DNS mechanism is not enabled, skipping peer notification", "zone", zonename)
+		return
+	}
 
 	agents, err := tm.getAllAgentsForZone(ZoneName(zonename))
 	if err != nil {

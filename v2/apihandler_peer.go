@@ -140,6 +140,16 @@ func APIpeer(conf *Config, tm *transport.TransportManager, ar *AgentRegistry) fu
 	}
 }
 
+// pingOverDNSAllowed says whether a ping may go to peerID over DNS: on an
+// agent without the DNS mechanism only to its own signer and combiner
+// (dnsWith). A role without a bridge has nothing to say against it.
+func (conf *Config) pingOverDNSAllowed(peerID string) bool {
+	if b := conf.InternalMp.MPTransport; b != nil {
+		return b.dnsWith(peerID)
+	}
+	return true
+}
+
 // doPeerPing pings any known peer via DNS CHUNK or API, over that
 // transport only (pingOn).
 // Role-agnostic: works for agent, combiner, signer, or any role
@@ -173,7 +183,7 @@ func doPeerPing(conf *Config, peerID string, useAPI bool) *PeerResponse {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	msg, err := pingOn(ctx, tm, peer, useAPI)
+	msg, err := pingOn(ctx, tm, peer, useAPI, conf.pingOverDNSAllowed(peer.ID))
 	if err != nil {
 		resp.Error = true
 		resp.ErrorMsg = fmt.Sprintf("ping to %s: %v", peerID, err)
@@ -188,8 +198,9 @@ func doPeerPing(conf *Config, peerID string, useAPI bool) *PeerResponse {
 // peer's certificate is checked against its TLSA, this node presents its
 // client certificate, and the address dialed is the one discovery found.
 // Over DNS it is the address the DNS carrier dials. It returns the text of
-// the reply, which names the transport.
-func pingOn(ctx context.Context, tm *transport.TransportManager, peer *transport.Peer, useAPI bool) (string, error) {
+// the reply, which names the transport. dnsAllowed says whether DNS may carry
+// it to this peer (pingOverDNSAllowed).
+func pingOn(ctx context.Context, tm *transport.TransportManager, peer *transport.Peer, useAPI, dnsAllowed bool) (string, error) {
 	nonce := make([]byte, 8)
 	if _, err := rand.Read(nonce); err != nil {
 		return "", fmt.Errorf("ping nonce: %w", err)
@@ -210,6 +221,8 @@ func pingOn(ctx context.Context, tm *transport.TransportManager, peer *transport
 		pingResp, err = tm.APITransport.Ping(ctx, peer, req)
 	case tm.DNSTransport == nil:
 		return "", fmt.Errorf("DNS transport not configured")
+	case !dnsAllowed:
+		return "", fmt.Errorf("the DNS mechanism is not enabled: only this agent's own signer and combiner are reached over DNS")
 	default:
 		pingResp, err = tm.DNSTransport.Ping(ctx, peer, req)
 	}

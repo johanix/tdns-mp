@@ -328,6 +328,10 @@ func combinerSendConfirmation(tm *MPTransportBridge, senderID string, resp *Comb
 		lgCombiner.Warn("cannot send confirmation, peer not in registry", "sender", senderID)
 		return
 	}
+	if !tm.dnsWith(peer.ID) {
+		lgCombiner.Warn("cannot send confirmation, DNS does not go to this peer", "sender", senderID)
+		return
+	}
 
 	// Map combiner status strings to transport ConfirmStatus
 	status := transport.ConfirmSuccess
