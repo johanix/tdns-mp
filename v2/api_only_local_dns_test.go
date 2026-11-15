@@ -258,3 +258,46 @@ func TestAnAgentWithoutDNSBeatsItsSigner(t *testing.T) {
 		t.Fatalf("the beat to the signer: resp %+v, err %v", resp, err)
 	}
 }
+
+// An agent without the DNS mechanism sends no application message over DNS to
+// a peer that is not its own signer or combiner, whatever path asks for it (an
+// operator's inject, a STATUS-UPDATE): its DNS transport is for those two. With
+// the mechanism the same send goes. The other end is a signer's bridge, which
+// takes a KEYSTATE, and not this agent's signer.
+func TestAnAgentWithoutDNSSendsNoAppMessageToAnotherPeerOverDNS(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	other := newPeer(t, localDNSOtherID, "edns0", &integEnvConfig{Role: roleSigner, ControlZoneIsIdentity: true, AuthorizedPeers: []string{localDNSAgentID}})
+	other.Bridge.StartIncomingMessageRouter(ctx)
+	host, port := parseHostPort(serveDNSOn(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		_ = other.Bridge.ChunkHandler.RouteViaRouter(ctx, r.Question[0].Name, r, w)
+	}), 53)
+	zone := "sent.local-dns.example."
+	for _, tc := range []struct {
+		name       string
+		mechanisms []string
+		sent       bool
+	}{
+		{"api only", []string{"api"}, false},
+		{"api and dns", []string{"api", "dns"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := localDNSAgent(t, "127.0.0.1:53", tc.mechanisms...)
+			otherAt := transport.NewPeer(localDNSOtherID)
+			setDNSCarrier(t, otherAt, &transport.Address{Host: host, Port: port, Transport: "udp"})
+			sctx, scancel := context.WithTimeout(ctx, integTestTimeout)
+			defer scancel()
+			_, err := agent.Bridge.sendKeystate(sctx, otherAt, injectKeystateRequest(localDNSAgentID, zone))
+			switch {
+			case tc.sent && err != nil:
+				t.Fatalf("the KEYSTATE over DNS: %v", err)
+			case !tc.sent && (err == nil || !strings.Contains(err.Error(), "not enabled")):
+				t.Fatalf("the KEYSTATE over DNS: err %v, want it refused here", err)
+			}
+			_, heard := recvWithin(other.MsgQs.KeystateInventory, 200*time.Millisecond)
+			if heard != tc.sent {
+				t.Fatalf("the other peer heard the KEYSTATE: %v, want %v", heard, tc.sent)
+			}
+		})
+	}
+}

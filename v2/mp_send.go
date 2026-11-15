@@ -263,6 +263,11 @@ func (tm *MPTransportBridge) sendAppDNS(ctx context.Context, peer *transport.Pee
 	if tm.DNSTransport == nil {
 		return nil, fmt.Errorf("%s: no DNS transport available", msg.TypeToken)
 	}
+	// the DNS transport of an agent without the DNS mechanism is for its own
+	// signer and combiner only
+	if !tm.dnsWith(peer.ID) {
+		return nil, fmt.Errorf("%s: the DNS mechanism is not enabled, and %s is not this agent's signer or combiner", msg.TypeToken, peer.ID)
+	}
 	return tm.DNSTransport.SendApp(ctx, peer, msg)
 }
 
