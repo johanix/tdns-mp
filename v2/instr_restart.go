@@ -257,7 +257,9 @@ func (conf *Config) leadersWord(v *restartView, newest *heldSerial, told map[str
 // neither: the older may be one a leaving member has not moved on from. A
 // telling not heard lately stops only an older serial: a serial told stays told
 // (design 3.7), and a member gone on an older one says nothing against this
-// one.
+// one. A serial told that this agent does not hold, by one that neither leads
+// the zone nor votes under its newest serial, stops nothing: it is not asked
+// of such a member, and its vote cannot be checked.
 func (conf *Config) votersWord(v *restartView, told map[string]toldStamp, now time.Time) {
 	s := conf.InternalMp.Instructions
 	mp := conf.MpConfig()
