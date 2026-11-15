@@ -115,7 +115,11 @@ type PeerKeystateRequest struct {
 	// Hold: with Signal "inventory", the signer's word that it holds the
 	// zone's key machine (plan S6); the agent's word is the hand-over's
 	// (Acting.Sets.Hold, S11)
-	Hold      bool
+	Hold bool
+	// Signs and Withheld: with Signal "inventory", that the signer serves its
+	// own signatures, and that it withholds the zone (plan S18b).
+	Signs     bool
+	Withheld  bool
 	Timestamp time.Time // Request timestamp
 }
 

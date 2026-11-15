@@ -1340,6 +1340,8 @@ func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage
 		Rollover:   payload.Rollover,
 		WaitsOn:    payload.WaitsOn,
 		Hold:       payload.Hold,
+		Signs:      payload.Signs,
+		Withheld:   payload.Withheld,
 		seq:        keystateInventorySeq.Add(1),
 	}
 	// a signer that runs the zone's key lifecycle gets what the other

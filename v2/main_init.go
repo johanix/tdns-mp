@@ -183,14 +183,6 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 		return fmt.Errorf("the hand-overs held: %w", err)
 	}
 	actingHeld.Store(acting)
-	// What it last acted by with nothing handed (signer_acted.go, until P5),
-	// which the zones' first load reads too.
-	acted, err := loadSignerActed(conf.InternalMp.HsyncDB)
-	if err != nil {
-		return fmt.Errorf("the sets the signer last acted by: %w", err)
-	}
-	signerActed.Store(acted)
-	conf.ForEachMPZone(func(zd *MPZoneData) { zd.restoreSignerActed(mp) })
 	// The zones whose key machine the agent holds (plan S6), kept over a
 	// restart.
 	holds, err := loadSignerHolds(conf.InternalMp.HsyncDB)
@@ -261,6 +253,9 @@ func (conf *Config) initMPSigner(mp *MultiProviderConf) error {
 		return fmt.Errorf("RegisterSignerChunkHandler: %w", err)
 	}
 	conf.InternalMp.CombinerState = signerState
+
+	// Wire GetPeerAddress callback for a NOTIFY that names no endpoint
+	signerState.SetGetPeerAddress(peerAddressLookup(tm.PeerRegistry))
 
 	// Wire chunk handler into TM; the transport fetches query-mode records
 	signerState.ChunkHandler().Transport = tm.DNSTransport
@@ -565,15 +560,9 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 		chunkMode = "edns0"
 	}
 
-	var chunkQueryEndpoint string
-	var chunkQueryEndpointInNotify bool
-	if chunkMode == "query" {
-		cep := strings.TrimSpace(mp.Dns.ChunkQueryEndpoint)
-		if cep != "include" && cep != "none" {
-			return fmt.Errorf("agent.dns.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", mp.Dns.ChunkQueryEndpoint)
-		}
-		chunkQueryEndpointInNotify = (cep == "include")
-		chunkQueryEndpoint = buildAgentChunkQueryEndpoint(mp)
+	chunkQueryEndpoint, chunkQueryEndpointInNotify, err := chunkQueryEndpoints("agent", mp, chunkMode)
+	if err != nil {
+		return err
 	}
 
 	// Initialize PayloadCrypto for secure CHUNK transport (optional)
@@ -652,11 +641,13 @@ func (conf *Config) initMPAgent(mp *MultiProviderConf) error {
 	catchUp := newCatchUpTracker(AgentId(mp.Identity), conf.mpZoneNames(), catchUpOutageFor(mp))
 	catchUp.wire(conf, tm, conf.InternalMp.AgentRegistry)
 	conf.InternalMp.CatchUp, tm.catchUp = catchUp, catchUp
-	// the DS set of a zone our own signer does not own (Amendment 2), and
-	// the other providers' word on the one it owns (#207)
+	// the DS set of a zone our own signer does not own (Amendment 2), the
+	// other providers' word on the one it owns (#207), and whether our own
+	// keys count in it (plan S13)
 	if o := conf.InternalMp.KeyLifecycleOwner; o != nil {
 		o.SetComputedDSSource(conf.computedDSIntent)
 		o.SetForeignDSCheck(conf.foreignDSWithheld)
+		o.SetOwnDSCheck(conf.inDSSigners)
 	}
 	conf.InternalMp.TransportManager = tm.TransportManager
 	conf.InternalMp.AgentRegistry.TransportManager = tm.TransportManager
@@ -717,15 +708,9 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 		chunkMode = "edns0"
 	}
 
-	var chunkQueryEndpoint string
-	var chunkQueryEndpointInNotify bool
-	if chunkMode == "query" {
-		cep := strings.TrimSpace(mp.Dns.ChunkQueryEndpoint)
-		if cep != "include" && cep != "none" {
-			return fmt.Errorf("auditor.dns.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", mp.Dns.ChunkQueryEndpoint)
-		}
-		chunkQueryEndpointInNotify = (cep == "include")
-		chunkQueryEndpoint = buildAgentChunkQueryEndpoint(mp)
+	chunkQueryEndpoint, chunkQueryEndpointInNotify, err := chunkQueryEndpoints("auditor", mp, chunkMode)
+	if err != nil {
+		return err
 	}
 
 	var payloadCrypto *transport.PayloadCrypto
@@ -788,7 +773,32 @@ func (conf *Config) initMPAuditor(mp *MultiProviderConf) error {
 	return nil
 }
 
-// buildAgentChunkQueryEndpoint builds the CHUNK query endpoint (host:port) from agent DNS config.
+// chunkQueryEndpoints is where this agent or auditor answers CHUNK queries,
+// and whether every NOTIFY names it. The endpoint is set in every chunk
+// mode: in edns0 mode a NOTIFY whose payload does not fit one DNS message
+// goes by query and names it (tdns-transport #50), so that the receiver need
+// not look the sender's address up. Whether every NOTIFY names it is the
+// query-mode setting chunk_query_endpoint, "include" or "none".
+func chunkQueryEndpoints(role string, mp *MultiProviderConf, chunkMode string) (endpoint string, inNotify bool, err error) {
+	endpoint = buildAgentChunkQueryEndpoint(mp)
+	if chunkMode != "query" {
+		return endpoint, false, nil
+	}
+	cep := strings.TrimSpace(mp.Dns.ChunkQueryEndpoint)
+	if cep != "include" && cep != "none" {
+		return "", false, fmt.Errorf("%s.dns.chunk_mode=query requires chunk_query_endpoint \"include\" or \"none\" (got %q)", role, mp.Dns.ChunkQueryEndpoint)
+	}
+	if cep == "include" && endpoint == "" {
+		lgTransport.Warn("chunk_query_endpoint is include, but with no dns.addresses.publish a NOTIFY names no endpoint: receivers ask at the address they have for this peer", "role", role)
+	}
+	return endpoint, cep == "include", nil
+}
+
+// buildAgentChunkQueryEndpoint builds the CHUNK query endpoint (host:port) from agent DNS config:
+// the first published address. A listen address is none: where the agent
+// binds says nothing of where another host can reach it, and a receiver
+// dials a named endpoint before the address it has for this agent. With
+// nothing published there is no endpoint, and a receiver asks at that address.
 func buildAgentChunkQueryEndpoint(mp *MultiProviderConf) string {
 	if mp == nil {
 		return ""
@@ -802,16 +812,13 @@ func buildAgentChunkQueryEndpoint(mp *MultiProviderConf) string {
 	if len(dnsConf.Addresses.Publish) > 0 {
 		host = strings.TrimSpace(dnsConf.Addresses.Publish[0])
 	}
-	if host == "" && len(dnsConf.Addresses.Listen) > 0 {
-		host = strings.TrimSpace(dnsConf.Addresses.Listen[0])
-	}
 	if host == "" {
 		return ""
 	}
 	if _, _, err := net.SplitHostPort(host); err == nil {
 		return host
 	}
-	return net.JoinHostPort(host, strconv.Itoa(int(port)))
+	return net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(int(port)))
 }
 
 // warnConfiguredAPIEndpoint says that a configured agent's api_base_url is

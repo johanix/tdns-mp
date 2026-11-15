@@ -41,6 +41,12 @@ type MPKeyLifecycleOwner struct {
 	// provider's agent sent this agent put at the parent, and the inventory
 	// leaves out (tdns-mp #207). nil on every other role.
 	withheld func(zone string, inv []tdns.KeyInventoryItem) string
+	// ownDS is the agent's word on its own rows in that inventory: false
+	// while this provider is not in the step's DSSigners, whose KSKs alone
+	// have a DS (plan S13). A joiner's first KSK is active, with ds=1, from
+	// its keys step, and enters them at its DS step (reading 21). nil on
+	// every other role.
+	ownDS func(zone string) bool
 	// configured is the signer's side: the zones its config hands to the
 	// machine (key-lifecycle-zones), read at every call. Such a zone is
 	// owned from the signer's start, taken or not, once it has keys to
@@ -82,6 +88,35 @@ func (o *MPKeyLifecycleOwner) foreignDSCheck() func(zone string, inv []tdns.KeyI
 	o.mu.RLock()
 	defer o.mu.RUnlock()
 	return o.withheld
+}
+
+// SetOwnDSCheck installs the agent's word on whether its own KSKs count in
+// the DS set from its own signer's inventory; the agent's start does this,
+// no other role.
+func (o *MPKeyLifecycleOwner) SetOwnDSCheck(f func(zone string) bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.ownDS = f
+}
+
+// ownDSCounts: this provider's own rows count in the zone's DS set; true
+// on every role but the agent's.
+func (o *MPKeyLifecycleOwner) ownDSCounts(zone string) bool {
+	o.mu.RLock()
+	f := o.ownDS
+	o.mu.RUnlock()
+	return f == nil || f(zone)
+}
+
+// foreignRows are the inventory's rows of the other providers' keys.
+func foreignRows(inv []tdns.KeyInventoryItem) []tdns.KeyInventoryItem {
+	var out []tdns.KeyInventoryItem
+	for _, it := range inv {
+		if it.State == KeyStateForeign {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 // NewMPKeyLifecycleOwner: keyDB is looked up at call time, since the
@@ -289,7 +324,10 @@ func (o *MPKeyLifecycleOwner) Command(verb string) string {
 
 // DSIntent is the owned zone's DS set from the key columns: one DS per SEP
 // row with ds=1, own and foreign alike (D4). A SEP row whose ds is unset
-// makes the answer unknown: nobody has decided that key's DS yet.
+// makes the answer unknown: nobody has decided that key's DS yet. At the
+// agent its own rows count only while its provider is in the step's
+// DSSigners, as the foreign rows' ds follows them at the signer; with no
+// SEP row left the answer is unknown, and the parent's DS is left alone.
 func (o *MPKeyLifecycleOwner) DSIntent(zd *tdns.ZoneData, digest uint8) (tdns.DSIntent, error) {
 	if zd == nil {
 		return tdns.DSIntent{}, nil
@@ -309,6 +347,9 @@ func (o *MPKeyLifecycleOwner) DSIntent(zd *tdns.ZoneData, digest uint8) (tdns.DS
 				lgEngine.Warn("the DS set from the signer's inventory is held back; the parent's DS is left as it is", "zone", zd.ZoneName, "why", why)
 				return tdns.DSIntent{}, nil
 			}
+		}
+		if !o.ownDSCounts(zd.ZoneName) {
+			inv = foreignRows(inv)
 		}
 	} else if computed != nil {
 		// the agent, for a zone its own signer does not own: what the

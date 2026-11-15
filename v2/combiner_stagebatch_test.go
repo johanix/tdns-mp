@@ -244,6 +244,40 @@ func TestCombineServesTheSignatureTXTOnce(t *testing.T) {
 	}
 }
 
+// A combiner whose provider holds keys and does not sign the zone applies its
+// DNSKEYs alone, and serves no signature TXT (CodeRabbit on #374).
+func TestAKeyHoldingCombinerServesNoSignatureTXT(t *testing.T) {
+	const zone = "combine-sig-keys.example."
+	mpzd := combinerTestZone(t, zone)
+	mpzd.MP.MPdata = &MPdata{ZoneSigned: true, WeHoldKeys: true}
+	conf := &MultiProviderConf{
+		Identity:        "combiner.example.",
+		Signature:       "combined by {identity} for {zone}",
+		CombinerOptions: map[CombinerOption]bool{CombinerOptAddSignature: true},
+	}
+	if _, _, err := mpzd.combineAndPublish(conf); err != nil {
+		t.Fatalf("combineAndPublish: %v", err)
+	}
+	if got := servedNames(t, mpzd.ZoneData, "hsync-signature."+zone, dns.TypeTXT); len(got) != 0 {
+		t.Fatalf("a key-holding combiner serves the signature TXT %v", got)
+	}
+	mpzd.MP.MPdata = &MPdata{ZoneSigned: true, WeAreSigner: true, WeHoldKeys: true}
+	if _, _, err := mpzd.combineAndPublish(conf); err != nil {
+		t.Fatalf("combineAndPublish as the signer: %v", err)
+	}
+	if got := servedNames(t, mpzd.ZoneData, "hsync-signature."+zone, dns.TypeTXT); len(got) != 1 {
+		t.Fatalf("the signer's combiner serves the signature TXT %v, want it once", got)
+	}
+	// a hand-over makes it a key holder again: the TXT it served goes
+	mpzd.MP.MPdata = &MPdata{ZoneSigned: true, WeHoldKeys: true}
+	if changed, _, err := mpzd.combineAndPublish(conf); err != nil || !changed {
+		t.Fatalf("combineAndPublish as a key holder again: changed=%v err=%v", changed, err)
+	}
+	if mpzd.ZoneData.NameExists("hsync-signature." + zone) {
+		t.Fatal("the signature TXT served while it signed is still served now it holds keys only")
+	}
+}
+
 // The pre-refresh combine runs the same code on the incoming zone, which has
 // published nothing: the batch writes Data and publishes nothing, and the
 // refresh publish that consumes Data serves it.

@@ -127,6 +127,7 @@ func (conf *Config) StartMPSigner(ctx context.Context, apirouter *mux.Router) er
 		// holds, and the agent hands it what it does not (plan S11)
 		go conf.reportSignerStart(ctx)
 	}
+	go conf.runSignerRoles(ctx)
 
 	tdns.StartEngineNoError(&tdns.Globals.App, "SignerMsgHandler",
 		func() { SignerMsgHandler(ctx, conf, conf.InternalMp.MsgQs) })

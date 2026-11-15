@@ -56,6 +56,8 @@ type KeystateInventoryMsg struct {
 	Rollover   bool
 	WaitsOn    map[uint16][]string
 	Hold       bool // the signer holds the zone's key machine (plan S6)
+	Signs      bool // the signer serves its own signatures (plan S18b)
+	Withheld   bool // the signer withholds the zone until it knows its role (plan S18b)
 	// seq: the order the agent's transport received it in; 0 for one that
 	// was not counted. An inventory older than the zone's recorded one is
 	// not recorded (noteKeyInventory): an RFI's answer can reach the engine

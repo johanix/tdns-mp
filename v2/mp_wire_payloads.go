@@ -137,7 +137,12 @@ type DnsKeystatePayload struct {
 	// Hold: with Signal "inventory", the signer's word that it holds the
 	// zone's key machine (plan S6); the agent's word is the hand-over's
 	// (Acting.Sets.Hold, S11).
-	Hold      bool   `json:"Hold,omitempty"`
+	Hold bool `json:"Hold,omitempty"`
+	// Signs and Withheld: with Signal "inventory", that the signer serves its
+	// own signatures, and that it withholds the zone until it knows its role
+	// (plan S18b).
+	Signs     bool   `json:"Signs,omitempty"`
+	Withheld  bool   `json:"Withheld,omitempty"`
 	Owned     bool   `json:"Owned,omitempty"` // the sender's own state machine runs the zone's keys (S3): the inventory is the DS set's source (S5)
 	Time      string `json:"Time,omitempty"`  // RFC3339: for a propagated/rejected signal, when the distribution it answers was sent
 	Timestamp int64  `json:"timestamp"`       // Unix timestamp

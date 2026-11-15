@@ -142,9 +142,11 @@ type ZoneView struct {
 	Pending  map[string]bool
 	Rejected map[string]bool
 	// PropagationDelay plus ServedDnskeyTTL is the wait behind E5; Margin
-	// the wait behind E8.
+	// the wait behind E8. ServedTTLUnknown: nothing is known of the TTL yet,
+	// and E5 waits for it.
 	PropagationDelay time.Duration
 	ServedDnskeyTTL  time.Duration
+	ServedTTLUnknown bool
 	Margin           time.Duration
 	// ActiveOfRoleAndAlg reports another active key of the key's role and
 	// algorithm on this provider. RolloverRequested says the promotion is a
@@ -203,7 +205,11 @@ type ZoneView struct {
 	// nothing to wait for.
 	ParentKnown      bool
 	ParentServesNoDS bool
-	Now              time.Time
+	// SignsAtNaming: this provider signs the zone and serves nothing of it, so
+	// no NS record names it and no validator sees its signatures. With no active
+	// key of the role, its first goes straight to active (T2a, plan S18b).
+	SignsAtNaming bool
+	Now           time.Time
 }
 
 // allOtherSignersApplied is G1: every other signing provider has sent a
@@ -269,6 +275,9 @@ var KeyLifecycleTable = []Transition{
 	{"T1", "", EvMint, func(k KeyView, z ZoneView) bool {
 		return z.InPipeline < z.StandbyCount || z.LifetimeDue || z.NoActiveOfRole || (z.RolloverPending && z.InPipeline == 0) || (z.AlgRollPending && z.PolicyAlgKeys == 0)
 	}, KeyStateCreated, "minted through tdns's keystore, state and columns named; an algorithm rollover mints the policy's algorithm when no key of it is on its way or signing (O4)"},
+	{"T2a", KeyStateCreated, EvDistributed, func(k KeyView, z ZoneView) bool {
+		return z.SignsAtNaming && z.NoActiveOfRole
+	}, KeyStateActive, "the first key of its role of a provider no NS record names: nothing validates by it yet, so there is nothing to propagate first. The distribution recorded as on T2; what must wait is the provider's DS and its NS records, the leader's steps"},
 	{"T2", KeyStateCreated, EvDistributed, nil, KeyStateMpdist, "the distribution recorded with the signing providers expected to confirm"},
 	{"T3", KeyStateMpdist, EvApplied, func(k KeyView, z ZoneView) bool { return allOtherSignersApplied(z) }, KeyStatePublished, "published_at stamped"},
 	{"T3'", KeyStateMpdist, EvDistributed, func(k KeyView, z ZoneView) bool { return len(z.OtherSigners) == 0 }, KeyStatePublished, "no other signing provider: at once"},
@@ -280,7 +289,7 @@ var KeyLifecycleTable = []Transition{
 	{"T7'", KeyStatePublished, CmdWithdraw, nil, KeyStateMpremove, "a served key given up on: the removal distributed"},
 	{"T7''", KeyStateStandby, CmdWithdraw, nil, KeyStateMpremove, "as T7'"},
 	{"T8", KeyStatePublished, EvPropagated, func(k KeyView, z ZoneView) bool {
-		return !k.PublishedAt.IsZero() && !z.Now.Before(k.PublishedAt.Add(z.PropagationDelay+z.ServedDnskeyTTL))
+		return !z.ServedTTLUnknown && !k.PublishedAt.IsZero() && !z.Now.Before(k.PublishedAt.Add(z.PropagationDelay+z.ServedDnskeyTTL))
 	}, KeyStateStandby, "a KSK's ds=1 puts its DS into the zone's DS set"},
 	{"T9", KeyStateStandby, EvPromote, func(k KeyView, z ZoneView) bool {
 		return (!z.ActiveOfRoleAndAlg || z.RolloverRequested || z.AlgRollInFlight) && !distributionIncomplete(z) && parentDSWaitMet(k, z)
@@ -325,9 +334,11 @@ var KeyLifecycleTable = []Transition{
 // has nothing to wait for (O2, the first signing). A ZSK has no DS. The wait
 // holds whatever asked for the promotion. Unknown is not "no DS", and it is
 // not the TTL having passed either: a parent that could not be asked on
-// this tick keeps the key waiting, however old the note.
+// this tick keeps the key waiting, however old the note. A provider no NS
+// record names, with no active KSK, has nothing to wait for either: no validator
+// reaches it, and its DS goes to the parent at a step that waits for this key.
 func parentDSWaitMet(k KeyView, z ZoneView) bool {
-	if !k.SEP {
+	if !k.SEP || z.SignsAtNaming && z.NoActiveOfRole {
 		return true
 	}
 	if !z.ParentKnown {

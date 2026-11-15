@@ -15,12 +15,20 @@ import (
 
 // combinerShouldApplyEdits returns true if this combiner is allowed to
 // apply contributions to the live zone. Non-signer combiners on signed
-// zones persist data but do not modify the zone.
+// zones persist data but do not modify the zone; one whose provider is on its
+// way in applies what canApply lets it (plan S18b).
 func (zd *MPZoneData) combinerShouldApplyEdits() bool {
-	if zd.MP != nil && zd.MP.MPdata != nil && zd.MP.MPdata.ZoneSigned && !zd.MP.MPdata.WeAreSigner {
+	if zd.MP != nil && zd.MP.MPdata != nil && zd.MP.MPdata.ZoneSigned && !zd.MP.MPdata.WeAreSigner && !zd.MP.MPdata.WeHoldKeys {
 		return false
 	}
 	return true
+}
+
+// combinerHoldsKeysOnly: on a signed zone whose provider holds keys and does
+// not sign, the combiner applies DNSKEYs alone (canApply), and serves no
+// signature TXT either.
+func (zd *MPZoneData) combinerHoldsKeysOnly() bool {
+	return zd.MP != nil && zd.MP.MPdata != nil && zd.MP.MPdata.ZoneSigned && !zd.MP.MPdata.WeAreSigner && zd.MP.MPdata.WeHoldKeys
 }
 
 // Named presets for allowed RRtypes. Hardcoded for safety.
@@ -307,6 +315,7 @@ type combineInput struct {
 	deferred        []ownerRRtype // cleanups put off until the upstream's apex is known
 	signatureOwner  string
 	signature       dns.RR // the signature TXT to serve, nil when the option is off
+	dropSignature   bool   // a key holder's combiner serves none: one served before goes
 }
 
 func (mpzd *MPZoneData) combineInput(conf *MultiProviderConf) *combineInput {
@@ -341,15 +350,19 @@ func (mpzd *MPZoneData) combineInput(conf *MultiProviderConf) *combineInput {
 	}
 	in.cleanups = mpzd.MP.takeCleanups()
 	if conf != nil && conf.CombinerOptions[CombinerOptAddSignature] && conf.Signature != "" {
-		sig := strings.ReplaceAll(conf.Signature, "{identity}", conf.Identity)
-		sig = strings.ReplaceAll(sig, "{zone}", mpzd.ZoneName)
 		// At hsync-signature.{zone}, to avoid conflicts with apex TXT records.
 		in.signatureOwner = "hsync-signature." + mpzd.ZoneName
-		rr, err := dns.NewRR(fmt.Sprintf("%s 300 IN TXT %q", in.signatureOwner, sig))
-		if err != nil {
-			lgCombiner.Error("combiner signature TXT does not parse", "zone", mpzd.ZoneName, "err", err)
+		if mpzd.combinerHoldsKeysOnly() {
+			in.dropSignature = true
 		} else {
-			in.signature = rr
+			sig := strings.ReplaceAll(conf.Signature, "{identity}", conf.Identity)
+			sig = strings.ReplaceAll(sig, "{zone}", mpzd.ZoneName)
+			rr, err := dns.NewRR(fmt.Sprintf("%s 300 IN TXT %q", in.signatureOwner, sig))
+			if err != nil {
+				lgCombiner.Error("combiner signature TXT does not parse", "zone", mpzd.ZoneName, "err", err)
+			} else {
+				in.signature = rr
+			}
 		}
 	}
 	return in
@@ -478,8 +491,19 @@ func cleanupInto(s tdns.Stager, in *combineInput) bool {
 	return changed
 }
 
-// injectSignatureInto serves the combiner's signature TXT, once.
+// injectSignatureInto serves the combiner's signature TXT, once; for a key
+// holder's combiner it takes out one served while its provider signed.
 func injectSignatureInto(s tdns.Stager, in *combineInput) bool {
+	if in.dropSignature {
+		if s.RRset(in.signatureOwner, dns.TypeTXT) == nil {
+			return false
+		}
+		s.Delete(in.signatureOwner, dns.TypeTXT)
+		if len(s.Types(in.signatureOwner)) == 0 {
+			s.DeleteOwner(in.signatureOwner)
+		}
+		return true
+	}
 	if in.signature == nil {
 		return false
 	}

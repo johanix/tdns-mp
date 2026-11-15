@@ -1334,6 +1334,7 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 		Rollover:   msg.Rollover,
 		WaitsOn:    msg.WaitsOn,
 		Hold:       msg.Hold,
+		Signs:      msg.Signs,
 		Received:   time.Now(),
 		seq:        msg.seq,
 	}
@@ -1373,6 +1374,11 @@ func (conf *Config) noteKeyInventory(ctx context.Context, zd *MPZoneData, msg *K
 	conf.InternalMp.SignerHandover.learned(zd.ZoneName, msg.Acting)
 	if conf.InternalMp.Instructions.activeUnknown(zd.ZoneName) {
 		conf.InternalMp.SignerHandover.holdLast(zd.ZoneName)
+	}
+	// its signer withholds the zone and this agent, which takes it from that
+	// signer, has no copy: it can hand it nothing, and says so (plan S18b)
+	if msg.Withheld && !zd.HasPublishedData() {
+		conf.InternalMp.SignerHandover.noCopy(zd.ZoneName)
 	}
 	// the signer's half of the zone's own read: the zone may be caught up
 	conf.InternalMp.CatchUp.ownReadDone(ZoneName(zd.ZoneName))

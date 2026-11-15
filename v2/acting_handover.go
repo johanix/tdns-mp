@@ -53,6 +53,13 @@ type ActingHandover struct {
 	// Refresh asks the combiner to refresh the zone from its upstream (the
 	// fetch down the provider's chain, design 3.1; S5a asks for it).
 	Refresh bool `json:"refresh,omitempty"`
+	// NoCopy: to the signer alone, kept by nobody. The agent has no copy of
+	// the zone, which it takes from this signer that withholds it: it can
+	// hand it nothing (plan S18b, signerAgentHasNoCopy).
+	NoCopy bool `json:"no_copy,omitempty"`
+	// Joining: to the signer alone. Its provider's keys-step of its joining is
+	// held: its keys go to the other signers once more (plan S18b, reading 20).
+	Joining bool `json:"joining,omitempty"`
 }
 
 // String names the hand-over by its serial, digest and step, for the log
@@ -641,6 +648,15 @@ func (t *handoverTracker) holdLast(zone string) {
 	t.send(send)
 }
 
+// noCopy tells the signer that this agent has no copy of the zone (plan S18b):
+// no hand-over, so nothing is kept of it here.
+func (t *handoverTracker) noCopy(zone string) {
+	if t == nil || !t.toSigner {
+		return
+	}
+	t.send(&handoverSend{h: &ActingHandover{Zone: zone, Phase: PhaseSteady, NoCopy: true, Made: time.Now()}, distID: transport.GenerateDistributionID(), quiet: true})
+}
+
 // holdHeld: the part holds what is wanted for the zone, and that carries
 // the hold.
 func (t *handoverTracker) holdHeld(zone string) bool {
@@ -751,7 +767,7 @@ func (conf *Config) handOverToParts(zone string) {
 		ts.holdLast(zone)
 		return
 	}
-	ts.handOver(h)
+	ts.handOver(conf.forOwnSigner(zone, h))
 }
 
 // startHandovers sets up the agent's side of the hand-over: when the agent

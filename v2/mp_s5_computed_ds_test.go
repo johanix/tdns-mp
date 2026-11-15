@@ -38,6 +38,7 @@ func newComputedDSRig(t *testing.T, zone string, signers []string) *computedDSRi
 	conf.SetMpConfig(&MultiProviderConf{Role: "agent", Identity: "agent.us.example."})
 	owner := NewMPKeyLifecycleOwner(func() *tdns.KeyDB { return nil })
 	owner.SetComputedDSSource(conf.computedDSIntent)
+	owner.SetOwnDSCheck(conf.inDSSigners) // as the agent's start installs it
 	conf.InternalMp.KeyLifecycleOwner = owner
 	conf.InternalMp.MPTransport = &MPTransportBridge{}
 	conf.InternalMp.AgentRegistry = &AgentRegistry{}

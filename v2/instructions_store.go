@@ -94,6 +94,8 @@ type zoneSerials struct {
 	StepWhat string          `json:"step_what,omitempty"`
 	Taken    []string        `json:"taken,omitempty"`
 	StepAt   time.Time       `json:"step_at,omitzero"`
+	// StepTTL is the TTL the step carries (InstrStep.TTL), in seconds.
+	StepTTL uint32 `json:"step_ttl,omitempty"`
 	// Pending: a transition to the active serial may be under way, and this
 	// agent holds no step's sets. It moved straight to the active serial
 	// (S7) or knew it by another's word (S9): it hands its parts nothing
@@ -667,7 +669,7 @@ func (s *InstructionStore) Activate(zone string, thaw Thaw) error {
 				return fmt.Errorf("zone %s: the sets held: %w", zone, err)
 			}
 		}
-		z.Step, z.Removals, z.Taken, z.StepOf, z.StepWhat, z.Excused = 0, nil, nil, 0, "", nil
+		z.Step, z.Removals, z.Taken, z.StepOf, z.StepWhat, z.StepTTL, z.Excused = 0, nil, nil, 0, "", 0, nil
 		z.Sets, z.StepAt, z.Pending, z.DoneAt = sets, time.Now(), false, time.Time{}
 		if straight {
 			z.Sets, z.Pending = nil, true
@@ -792,7 +794,7 @@ func (s *InstructionStore) Done(zone string) error {
 			return nil
 		}
 		z.From, z.Removals = nil, nil
-		z.Step, z.Sets, z.StepOf, z.StepWhat, z.Taken, z.StepAt, z.Pending = 0, nil, 0, "", nil, time.Time{}, false
+		z.Step, z.Sets, z.StepOf, z.StepWhat, z.Taken, z.StepAt, z.StepTTL, z.Pending = 0, nil, 0, "", nil, time.Time{}, 0, false
 		z.Excused, z.DoneAt = nil, time.Now()
 		return nil
 	})

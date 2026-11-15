@@ -26,6 +26,7 @@
 | r17 | 2026-10-12 | From the testbed run of #141 (the machine's algorithm roll of a three-signer cell): T9's algorithm-rollover clause promotes once. After the new algorithm's key signed, the standby the count minted of that algorithm was promoted on the old key's account, retiring the roll's key (T10), once per standby, until the old ZSK retired on T19. Now the clause holds only while no key of the policy's algorithm signs for the role. |
 | r18 | 2026-10-13 | From the review of #141's head: T10b fires only on a tick the parent answered without the DS (the parent unknown counts as neither, as for T9); a key inventory that cannot be read at a restart is an error, not an empty set (the withdrawal wait's notes are kept); a change of the owner's algorithm whose save fails leaves the policy as it was. |
 | r19 | 2026-10-13 | From the third re-review of #141: the lifetime that makes a rollover due (T1, T9) is the policy algorithm's own active key's. A key of another algorithm that still signs is waiting out T10b or T19; taking its age promoted the next standby of the new algorithm once the old key's lifetime had passed, rolling the new key again and leaving the old one. And T19's signature lifetime counts from the first key of the policy's algorithm to sign in this roll, so a rollover of the new key during the wait does not start it over. |
+| r20 | 2026-11-03 | The owner's ruling on a new signer's first keys (plan S18b, reading 21): T2a, and P1's and P2's exception. T20 and E16, added the same day and never on a rig past their PR, are gone: a joiner's keys stay as they are, and T6 sends them to the other signers once for its keys-step. |
 
 ## 1. States and columns
 
@@ -73,6 +74,7 @@ Each row: the state a key is in, the event, the guard that must hold, the next s
 | # | from | event | guard | to | side effects |
 |---|---|---|---|---|---|
 | T1 | — | E1 mint | fewer keys of the role in created..standby than the policy's standby count, or a lifetime due (the active key of the policy's algorithm past it; a key of another algorithm that still signs is waiting out T10b or T19, and its age counts for nothing), or no active key of the role, or a rollover requested (C3) with no key of the role in created..standby | created (0,0,0) | key generated through tdns's keystore (`GenerateKeypair` with the state and columns named) |
+| T2a | created | E2 distributed | this provider signs the zone and no NS record names it (`SignsAtNaming`), and it has no active key of the role | active (1,1,KSK 1) | *added 2026-11-03 (plan S18b, reading 21):* nothing validates by the key yet, so there is nothing to propagate first. The distribution recorded as on T2, so that E12 sends it again until the others have applied it; the key stays active whatever they answer. What must wait is the provider's DS and its NS records, the leader's steps. A provider new to a zone has these keys from tdns's `StartSigning`, active at once; this row is for a zone the machine runs already. |
 | T2 | created | E2 distributed | the key is in this provider's served RRset | mpdist (1,0,0) | the distribution recorded with the set of signing providers expected to confirm |
 | T3 | mpdist | E3 applied | every signing provider other than this one has confirmed applied, and none rejected (G1) | published (1,0,0) | `published_at` stamped |
 | T3' | mpdist | E2 distributed | no other signing provider (G2, §5.5) | published (1,0,0) | as T3, at once |
@@ -109,8 +111,8 @@ As implemented (r9): the row itself still comes from the zone as the signer rece
 
 | P | how the table keeps it |
 |---|---|
-| P1 no `sign=1` before every signing provider applied the key and the RRset propagated | only T9 sets `sign`, only from standby; standby only via T8 from published; published only via T3/T3' |
-| P2 no KSK `ds=1` before standby | only T8 sets `ds` |
+| P1 no `sign=1` before every signing provider applied the key and the RRset propagated | only T9 sets `sign`, only from standby; standby only via T8 from published; published only via T3/T3'. *Amended 2026-11-03 (the owner's ruling, design 5.1, plan S18b's reading 21):* except the first key of a role of a provider no NS record names, which is active from its birth (T2a, or tdns's `StartSigning`): no validator sees its signatures. The leader's keys' step waits for the zone's nameservers instead, before that provider's DS or NS. |
+| P2 no KSK `ds=1` before standby | only T8 sets `ds`. *Amended 2026-11-03:* except the key of T2a and one tdns made, adopted active with ds=1. The DS set the leader computes names only the providers in `DSSigners`, which that provider enters at its DS step, after its keys' step. |
 | P3 a foreign KSK has `ds=1` only if its provider signs and holds it standby, active or retired-not-withdrawn | §1's foreign row, from the provider's state on the wire (#58); NULL when the provider does not say |
 | P4 no key lost | every state has a way out; T15 re-sends what was in flight |
 | P5 one `sign=1` per role and algorithm per provider, except during an algorithm rollover | T9's guard |
@@ -118,7 +120,7 @@ As implemented (r9): the row itself still comes from the zone as the signer rece
 | P7 no other signing provider: mpdist → published at once | T3', T13' |
 | P8 a rejected key stays in mpdist, is reported, never promoted | T5; no row leaves mpdist on E4; the rejection sticks to the distribution (G1), so a later applied from the rejecter does not lift it, only C1 |
 | P9 pending never counts as applied | T4 |
-| P10 a SEP key is promoted only once the parent has served its DS for the DS TTL, or the parent serves no DS for the zone | T9's guard (O7); the harness checks every promotion against its parent's history |
+| P10 a SEP key is promoted only once the parent has served its DS for the DS TTL, or the parent serves no DS for the zone | T9's guard (O7); the harness checks every promotion against its parent's history *Amended 2026-11-03:* a provider no NS record names, with no active KSK, has no such wait: no validator reaches it, and its DS goes to the parent at a step that waits for this key. |
 
 ## 5. What this replaces
 
